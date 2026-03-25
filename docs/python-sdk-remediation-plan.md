@@ -177,7 +177,7 @@ correct but complex.
 
 ### H-3: HTTP method not validated in `_make_http_request`
 
-**Status:** Open
+**Status:** ✅ Resolved
 
 **Finding:**
 `getattr(self._session, method.lower())` accepts any string as `method`. A caller passing

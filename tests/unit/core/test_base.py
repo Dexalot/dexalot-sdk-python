@@ -1398,6 +1398,11 @@ class TestDexalotBaseClient:
         assert result == mock_cm
         client._session.get.assert_called_once_with("https://test.com")
 
+    async def test_make_http_request_invalid_method_raises(self, client):
+        """Test that an invalid HTTP method raises ValueError."""
+        with pytest.raises(ValueError, match="Unsupported HTTP method"):
+            await client._make_http_request("close", "https://test.com")
+
     async def test_rpc_call_retry_disabled(self, client):
         """Test _rpc_call when retry is disabled."""
         from web3 import AsyncWeb3

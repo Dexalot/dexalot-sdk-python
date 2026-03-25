@@ -31,6 +31,8 @@ from ..utils.result import Result
 from ..utils.retry import async_retry
 from .config import DexalotConfig
 
+_ALLOWED_HTTP_METHODS = frozenset({"get", "post", "put", "patch", "delete", "head", "options"})
+
 # Module-level caches (shared across all client instances)
 # These can be reconfigured via DexalotClient constructor parameters
 _STATIC_CACHE = MemoryCache(ttl_seconds=3600, max_size=128)  # 1 hour
@@ -413,6 +415,9 @@ class DexalotBaseClient:
         Raises:
             aiohttp.ClientError: On HTTP errors (after retries exhausted)
         """
+        if method.lower() not in _ALLOWED_HTTP_METHODS:
+            raise ValueError(f"Unsupported HTTP method: {method!r}")
+
         # Apply rate limiting if enabled
         if self._http_rate_limiter:
             await self._http_rate_limiter.acquire()
