@@ -557,7 +557,7 @@ The semaphore limit (10) should be configurable via `DexalotConfig`.
 
 ### P-5: `get_all_portfolio_balances` paginates sequentially
 
-**Status:** Open
+**Status:** ✅ Resolved
 
 **Finding:**
 The pagination loop in `_get_all_portfolio_balances_cached` makes one sequential RPC call per

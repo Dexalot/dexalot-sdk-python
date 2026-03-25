@@ -391,6 +391,32 @@ class TestTransferClient:
         assert "AVAX" in res.data
         assert res.data["AVAX"]["total"] == 1.0
 
+    async def test_get_all_portfolio_balances_parallel_batching(self, client):
+        """3 pages of data: all 3 should be fetched in a single parallel batch (not sequentially)."""
+        call_order: list[int] = []
+
+        def side_effect(addr, page):
+            mock_call = MagicMock()
+            if page < 3:
+                async def _call(p=page):
+                    call_order.append(p)
+                    return ([Utils.to_bytes32(f"TOK{p}")], [10**18], [10**18])
+                mock_call.call = _call
+            else:
+                async def _empty():
+                    call_order.append(page)
+                    return ([], [], [])
+                mock_call.call = _empty
+            return mock_call
+
+        client.portfolio_sub_contract.functions.getBalances.side_effect = side_effect
+        res = await client.get_all_portfolio_balances()
+        assert res.success
+        assert len(res.data) == 3
+        # All 3 data pages plus the first empty page (page 3) land in the first batch of 5
+        # — total calls should be exactly 5 (pages 0–4 in one gather)
+        assert set(call_order) == {0, 1, 2, 3, 4}
+
     async def test_add_gas(self, client):
         client.portfolio_sub_contract.functions.withdrawNative.return_value.fn_name = (
             "withdrawNative"
@@ -762,11 +788,15 @@ class TestTransferClient:
         assert "depositing" in result.error.lower()
 
     async def test_coverage_gaps(self, client):
+        # Pages 0-10 have data; page 11+ are empty — 11 tokens total
         def side_effect(addr, page):
             mock_call = MagicMock()
-            mock_call.call = AsyncMock(
-                return_value=([Utils.to_bytes32(f"T{page}")], [10**18], [10**18])
-            )
+            if page < 11:
+                mock_call.call = AsyncMock(
+                    return_value=([Utils.to_bytes32(f"T{page}")], [10**18], [10**18])
+                )
+            else:
+                mock_call.call = AsyncMock(return_value=([], [], []))
             return mock_call
 
         client.portfolio_sub_contract.functions.getBalances.side_effect = side_effect

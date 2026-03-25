@@ -538,36 +538,44 @@ class TransferClient(DexalotBaseClient):
             return Result.fail("Portfolio Subnet Contract not initialized.")
 
         try:
-            all_balances = {}
-            page = 0
-            while True:
-                data = await contract.functions.getBalances(query_address, page).call()
-                symbols_bytes = data[0]
-                totals = data[1]
-                availables = data[2]
+            all_balances: dict[str, dict[str, float]] = {}
+            _BATCH_SIZE = 5
+            _PAGE_HARD_CAP = 50
+            batch_start = 0
 
-                if not symbols_bytes:
+            while batch_start < _PAGE_HARD_CAP:
+                batch_pages = range(batch_start, min(batch_start + _BATCH_SIZE, _PAGE_HARD_CAP))
+                results = await asyncio.gather(
+                    *[contract.functions.getBalances(query_address, p).call() for p in batch_pages],
+                    return_exceptions=True,
+                )
+
+                got_empty = False
+                for data in results:
+                    if isinstance(data, BaseException):
+                        raise data
+                    symbols_bytes = data[0]
+                    if not symbols_bytes:
+                        got_empty = True
+                        break
+                    totals = data[1]
+                    availables = data[2]
+                    for i, sym_bytes in enumerate(symbols_bytes):
+                        symbol = Utils.from_bytes32(sym_bytes)
+                        decimals = self._get_token_decimals(symbol, self.subnet_chain_id)
+                        if decimals is None:
+                            decimals = self._get_token_decimals(symbol, self.chain_id) or 18
+                        total = totals[i] / (10**decimals)
+                        available = availables[i] / (10**decimals)
+                        all_balances[symbol] = {
+                            "total": total,
+                            "available": available,
+                            "locked": total - available,
+                        }
+
+                if got_empty:
                     break
-
-                for i, sym_bytes in enumerate(symbols_bytes):
-                    symbol = Utils.from_bytes32(sym_bytes)
-                    decimals = self._get_token_decimals(symbol, self.subnet_chain_id)
-                    if decimals is None:
-                        decimals = self._get_token_decimals(symbol, self.chain_id) or 18
-
-                    total = totals[i] / (10**decimals)
-                    available = availables[i] / (10**decimals)
-                    locked = total - available
-
-                    all_balances[symbol] = {
-                        "total": total,
-                        "available": available,
-                        "locked": locked,
-                    }
-
-                page += 1
-                if page > 10:
-                    break
+                batch_start += _BATCH_SIZE
 
             return Result.ok(all_balances)
 
