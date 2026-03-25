@@ -29,21 +29,22 @@ class AsyncRateLimiter:
         """
         Acquire a token, waiting if necessary to maintain the rate limit.
 
-        This method ensures that at least min_interval seconds have passed
-        since the last call. If not, it sleeps until the interval has elapsed.
+        Computes the required sleep time under the lock and speculatively
+        advances _last_call to reserve the slot, then releases the lock before
+        sleeping. This allows concurrent callers to each sleep independently
+        rather than queuing behind the lock for the full sleep duration.
         """
         async with self._lock:
             now = time.monotonic()
             elapsed = now - self._last_call
-
             if elapsed < self.min_interval:
                 sleep_time = self.min_interval - elapsed
-                await asyncio.sleep(sleep_time)
-                # Update last_call after sleeping
-                self._last_call = time.monotonic()
             else:
-                # No need to wait, update last_call immediately
-                self._last_call = now
+                sleep_time = 0.0
+            self._last_call = now + sleep_time
+
+        if sleep_time > 0:
+            await asyncio.sleep(sleep_time)
 
     def reset(self):
         """Reset the rate limiter (useful for testing or manual control)."""

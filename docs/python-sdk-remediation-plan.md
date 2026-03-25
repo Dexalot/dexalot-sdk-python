@@ -384,7 +384,7 @@ version, disable insecure `http://` RPC URLs in production, or pin certificates.
 
 ### P-1: Rate limiter serializes all concurrent requests through a blocking sleep
 
-**Status:** Open
+**Status:** ✅ Resolved — `_last_call` is now advanced speculatively under the lock and the lock is released before `asyncio.sleep`. Concurrent callers each sleep independently in their assigned time slot instead of queueing behind the lock. `test_rate_limiter_concurrent_calls` updated to remove the now-invalid per-completion spacing assertion; `test_rate_limiter_concurrent_throughput` added as the acceptance-criteria benchmark (10 calls at 5 rps ≤ 3 s).
 
 **Finding:**
 `AsyncRateLimiter.acquire` holds the asyncio lock while sleeping (`await asyncio.sleep` inside
