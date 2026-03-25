@@ -69,11 +69,11 @@ Unit tests in `tests/unit/` have no external dependencies. Integration tests in 
 ## Non-Obvious Decisions
 
 - **Private key handling**: After `Account` creation, `config.private_key` is zeroed out. Prefer passing a pre-built signer object so the raw key never touches the config at all.
-- **Cache key generation**: Uses `(func_name, args, frozenset(kwargs.items()))` — kwarg ordering affects cache hits; deep objects may produce false misses.
+- **Cache key generation**: Uses `(func_name, api_base_url, args[1:], frozenset(kwargs.items()))` — `self` is excluded; keys are namespaced by `api_base_url`. Kwarg ordering affects cache hits; deep objects may produce false misses.
 - **Config validation timing**: `config.validate()` must be called explicitly after construction; see above.
 - **Error sanitization is lossy**: Regex stripping makes production debugging harder. Use DEBUG logging in development.
 - **Python 3.12+ is required**: CI must enforce this. Match statements and PEP 695 generics are used throughout.
-- **Cache key for multi-env**: If you ever need simultaneous testnet/mainnet clients, the module-level caches will conflict — this is a known limitation.
+- **Cache key for multi-env**: Cache keys are namespaced by `api_base_url`, so simultaneous testnet/mainnet clients do not share cached data. Test suites that use module-level caches must clear them between tests (e.g. `_SEMI_STATIC_CACHE.clear()`) since the key is env-based, not instance-based.
 - **`timestamped_auth` flag**: `_get_auth_headers` supports timestamped signing (`f"dexalot{ts}"` + `x-timestamp` header) via `config.timestamped_auth = True` (env: `DEXALOT_TIMESTAMPED_AUTH=true`). Defaults to `False` — the backend currently only accepts the static `"dexalot"` message. Enable only after backend confirms timestamp window validation. See remediation plan C-2.
 
 ---
@@ -85,7 +85,10 @@ Security and performance issues are tracked in `docs/python-sdk-remediation-plan
 1. **One at a time** — fix issues individually (or closely related ones together)
 2. **Plan first** — enter plan mode to discuss approach before writing code; decide: resolve, mitigate, or skip
 3. **Implement** — update code based on the agreed approach
-4. **Test** — add unit tests covering the changes
+4. **Test** — add unit tests covering the changes; all of the following must pass before a change is ready:
+   - `make test` — unit tests
+   - `make lint` — ruff linting
+   - `make mypy` — strict type checking
 5. **Document** — update README.md and this CLAUDE.md as needed
 6. **Update plan doc** — mark the issue status (✅ Resolved / 🔶 Mitigated / ⏭️ Skipped) and add commit/PR reference
 

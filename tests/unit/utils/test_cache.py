@@ -1,8 +1,10 @@
+import gc
 import time
+import weakref
 
 import pytest
 
-from dexalot_sdk.utils.cache import MemoryCache, ttl_cached
+from dexalot_sdk.utils.cache import MemoryCache, async_ttl_cached, ttl_cached
 
 
 def test_memory_cache_set_get():
@@ -87,7 +89,6 @@ def test_ttl_cached_disabled_cache():
 
 @pytest.mark.asyncio
 async def test_async_ttl_cached_decorator():
-    from dexalot_sdk.utils.cache import async_ttl_cached
 
     cache = MemoryCache(ttl_seconds=0.1)
 
@@ -116,9 +117,63 @@ async def test_async_ttl_cached_decorator():
 
 
 @pytest.mark.asyncio
+async def test_async_ttl_cached_env_isolation():
+    """Cache keys are namespaced by api_base_url; two envs never share results."""
+
+    cache = MemoryCache(ttl_seconds=60)
+    call_count = 0
+
+    class MockClient:
+        def __init__(self, url, result):
+            self.api_base_url = url
+            self._cache_enabled = True
+            self._result = result
+
+        @async_ttl_cached(cache)
+        async def fetch(self):
+            nonlocal call_count
+            call_count += 1
+            return self._result
+
+    testnet = MockClient("https://api-dev.dexalot.com", "testnet-data")
+    mainnet = MockClient("https://api.dexalot.com", "mainnet-data")
+
+    assert await testnet.fetch() == "testnet-data"
+    assert await mainnet.fetch() == "mainnet-data"
+    assert call_count == 2  # each env caused a cache miss
+
+    # Second calls should be served from cache
+    assert await testnet.fetch() == "testnet-data"
+    assert await mainnet.fetch() == "mainnet-data"
+    assert call_count == 2  # no additional calls
+
+
+@pytest.mark.asyncio
+async def test_async_ttl_cached_no_strong_ref():
+    """Cache key must not hold a strong reference to self, allowing GC."""
+
+    cache = MemoryCache(ttl_seconds=60)
+
+    class MockClient:
+        api_base_url = "https://api.dexalot.com"
+        _cache_enabled = True
+
+        @async_ttl_cached(cache)
+        async def fetch(self):
+            return 42
+
+    client = MockClient()
+    ref = weakref.ref(client)
+    await client.fetch()
+
+    del client
+    gc.collect()
+    assert ref() is None, "Client instance should be garbage-collected after del"
+
+
+@pytest.mark.asyncio
 async def test_async_ttl_cached_disabled_cache():
     """Test async_ttl_cached when cache is disabled."""
-    from dexalot_sdk.utils.cache import async_ttl_cached
 
     cache = MemoryCache(ttl_seconds=60)
 

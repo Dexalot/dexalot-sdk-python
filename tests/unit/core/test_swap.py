@@ -3,7 +3,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from dexalot_sdk.core.base import DexalotBaseClient
+from dexalot_sdk.core.base import _SEMI_STATIC_CACHE, DexalotBaseClient
 from dexalot_sdk.core.config import DexalotConfig
 from dexalot_sdk.core.swap import SwapClient
 
@@ -13,6 +13,13 @@ class MockClient(SwapClient, DexalotBaseClient):
 
 
 class TestSwapClient:
+    @pytest.fixture(autouse=True)
+    def clear_cache(self):
+        """Clear shared module-level caches between tests to ensure isolation."""
+        _SEMI_STATIC_CACHE.clear()
+        yield
+        _SEMI_STATIC_CACHE.clear()
+
     @pytest.fixture
     def client(self):
         # Patch environment to ensure no invalid PRIVATE_KEY is loaded
@@ -937,13 +944,12 @@ class TestSwapClient:
 
     async def test_get_swap_pairs_cache_disabled(self, client):
         """Test get_swap_pairs with cache disabled to verify cache bypass logic."""
-        from dexalot_sdk.core.base import _SEMI_STATIC_CACHE
-
         # Disable cache
         client._cache_enabled = False
 
-        # Add something to cache
-        key = ("get_swap_pairs", (client, 43114), frozenset())
+        # Add something to cache using the current key format
+        env_key = getattr(client, "api_base_url", "") or ""
+        key = ("get_swap_pairs", env_key, (43114,), frozenset())
         _SEMI_STATIC_CACHE._store[key] = "cached_data"
 
         # Mock successful response

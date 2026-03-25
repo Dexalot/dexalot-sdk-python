@@ -101,7 +101,7 @@ The resulting signature is valid forever and replayable by anyone who intercepts
 
 ### H-1: Module-level shared caches cause cross-instance data leakage
 
-**Status:** Open
+**Status:** ✅ Resolved
 
 **Finding:**
 `_STATIC_CACHE`, `_SEMI_STATIC_CACHE`, `_BALANCE_CACHE`, and `_ORDERBOOK_CACHE` are module-level
@@ -146,7 +146,7 @@ Steps:
 
 ### H-2: Cache key holds strong reference to `self`, preventing garbage collection
 
-**Status:** Open
+**Status:** ✅ Resolved — fixed as part of H-1 (Option A). Key now uses `env_key + args[1:]`, dropping `self` from the key entirely.
 
 **Finding:**
 `key = (func.__name__, args, frozenset(kwargs.items()))` stores the full `args` tuple,

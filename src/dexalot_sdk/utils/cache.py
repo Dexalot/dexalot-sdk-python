@@ -60,8 +60,9 @@ def ttl_cached(cache: MemoryCache):
                 # Bypass cache entirely - call function directly
                 return func(*args, **kwargs)
 
-            # crude key: function name + args
-            key = (func.__name__, args, frozenset(kwargs.items()))
+            instance = args[0] if args else None
+            env_key = getattr(instance, "api_base_url", "") or ""
+            key = (func.__name__, env_key, args[1:], frozenset(kwargs.items()))
             cached = cache.get(key)
             if cached is not None:
                 return cached
@@ -89,7 +90,9 @@ def async_ttl_cached(cache: MemoryCache):
                 # Bypass cache entirely - call function directly
                 return await func(*args, **kwargs)
 
-            key = (func.__name__, args, frozenset(kwargs.items()))
+            instance = args[0] if args else None
+            env_key = getattr(instance, "api_base_url", "") or ""
+            key = (func.__name__, env_key, args[1:], frozenset(kwargs.items()))
             cached = cache.get(key)
             if cached is not None:
                 return cached

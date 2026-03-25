@@ -44,7 +44,8 @@ class SwapClient(DexalotBaseClient):
         """
         if not self._cache_enabled:
             # Bypass cache by clearing it for this call
-            key: tuple[Any, ...] = ("get_swap_pairs", (self, chain_identifier), frozenset())
+            env_key = getattr(self, "api_base_url", "") or ""
+            key: tuple[Any, ...] = ("get_swap_pairs", env_key, (chain_identifier,), frozenset())
             _SEMI_STATIC_CACHE._store.pop(key, None)
 
         # Validate chain_identifier format
