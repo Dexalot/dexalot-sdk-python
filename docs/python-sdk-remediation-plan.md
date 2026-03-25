@@ -17,7 +17,7 @@ Each item includes the finding, affected files, a concrete implementation plan, 
 
 ### C-1: Private key persists in `DexalotConfig` after `Account` creation
 
-**Status:** Open
+**Status:** ✅ Resolved
 
 **Finding:**
 `DexalotConfig.private_key` is a plain `str` field that lives for the entire lifetime of the config

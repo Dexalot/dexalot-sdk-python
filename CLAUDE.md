@@ -76,6 +76,19 @@ Unit tests in `tests/unit/` have no external dependencies. Integration tests in 
 
 ---
 
+## Remediation Workflow
+
+Security and performance issues are tracked in `docs/python-sdk-remediation-plan.md`. When working on these items:
+
+1. **One at a time** — fix issues individually (or closely related ones together)
+2. **Plan first** — enter plan mode to discuss approach before writing code; decide: resolve, mitigate, or skip
+3. **Implement** — update code based on the agreed approach
+4. **Test** — add unit tests covering the changes
+5. **Document** — update README.md and this CLAUDE.md as needed
+6. **Update plan doc** — mark the issue status (✅ Resolved / 🔶 Mitigated / ⏭️ Skipped) and add commit/PR reference
+
+---
+
 ## Key File Reference
 
 All paths relative to `src/dexalot_sdk/`.

@@ -166,12 +166,11 @@ class DexalotBaseClient:
         private_key = self.config.private_key
         if private_key:
             try:
-                # Create Account from key and immediately discard the key string
                 account = Account.from_key(private_key)
-                # Clear the key from memory (Python GC will handle, but explicit is better)
-                del private_key
+                self.config.private_key = None
                 return cast(Account | None, account)
             except Exception:
+                self.config.private_key = None
                 return None
         return None
 

@@ -676,6 +676,26 @@ class TestDexalotBaseClient:
                         # Should handle exception gracefully and set account to None
                         assert client.account is None
 
+    async def test_private_key_zeroed_after_account_creation(self):
+        """private_key must be None on config after Account is created."""
+        with patch.dict(os.environ, {"PRIVATE_KEY": "0x" + "1" * 64}):
+            with patch("builtins.open", mock_open(read_data='{"E001": "Some Error"}')):
+                with patch("dexalot_sdk.core.base.aiohttp.ClientSession"):
+                    client = DexalotBaseClient()
+                    assert client.account is not None
+                    assert client.config.private_key is None
+
+    async def test_private_key_zeroed_on_account_creation_failure(self):
+        """private_key must be None on config even when Account.from_key raises."""
+        with patch.dict(os.environ, {"PRIVATE_KEY": "0x" + "1" * 64}):
+            with patch("dexalot_sdk.core.base.Account.from_key") as mock_from_key:
+                mock_from_key.side_effect = ValueError("Invalid private key format")
+                with patch("builtins.open", mock_open(read_data='{"E001": "Some Error"}')):
+                    with patch("dexalot_sdk.core.base.aiohttp.ClientSession"):
+                        client = DexalotBaseClient()
+                        assert client.account is None
+                        assert client.config.private_key is None
+
     async def test_init_with_parent_env_param(self):
         """Test initialization with explicit parent_env parameter."""
         with patch.dict(os.environ, {"PARENTENV": "should-be-overridden"}):
