@@ -111,21 +111,35 @@ class ProviderManager:
         Strategy: Fail-fast - returns the first healthy provider starting from current index.
         If current provider is unhealthy, tries next providers in order.
 
+        Fast path: when the current provider is healthy, return it without acquiring the lock.
+        Slow path: acquire the per-chain lock to perform failover selection.
+
         Args:
             chain_name: Name of the chain
 
         Returns:
             AsyncWeb3 instance if available, None if all providers are exhausted
         """
-        if chain_name not in self._providers:
+        providers = self._providers.get(chain_name)
+        if not providers:
             return None
 
-        # Get or create lock for this chain
+        # Fast path: no lock needed when the current provider is healthy.
+        # asyncio is single-threaded; no await between the reads below, so
+        # there is no yield point where state could change under us.
+        current_index = self._current_provider_index.get(chain_name, 0)
+        health = self._health[chain_name][current_index]
+        if health.is_healthy and health.can_retry(
+            self.config.provider_failover_cooldown,
+            self.config.provider_failover_max_failures,
+        ):
+            return providers[current_index]
+
+        # Slow path: need failover — acquire the lock.
         if chain_name not in self._locks:
             self._locks[chain_name] = asyncio.Lock()
 
         async with self._locks[chain_name]:
-            providers = self._providers[chain_name]
             health_statuses = self._health[chain_name]
             current_index = self._current_provider_index.get(chain_name, 0)
 
@@ -134,19 +148,17 @@ class ProviderManager:
                 index = (current_index + i) % len(providers)
                 health = health_statuses[index]
 
-                # Check if provider can be retried
                 if health.can_retry(
                     self.config.provider_failover_cooldown,
                     self.config.provider_failover_max_failures,
                 ):
-                    # Update health status if it was marked unhealthy
+                    # Restore healthy flag if the provider has recovered
                     if (
                         not health.is_healthy
                         and health.failure_count < self.config.provider_failover_max_failures
                     ):
                         health.is_healthy = True
 
-                    # Update current index to this provider
                     self._current_provider_index[chain_name] = index
                     return providers[index]
 

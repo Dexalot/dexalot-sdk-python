@@ -605,7 +605,7 @@ while True:
 
 ### P-6: `ProviderManager.get_provider` holds a per-chain lock for read-only selection
 
-**Status:** Open
+**Status:** ✅ Resolved
 
 **Finding:**
 `get_provider` acquires a full write-lock even though it is a read-mostly operation (it only
@@ -638,6 +638,14 @@ Long-term: Consider `asyncio.RWLock` (available in `aiofiles` or custom implemen
 **Acceptance criteria:**
 - Under 100 concurrent `get_provider` calls with a healthy provider, no measurable lock
   contention (benchmark with `time.perf_counter`).
+
+**Resolution:** Added a lock-free fast path in `get_provider`: when the current provider
+is healthy, the provider index and health are read without acquiring the per-chain lock.
+The slow path (lock-protected failover) is only entered when the current provider is
+unhealthy. Safe in asyncio because there is no `await` between the fast-path reads, so no
+other coroutine can mutate state in between. Tests added:
+`test_get_provider_fast_path_skips_lock`, `test_get_provider_fast_path_concurrent`,
+`test_get_provider_creates_lock_on_slow_path`.
 
 ---
 

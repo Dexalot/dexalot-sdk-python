@@ -284,18 +284,50 @@ class TestProviderManager:
         assert health.can_retry(cooldown_seconds=60, max_failures=3) is True
 
     @pytest.mark.asyncio
-    async def test_get_provider_creates_lock(self, manager):
-        """Test get_provider creates lock if it doesn't exist."""
+    async def test_get_provider_creates_lock_on_slow_path(self, manager):
+        """Test get_provider creates lock when the slow path (failover) is needed."""
         rpc_urls = ["https://rpc1.example.com"]
         await manager.add_providers("TestChain", rpc_urls)
 
-        # Remove lock to test creation
+        # Force the slow path by marking the provider unhealthy
+        manager._health["TestChain"][0].is_healthy = False
+        if "TestChain" in manager._locks:
+            del manager._locks["TestChain"]
+
+        # Slow path runs, lock should be created
+        await manager.get_provider("TestChain")
+        assert "TestChain" in manager._locks
+
+    @pytest.mark.asyncio
+    async def test_get_provider_fast_path_skips_lock(self, manager):
+        """Test that get_provider skips lock acquisition when current provider is healthy."""
+        rpc_urls = ["https://rpc1.example.com"]
+        await manager.add_providers("TestChain", rpc_urls)
+
+        # Remove the lock entirely; a healthy fast-path call must not touch _locks
         if "TestChain" in manager._locks:
             del manager._locks["TestChain"]
 
         provider = await manager.get_provider("TestChain")
         assert provider is not None
-        assert "TestChain" in manager._locks
+        # Lock should NOT have been created — fast path never acquires it
+        assert "TestChain" not in manager._locks
+
+    @pytest.mark.asyncio
+    async def test_get_provider_fast_path_concurrent(self, manager):
+        """100 concurrent get_provider calls with a healthy provider complete without contention."""
+        import time
+
+        rpc_urls = ["https://rpc1.example.com"]
+        await manager.add_providers("TestChain", rpc_urls)
+
+        start = time.perf_counter()
+        results = await asyncio.gather(*[manager.get_provider("TestChain") for _ in range(100)])
+        elapsed = time.perf_counter() - start
+
+        assert all(r is not None for r in results)
+        # With fast path, 100 calls should be extremely fast (well under 1 s)
+        assert elapsed < 1.0
 
     @pytest.mark.asyncio
     async def test_get_provider_marks_unhealthy_healthy(self, manager):
