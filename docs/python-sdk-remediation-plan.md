@@ -204,7 +204,7 @@ async def _make_http_request(self, method: str, url: str, **kwargs):
 
 ### H-4: `_execute_single_rpc_call` allows arbitrary attribute traversal on Web3
 
-**Status:** Open
+**Status:** ✅ Resolved — exact-match allowlist `_ALLOWED_RPC_METHODS` added alongside `_ALLOWED_HTTP_METHODS` in `base.py`; validation raises `ValueError` for any unlisted method name. Unit test added.
 
 **Finding:**
 `method_name.split(".")` + chained `getattr` allows reaching any attribute on the Web3

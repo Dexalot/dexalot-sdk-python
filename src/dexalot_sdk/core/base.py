@@ -32,6 +32,12 @@ from ..utils.retry import async_retry
 from .config import DexalotConfig
 
 _ALLOWED_HTTP_METHODS = frozenset({"get", "post", "put", "patch", "delete", "head", "options"})
+_ALLOWED_RPC_METHODS = frozenset({
+    "eth.gas_price",
+    "eth.send_raw_transaction",
+    "eth.wait_for_transaction_receipt",
+    "eth.get_transaction_count",
+})
 
 # Module-level caches (shared across all client instances)
 # These can be reconfigured via DexalotClient constructor parameters
@@ -478,6 +484,8 @@ class DexalotBaseClient:
         Returns:
             Result of the RPC call
         """
+        if method_name not in _ALLOWED_RPC_METHODS:
+            raise ValueError(f"RPC method not allowed: {method_name!r}")
         # Navigate to the method/property (e.g., w3.eth.get_transaction_count or w3.eth.gas_price)
         obj = w3
         parts = method_name.split(".")

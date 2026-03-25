@@ -1418,6 +1418,18 @@ class TestDexalotBaseClient:
         assert result == 5
         mock_w3.eth.get_transaction_count.assert_called_once_with("0x123", "pending")
 
+    async def test_execute_single_rpc_call_rejects_disallowed_method(self, client):
+        """Test _execute_single_rpc_call raises ValueError for non-allowlisted method names."""
+        from web3 import AsyncWeb3
+
+        mock_w3 = AsyncMock(spec=AsyncWeb3)
+
+        with pytest.raises(ValueError, match="RPC method not allowed"):
+            await client._execute_single_rpc_call(mock_w3, "__class__.__mro__")
+
+        with pytest.raises(ValueError, match="RPC method not allowed"):
+            await client._execute_single_rpc_call(mock_w3, "provider.close")
+
     def test_nonce_manager_disabled(self):
         """Test that nonce manager is None when nonce_manager_enabled is False."""
         from dexalot_sdk.core.base import DexalotBaseClient
