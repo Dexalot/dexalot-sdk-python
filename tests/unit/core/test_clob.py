@@ -2746,6 +2746,7 @@ class TestWebSocketManager:
         config.ws_reconnect_max_delay = 60.0
         config.ws_reconnect_exponential_base = 2.0
         config.ws_reconnect_max_attempts = 10
+        config.ws_time_offset_ms = 0
         return config
 
     @pytest.fixture
@@ -3241,6 +3242,39 @@ class TestWebSocketManager:
         assert "address" in payload
         assert "signature" in payload
         assert "timestamp" in payload
+
+    def test_subscribe_topic_private_uses_time_offset(self, manager, mock_account):
+        """Test that _subscribe_topic applies ws_time_offset_ms to the signature timestamp."""
+        import time
+
+        manager.account = mock_account
+        manager.config.ws_time_offset_ms = 5000
+        mock_ws = MagicMock()
+
+        manager.subscribe("Orders", lambda _m: None, is_private=True)
+        before_ms = int(time.time() * 1000)
+        manager._subscribe_topic(mock_ws, "Orders")
+
+        call_args = mock_ws.send.call_args[0][0]
+        payload = json.loads(call_args)
+        assert payload["timestamp"] >= before_ms + 4000
+
+    def test_subscribe_topic_private_default_no_offset(self, manager, mock_account):
+        """Test that _subscribe_topic uses no offset when ws_time_offset_ms is 0."""
+        import time
+
+        manager.account = mock_account
+        manager.config.ws_time_offset_ms = 0
+        mock_ws = MagicMock()
+
+        manager.subscribe("Orders", lambda _m: None, is_private=True)
+        before_ms = int(time.time() * 1000)
+        manager._subscribe_topic(mock_ws, "Orders")
+        after_ms = int(time.time() * 1000)
+
+        call_args = mock_ws.send.call_args[0][0]
+        payload = json.loads(call_args)
+        assert before_ms - 500 <= payload["timestamp"] <= after_ms + 500
 
     def test_subscribe_topic_exception(self, manager):
         """Test that _subscribe_topic handles exceptions."""

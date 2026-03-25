@@ -351,8 +351,12 @@ class WebSocketManager:
 
             payload = {"type": "subscribe", "topics": [subscription_key]}
 
-            # Generate authentication signature (legacy private topics)
-            ts = int(time.time() * 1000)
+            # Generate authentication signature (legacy private topics).
+            # The Dexalot backend accepts private-topic signatures whose timestamp is
+            # within ±30 000 ms of server time. If the local clock is skewed, set
+            # config.ws_time_offset_ms (env: DEXALOT_WS_TIME_OFFSET_MS) to compensate.
+            time_offset_ms = getattr(self.config, "ws_time_offset_ms", 0)
+            ts = int(time.time() * 1000) + time_offset_ms
             msg_to_sign = f"{self.account.address}{ts}"
 
             from eth_account.messages import encode_defunct

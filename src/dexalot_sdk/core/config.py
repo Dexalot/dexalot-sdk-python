@@ -72,6 +72,11 @@ class DexalotConfig:
     ws_reconnect_max_delay: float = 60.0  # Maximum reconnect delay in seconds
     ws_reconnect_exponential_base: float = 2.0  # Exponential backoff multiplier
     ws_reconnect_max_attempts: int = 10  # Maximum reconnection attempts (0 = infinite)
+    # Clock skew compensation for WebSocket private-topic signatures.
+    # Added to the system timestamp (ms) when generating auth signatures.
+    # Use a negative value if the local clock is ahead of the server.
+    # The backend accepts timestamps within ±30 000 ms of server time.
+    ws_time_offset_ms: int = 0
 
     # provider failover settings
     provider_failover_enabled: bool = True  # Enable/disable provider failover
@@ -163,6 +168,7 @@ class DexalotConfig:
                 "DEXALOT_WS_RECONNECT_EXPONENTIAL_BASE", 2.0
             ),
             "ws_reconnect_max_attempts": get_env_int("DEXALOT_WS_RECONNECT_MAX_ATTEMPTS", 10),
+            "ws_time_offset_ms": get_env_int("DEXALOT_WS_TIME_OFFSET_MS", 0),
             "provider_failover_enabled": get_env_bool("DEXALOT_PROVIDER_FAILOVER_ENABLED", True),
             "provider_failover_cooldown": get_env_int("DEXALOT_PROVIDER_FAILOVER_COOLDOWN", 60),
             "provider_failover_max_failures": get_env_int(
