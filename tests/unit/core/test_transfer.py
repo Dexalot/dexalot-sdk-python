@@ -1481,3 +1481,30 @@ class TestTransferClient:
         result = await client.get_token_details("AVAX")
         assert not result.success
         assert "getting token details" in result.error.lower()
+
+    async def test_get_l1_native_balance_sanitizes_error(self, client):
+        """H-5: _get_l1_native_balance must not leak raw exception text (e.g. URLs) to callers."""
+        secret_url = "https://rpc.example.com/secret-key"
+        client.w3_l1.eth.get_balance = AsyncMock(
+            side_effect=Exception(f"failed: {secret_url}")
+        )
+
+        entry = await client._get_l1_native_balance(VALID_ADDRESS)
+
+        assert secret_url not in entry["balance"], (
+            "Raw exception with secret URL must not appear in balance output"
+        )
+        assert entry["balance"].startswith("Error:")
+
+    async def test_get_native_balance_sanitizes_error(self, client):
+        """H-5: _get_native_balance must not leak raw exception text (e.g. URLs) to callers."""
+        secret_url = "https://rpc.example.com/secret-key"
+        w3 = self.create_w3()
+        w3.eth.get_balance = AsyncMock(side_effect=Exception(f"failed: {secret_url}"))
+
+        entry = await client._get_native_balance("Avalanche", w3, VALID_ADDRESS, "AVAX")
+
+        assert secret_url not in entry["balance"], (
+            "Raw exception with secret URL must not appear in balance output"
+        )
+        assert entry["balance"].startswith("Error:")

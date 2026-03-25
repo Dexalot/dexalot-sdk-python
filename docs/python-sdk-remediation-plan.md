@@ -232,7 +232,7 @@ object. While currently only called internally with hardcoded strings, it is a f
 
 ### H-5: Raw exception text returned to users in balance helpers
 
-**Status:** Open
+**Status:** ✅ Resolved
 
 **Finding:**
 Several internal helpers return `f"Error: {e}"` or `f"Error: {str(e)}"` directly in user-facing
@@ -259,6 +259,11 @@ except Exception as e:
 **Acceptance criteria:**
 - Unit test: when an RPC call raises `Exception("failed: https://rpc.example.com/secret-key")`,
   the returned balance string does not contain the URL.
+
+**Resolution:** Replaced `f"Error: {e}"` / `f"Error: {str(e)}"` in `_get_l1_native_balance` and
+`_get_native_balance` with `self._sanitize_error(e, "<context>")`. Two unit tests added in
+`tests/unit/core/test_transfer.py` (`test_get_l1_native_balance_sanitizes_error`,
+`test_get_native_balance_sanitizes_error`).
 
 ---
 

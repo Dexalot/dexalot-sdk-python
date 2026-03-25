@@ -312,7 +312,7 @@ class TransferClient(DexalotBaseClient):
                 l1_balance = await self.w3_l1.eth.get_balance(cast(Any, address))
                 entry["balance"] = str(self.w3_l1.from_wei(l1_balance, "ether"))
             except Exception as e:
-                entry["balance"] = f"Error: {e}"
+                entry["balance"] = f"Error: {self._sanitize_error(e, 'fetching L1 native balance')}"
         else:
             entry["balance"] = "Not connected"
         return entry
@@ -332,7 +332,7 @@ class TransferClient(DexalotBaseClient):
             balance_eth = w3_provider.from_wei(balance_wei, "ether")
             entry["balance"] = str(balance_eth)
         except Exception as e:
-            entry["balance"] = f"Error: {str(e)}"
+            entry["balance"] = f"Error: {self._sanitize_error(e, 'fetching native balance')}"
         return entry
 
     async def _get_erc20_balance(
