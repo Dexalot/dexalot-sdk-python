@@ -2066,6 +2066,53 @@ class TestCLOBClient:
 
         await client.cancel_list_orders_by_client_id([b"\x01" * 32])
 
+    def test_get_auth_headers_static_mode(self, client):
+        """Static mode (default): signs 'dexalot', returns only x-signature."""
+        client.config.timestamped_auth = False
+        mock_account = MagicMock()
+        mock_account.address = "0xABC"
+        mock_account.sign_message.return_value.signature.hex.return_value = "deadbeef"
+        client.account = mock_account
+
+        headers = client._get_auth_headers()
+
+        assert set(headers.keys()) == {"x-signature"}
+        assert headers["x-signature"] == "0xABC:0xdeadbeef"
+
+    def test_get_auth_headers_timestamped_mode(self, client):
+        """Timestamped mode: x-timestamp present; consecutive calls produce different values."""
+        client.config.timestamped_auth = True
+        call_count = 0
+
+        def fake_sign(message):
+            nonlocal call_count
+            call_count += 1
+            m = MagicMock()
+            m.signature.hex.return_value = f"sig{call_count}"
+            return m
+
+        mock_account = MagicMock()
+        mock_account.address = "0xABC"
+        mock_account.sign_message.side_effect = fake_sign
+        client.account = mock_account
+
+        headers1 = client._get_auth_headers()
+        time.sleep(0.002)  # ensure >1 ms gap
+        headers2 = client._get_auth_headers()
+
+        assert set(headers1.keys()) == {"x-signature", "x-timestamp"}
+        assert set(headers2.keys()) == {"x-signature", "x-timestamp"}
+        assert headers1["x-timestamp"] != headers2["x-timestamp"]
+        assert headers1["x-signature"] != headers2["x-signature"]
+        # x-timestamp is a recent millisecond epoch
+        assert abs(int(time.time() * 1000) - int(headers1["x-timestamp"])) < 5000
+
+    def test_get_auth_headers_no_account_raises(self, client):
+        """Raises when account is not configured."""
+        client.account = None
+        with pytest.raises(Exception, match="Private key not configured"):
+            client._get_auth_headers()
+
     async def test_clob_missing_coverage_6(self, client):
         """Test cancel_add_list error paths."""
         client.account = MagicMock()

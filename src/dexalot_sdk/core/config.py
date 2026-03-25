@@ -23,6 +23,10 @@ class DexalotConfig:
     parent_env: str = "fuji-multi"
     api_base_url: str | None = None
     private_key: str | None = None
+    # When True, signs "dexalot{ts}" and sends x-timestamp header instead of static "dexalot".
+    # Prevents signature replay attacks but requires backend support — default False until
+    # backend confirms timestamp window validation. See remediation plan C-2.
+    timestamped_auth: bool = False
     connection_pool_limit: int = 100  # Total connection pool size across all hosts
     connection_pool_limit_per_host: int = 30  # Maximum connections per individual host
 
@@ -145,6 +149,7 @@ class DexalotConfig:
             ),
             "rate_limit_rpc_per_second": get_env_float("DEXALOT_RATE_LIMIT_RPC_PER_SECOND", 10.0),
             "nonce_manager_enabled": get_env_bool("DEXALOT_NONCE_MANAGER_ENABLED", True),
+            "timestamped_auth": get_env_bool("DEXALOT_TIMESTAMPED_AUTH", False),
             "connection_pool_limit": get_env_int("DEXALOT_CONNECTION_POOL_LIMIT", 100),
             "connection_pool_limit_per_host": get_env_int(
                 "DEXALOT_CONNECTION_POOL_LIMIT_PER_HOST", 30

@@ -58,7 +58,7 @@ The key is therefore always accessible at `client.config.private_key`.
 
 ### C-2: Static `"dexalot"` message makes auth signature replayable indefinitely
 
-**Status:** Open
+**Status:** 🔶 Mitigated — SDK-side timestamped signing implemented behind `config.timestamped_auth` flag (default `False`, env: `DEXALOT_TIMESTAMPED_AUTH`). Probe confirmed backend (testnet) does **not** yet accept timestamped signatures (returns 401). Enable the flag only after backend confirms timestamp window validation.
 
 **Finding:**
 `_get_auth_headers` signs the static string `"dexalot"` — no timestamp, no nonce.

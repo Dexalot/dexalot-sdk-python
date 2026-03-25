@@ -49,6 +49,7 @@ Per-(chain_id, address) asyncio locks enforce sequential nonce acquisition. High
 
 ## Dev Workflow
 
+- **Python interpreter**: always use `.venv/bin/python` (never the system `python3`)
 - **Package manager**: `uv` — not pip, not poetry
 - **Python version**: >=3.12, <3.14 (uses match statements, PEP 695 generics)
 - **Setup**: `make setup` (runs `uv venv && uv sync --group dev`)
@@ -73,6 +74,7 @@ Unit tests in `tests/unit/` have no external dependencies. Integration tests in 
 - **Error sanitization is lossy**: Regex stripping makes production debugging harder. Use DEBUG logging in development.
 - **Python 3.12+ is required**: CI must enforce this. Match statements and PEP 695 generics are used throughout.
 - **Cache key for multi-env**: If you ever need simultaneous testnet/mainnet clients, the module-level caches will conflict — this is a known limitation.
+- **`timestamped_auth` flag**: `_get_auth_headers` supports timestamped signing (`f"dexalot{ts}"` + `x-timestamp` header) via `config.timestamped_auth = True` (env: `DEXALOT_TIMESTAMPED_AUTH=true`). Defaults to `False` — the backend currently only accepts the static `"dexalot"` message. Enable only after backend confirms timestamp window validation. See remediation plan C-2.
 
 ---
 

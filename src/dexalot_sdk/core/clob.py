@@ -502,17 +502,33 @@ class CLOBClient(DexalotBaseClient):
 
         return cast(Result[str], await self.cancel_list_orders(order_ids))
 
-    def _get_auth_headers(self):
-        """Generates authentication headers for signed endpoints."""
+    def _get_auth_headers(self) -> dict[str, str]:
+        """Generates authentication headers for signed endpoints.
+
+        When config.timestamped_auth is True, the signed message is f"dexalot{ts}"
+        (millisecond timestamp) and an x-timestamp header is included alongside
+        x-signature. This prevents replay attacks but requires backend support —
+        default is False until the backend confirms timestamp window validation.
+        See docs/python-sdk-remediation-plan.md C-2.
+        """
         if not self.account:
             raise Exception("Private key not configured.")
 
         from eth_account.messages import encode_defunct
 
-        msg = "dexalot"
-        message = encode_defunct(text=msg)
-        signature = self.account.sign_message(message).signature.hex()
         addr = cast(str, cast(Any, self.account).address)
+
+        if self.config.timestamped_auth:
+            ts = int(time.time() * 1000)
+            message = encode_defunct(text=f"dexalot{ts}")
+            signature = self.account.sign_message(message).signature.hex()
+            return {
+                "x-signature": f"{addr}:0x{signature}",
+                "x-timestamp": str(ts),
+            }
+
+        message = encode_defunct(text="dexalot")
+        signature = self.account.sign_message(message).signature.hex()
         return {"x-signature": f"{addr}:0x{signature}"}
 
     @track_method("clob")
