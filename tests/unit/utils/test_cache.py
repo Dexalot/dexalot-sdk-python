@@ -1,3 +1,4 @@
+import asyncio
 import gc
 import time
 import weakref
@@ -235,6 +236,41 @@ def test_memory_cache_ttl_cleanup_removes_expired():
     # Only the new entry should remain
     assert cache.get("new_key") == "new_value"
     assert len(cache._store) == 1
+
+
+@pytest.mark.asyncio
+async def test_async_ttl_cached_stampede_protection():
+    """Concurrent callers for the same uncached key call the function exactly once."""
+    cache = MemoryCache(ttl_seconds=60)
+    call_count = 0
+
+    @async_ttl_cached(cache)
+    async def slow_func(x):
+        nonlocal call_count
+        call_count += 1
+        await asyncio.sleep(0.05)
+        return x * 10
+
+    results = await asyncio.gather(*[slow_func(3) for _ in range(5)])
+
+    assert call_count == 1, f"Expected 1 call, got {call_count}"
+    assert all(r == 30 for r in results), f"Unexpected results: {results}"
+
+
+@pytest.mark.asyncio
+async def test_async_ttl_cached_stampede_exception_propagates():
+    """When the worker raises, all concurrent waiters receive the exception."""
+    cache = MemoryCache(ttl_seconds=60)
+
+    @async_ttl_cached(cache)
+    async def failing_func(x):
+        await asyncio.sleep(0.01)
+        raise ValueError("boom")
+
+    results = await asyncio.gather(*[failing_func(7) for _ in range(4)], return_exceptions=True)
+
+    assert all(isinstance(r, ValueError) for r in results), f"Expected all ValueError, got: {results}"
+    assert all(str(r) == "boom" for r in results)
 
 
 @pytest.mark.asyncio

@@ -462,7 +462,7 @@ FIFO to be smarter about which entries to evict when at capacity.
 
 ### P-3: Cache decorator has no stampede protection — concurrent requests duplicate work
 
-**Status:** Open
+**Status:** ✅ Resolved — per-key `asyncio.Future` coalescing added to `async_ttl_cached` in `cache.py`. `_pending` dict and `_pending_lock` are closure-scoped per decorated function. Concurrent callers for the same uncached key now wait on a shared future; the underlying function is called exactly once. Two unit tests added: `test_async_ttl_cached_stampede_protection` (call count = 1 for 5 concurrent callers) and `test_async_ttl_cached_stampede_exception_propagates` (all waiters receive the exception).
 
 **Finding:**
 Two concurrent coroutines can both see a cache miss, both execute the underlying function,

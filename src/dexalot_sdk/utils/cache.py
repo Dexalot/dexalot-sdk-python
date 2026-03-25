@@ -1,3 +1,4 @@
+import asyncio
 import time
 from collections.abc import Callable, Hashable
 from functools import wraps
@@ -86,9 +87,16 @@ def async_ttl_cached(cache: MemoryCache):
 
     If the decorated method is an instance method and the instance has
     a _cache_enabled attribute set to False, caching is bypassed.
+
+    Stampede protection: concurrent callers for the same uncached key are
+    coalesced — the underlying function is called exactly once and all
+    waiters receive the same result.
     """
 
     def decorator(func: Callable):
+        _pending: dict[Hashable, asyncio.Future[Any]] = {}
+        _pending_lock = asyncio.Lock()
+
         @wraps(func)
         async def wrapper(*args, **kwargs):
             # Check if this is an instance method and if caching is disabled
@@ -99,12 +107,39 @@ def async_ttl_cached(cache: MemoryCache):
             instance = args[0] if args else None
             env_key = getattr(instance, "api_base_url", "") or ""
             key = (func.__name__, env_key, args[1:], frozenset(kwargs.items()))
+
             cached = cache.get(key)
             if cached is not None:
                 return cached
-            result = await func(*args, **kwargs)
-            cache.set(key, result)
-            return result
+
+            do_work = False
+            async with _pending_lock:
+                # Double-check inside the lock to close the race between
+                # the initial cache miss and acquiring _pending_lock.
+                cached = cache.get(key)
+                if cached is not None:
+                    return cached
+                if key in _pending:
+                    fut: asyncio.Future[Any] = _pending[key]
+                else:
+                    fut = asyncio.get_running_loop().create_future()
+                    _pending[key] = fut
+                    do_work = True
+
+            if not do_work:
+                return await asyncio.shield(fut)
+
+            try:
+                result = await func(*args, **kwargs)
+                cache.set(key, result)
+                fut.set_result(result)
+                return result
+            except Exception as e:
+                fut.set_exception(e)
+                raise
+            finally:
+                async with _pending_lock:
+                    _pending.pop(key, None)
 
         return wrapper
 
