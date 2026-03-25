@@ -83,6 +83,11 @@ class DexalotConfig:
     provider_failover_cooldown: int = 60  # Seconds before retrying failed provider
     provider_failover_max_failures: int = 3  # Max failures before marking provider unhealthy
 
+    # RPC security settings
+    # If False (default), http:// RPC URLs are rejected at provider setup time with ValueError.
+    # Set to True only for local development or trusted private networks.
+    allow_insecure_rpc: bool = False
+
     @classmethod
     def from_env(cls, **kwargs) -> "DexalotConfig":
         """
@@ -174,6 +179,7 @@ class DexalotConfig:
             "provider_failover_max_failures": get_env_int(
                 "DEXALOT_PROVIDER_FAILOVER_MAX_FAILURES", 3
             ),
+            "allow_insecure_rpc": get_env_bool("DEXALOT_ALLOW_INSECURE_RPC", False),
         }
 
         # API Base URL logic

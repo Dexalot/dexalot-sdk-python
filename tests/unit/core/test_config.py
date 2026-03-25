@@ -308,3 +308,22 @@ class TestDexalotConfig:
         cfg = DexalotConfig(provider_failover_max_failures=0)
         with pytest.raises(ValueError, match="provider_failover_max_failures must be at least 1"):
             cfg.validate()
+
+    def test_allow_insecure_rpc_default_is_false(self):
+        """Test that allow_insecure_rpc defaults to False."""
+        cfg = DexalotConfig()
+        assert cfg.allow_insecure_rpc is False
+
+    def test_allow_insecure_rpc_env_var_true(self):
+        """Test that DEXALOT_ALLOW_INSECURE_RPC=true sets allow_insecure_rpc to True."""
+        with patch.dict(os.environ, {"DEXALOT_ALLOW_INSECURE_RPC": "true"}):
+            with patch("dexalot_sdk.core.config.load_dotenv"):
+                cfg = DexalotConfig.from_env()
+                assert cfg.allow_insecure_rpc is True
+
+    def test_allow_insecure_rpc_env_var_false(self):
+        """Test that DEXALOT_ALLOW_INSECURE_RPC=false sets allow_insecure_rpc to False."""
+        with patch.dict(os.environ, {"DEXALOT_ALLOW_INSECURE_RPC": "false"}):
+            with patch("dexalot_sdk.core.config.load_dotenv"):
+                cfg = DexalotConfig.from_env()
+                assert cfg.allow_insecure_rpc is False

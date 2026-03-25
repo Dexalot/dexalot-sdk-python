@@ -471,6 +471,22 @@ await client.initialize_client()
 - Environment variable override is optional
 - All existing code paths continue to work
 
+### RPC Security Settings
+
+By default, plain `http://` RPC URLs are **rejected at provider setup time** with a `ValueError`. This prevents accidental use of unencrypted connections in production.
+
+| Option | Env Variable | Default | Description |
+|--------|-------------|---------|-------------|
+| `allow_insecure_rpc` | `DEXALOT_ALLOW_INSECURE_RPC` | `false` | Allow plain `http://` RPC endpoints |
+
+> **Security note:** Plain `http://` RPC connections transmit JSON-RPC calls (including signed transactions) without encryption. In production, always use `https://` endpoints. Only set `allow_insecure_rpc=True` for local development or trusted private networks.
+
+```python
+# Allow http:// for local development only
+config = DexalotConfig(allow_insecure_rpc=True)
+client = DexalotClient(config=config)
+```
+
 ## Observability
 
 The SDK includes a comprehensive instrumentation layer to track API operations, performance metrics, and WebSocket events.

@@ -62,6 +62,7 @@ Unit tests in `tests/unit/` have no external dependencies. Integration tests in 
 
 - `VERSION` file at repo root holds the current version (currently 0.4.0)
 - `.env` files: never commit; use `env.example` as template
+- **`env.example` must be updated** whenever a new `DexalotConfig` field or env var is added — it is the canonical reference for operators
 - The error sanitizer strips file paths, URLs, and stack traces from user-facing errors. Use `log_level="DEBUG"` locally to get full context for debugging.
 
 ---

@@ -358,7 +358,7 @@ cancelled via `asyncio.Task.cancel()`.
 
 ### M-4: No TLS configuration options for RPC endpoints
 
-**Status:** Open
+**Status:** ✅ Resolved — `allow_insecure_rpc: bool = False` added to `DexalotConfig` (env: `DEXALOT_ALLOW_INSECURE_RPC`). `_reject_insecure_rpc_urls` helper raises `ValueError` for any `http://` URL when the flag is `False`; called in `_get_rpc_urls` (primary gate for all three resolution paths) and `_create_provider_fallback` (defence-in-depth). 15 unit tests added across `test_config.py` and `test_base.py`.
 
 **Finding:**
 RPC URLs are used as-is with default SSL settings. There is no way to enforce minimum TLS

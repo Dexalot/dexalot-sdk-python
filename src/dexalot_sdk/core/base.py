@@ -699,6 +699,22 @@ class DexalotBaseClient:
         for env in environments:
             await self._process_environment_config(env)
 
+    def _reject_insecure_rpc_urls(self, urls: list[str]) -> list[str]:
+        """
+        Raise ValueError if any URL uses http:// and allow_insecure_rpc is False.
+
+        Returns the list unchanged when all checks pass.
+        Raises ValueError (not a silent filter) so misconfiguration is immediately visible.
+        """
+        insecure = [u for u in urls if u.lower().startswith("http://")]
+        if insecure and not self.config.allow_insecure_rpc:
+            raise ValueError(
+                f"Insecure RPC URL(s) rejected (http://): {insecure}. "
+                "Set allow_insecure_rpc=True or DEXALOT_ALLOW_INSECURE_RPC=true "
+                "to permit http:// endpoints."
+            )
+        return urls
+
     def _get_rpc_urls(
         self, chain_id: int | None, native_token_symbol: str | None, api_rpc: str | None
     ) -> list[str]:
@@ -718,18 +734,21 @@ class DexalotBaseClient:
             env_key_chain_id = f"DEXALOT_RPC_{chain_id}"
             env_rpc = os.getenv(env_key_chain_id)
             if env_rpc:
-                return [url.strip() for url in env_rpc.split(",") if url.strip()]
+                urls = [url.strip() for url in env_rpc.split(",") if url.strip()]
+                return self._reject_insecure_rpc_urls(urls)
 
         # Fall back to native_token_symbol
         if native_token_symbol:
             env_key_symbol = f"DEXALOT_RPC_{native_token_symbol.upper()}"
             env_rpc = os.getenv(env_key_symbol)
             if env_rpc:
-                return [url.strip() for url in env_rpc.split(",") if url.strip()]
+                urls = [url.strip() for url in env_rpc.split(",") if url.strip()]
+                return self._reject_insecure_rpc_urls(urls)
 
         # Final fallback to API response
         if api_rpc:
-            return [url.strip() for url in api_rpc.split(",") if url.strip()]
+            urls = [url.strip() for url in api_rpc.split(",") if url.strip()]
+            return self._reject_insecure_rpc_urls(urls)
 
         return []
 
@@ -809,10 +828,13 @@ class DexalotBaseClient:
         else:
             self.w3_l1 = self._create_provider_fallback(rpc_urls[0], "DEXALOT_L1")
 
-    def _create_provider_fallback(self, rpc_url, chain_name):
+    def _create_provider_fallback(self, rpc_url: str, chain_name: str) -> "AsyncWeb3 | None":
         """Create a provider directly as fallback when provider manager fails."""
         try:
+            self._reject_insecure_rpc_urls([rpc_url])  # defence-in-depth
             return AsyncWeb3(AsyncHTTPProvider(rpc_url))
+        except ValueError:
+            raise  # insecure-URL errors must propagate, not be swallowed
         except Exception as e:
             log_event(
                 self.logger,

@@ -911,7 +911,7 @@ class TestDexalotBaseClient:
                 "chainid": 43114,
                 "type": "mainnet",
                 "network": "Avalanche",
-                "rpc": "http://rpc",
+                "rpc": "https://rpc",
             }
         ]
         port_resp = [{"env": "production-multi-avax", "address": "0xAddr", "abi": []}]
@@ -1939,6 +1939,75 @@ class TestDexalotBaseClient:
         """Test _get_rpc_urls returning empty list."""
         urls = client._get_rpc_urls(None, None, None)
         assert urls == []
+
+    # --- M-4: TLS / insecure RPC URL tests ---
+
+    async def test_reject_insecure_rpc_urls_raises_on_http_by_default(self, client):
+        """http:// URL raises ValueError with default config."""
+        with pytest.raises(ValueError, match="http://"):
+            client._reject_insecure_rpc_urls(["http://rpc.example.com"])
+
+    async def test_reject_insecure_rpc_urls_passes_https(self, client):
+        """https:// URL passes without exception and list is returned unchanged."""
+        urls = ["https://rpc.example.com"]
+        assert client._reject_insecure_rpc_urls(urls) == urls
+
+    async def test_reject_insecure_rpc_urls_allows_http_when_flag_set(self, client):
+        """http:// URL is allowed when allow_insecure_rpc=True."""
+        from dexalot_sdk.core.config import DexalotConfig
+
+        client.config = DexalotConfig(allow_insecure_rpc=True)
+        urls = ["http://rpc.example.com"]
+        assert client._reject_insecure_rpc_urls(urls) == urls
+
+    async def test_reject_insecure_rpc_urls_mixed_raises(self, client):
+        """Mixed http/https list raises ValueError naming the insecure URL."""
+        with pytest.raises(ValueError, match="http://bad.example.com"):
+            client._reject_insecure_rpc_urls(["https://ok.example.com", "http://bad.example.com"])
+
+    async def test_reject_insecure_rpc_urls_empty_list(self, client):
+        """Empty list passes silently."""
+        assert client._reject_insecure_rpc_urls([]) == []
+
+    async def test_get_rpc_urls_rejects_http_from_env_by_chain_id(self, client):
+        """http:// URL from chain-id env var raises ValueError."""
+        with patch.dict(os.environ, {"DEXALOT_RPC_99999": "http://insecure.rpc"}):
+            with pytest.raises(ValueError, match="http://insecure.rpc"):
+                client._get_rpc_urls(99999, None, None)
+
+    async def test_get_rpc_urls_rejects_http_from_env_by_symbol(self, client):
+        """http:// URL from native-symbol env var raises ValueError."""
+        with patch.dict(os.environ, {"DEXALOT_RPC_ALOT": "http://insecure.rpc"}):
+            with pytest.raises(ValueError, match="http://insecure.rpc"):
+                client._get_rpc_urls(None, "ALOT", None)
+
+    async def test_get_rpc_urls_rejects_http_from_api_rpc(self, client):
+        """http:// URL from API response raises ValueError."""
+        with pytest.raises(ValueError, match="http://insecure.rpc"):
+            client._get_rpc_urls(None, None, "http://insecure.rpc")
+
+    async def test_get_rpc_urls_allows_http_when_flag_set(self, client):
+        """http:// URL is accepted when allow_insecure_rpc=True."""
+        from dexalot_sdk.core.config import DexalotConfig
+
+        client.config = DexalotConfig(allow_insecure_rpc=True)
+        urls = client._get_rpc_urls(None, None, "http://insecure.rpc")
+        assert urls == ["http://insecure.rpc"]
+
+    @patch("dexalot_sdk.core.base.AsyncWeb3")
+    async def test_create_provider_fallback_rejects_http_url(self, mock_web3, client):
+        """_create_provider_fallback raises ValueError for http:// URLs (not None)."""
+        with pytest.raises(ValueError, match="http://"):
+            client._create_provider_fallback("http://insecure.rpc", "TestChain")
+        mock_web3.assert_not_called()
+
+    @patch("dexalot_sdk.core.base.AsyncWeb3")
+    async def test_create_provider_fallback_accepts_https_url(self, mock_web3, client):
+        """_create_provider_fallback returns an AsyncWeb3 instance for https:// URLs."""
+        mock_instance = MagicMock()
+        mock_web3.return_value = mock_instance
+        result = client._create_provider_fallback("https://secure.rpc", "TestChain")
+        assert result is mock_instance
 
     @patch("dexalot_sdk.utils.provider_manager.AsyncWeb3")
     @patch("dexalot_sdk.core.base.AsyncWeb3")
