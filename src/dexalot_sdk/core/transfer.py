@@ -804,17 +804,32 @@ class TransferClient(DexalotBaseClient):
             )
 
         symbol_bytes32 = Utils.to_bytes32(token)
-        return cast(
-            str,
-            await self._build_and_send_tx(
-                w3,
-                contract.functions.depositToken(
-                    from_addr, symbol_bytes32, amount_wei, bridge_id
+        try:
+            return cast(
+                str,
+                await self._build_and_send_tx(
+                    w3,
+                    contract.functions.depositToken(
+                        from_addr, symbol_bytes32, amount_wei, bridge_id
+                    ),
+                    value=bridge_fee,
+                    wait_for_receipt=wait_for_receipt,
                 ),
-                value=bridge_fee,
-                wait_for_receipt=wait_for_receipt,
-            ),
-        )
+            )
+        except Exception:
+            if l1_token_info:
+                # Best-effort: revoke the approval to prevent a dangling allowance
+                try:
+                    await self._ensure_allowance(
+                        w3,
+                        l1_token_info["address"],
+                        contract.address,
+                        0,
+                        wait_for_receipt=wait_for_receipt,
+                    )
+                except Exception:
+                    pass
+            raise
 
     @track_method("transfer")
     async def deposit(
@@ -945,20 +960,15 @@ class TransferClient(DexalotBaseClient):
                         subnet_token_info = info
                         break
 
-            if subnet_token_info:
-                await self._ensure_allowance(
-                    w3,
-                    subnet_token_info["address"],
-                    contract.address,
-                    amount_wei,
-                    wait_for_receipt=wait_for_receipt,
-                )
-
-            tx_hash = await self._build_and_send_tx(
+            tx_hash = await self._execute_erc20_withdrawal(
                 w3,
-                contract.functions.withdrawToken(
-                    from_addr, symbol_bytes32, amount_wei, bridge_id, dest_chain_id
-                ),
+                contract,
+                from_addr,
+                symbol_bytes32,
+                amount_wei,
+                bridge_id,
+                dest_chain_id,
+                subnet_token_info,
                 wait_for_receipt=wait_for_receipt,
             )
             return Result.ok(f"Withdraw transaction sent: {tx_hash}")
@@ -1106,6 +1116,58 @@ class TransferClient(DexalotBaseClient):
             bridge_from,
             b"\x00",
         ).call()
+
+    async def _execute_erc20_withdrawal(
+        self,
+        w3,
+        contract,
+        from_addr: str,
+        symbol_bytes32: bytes,
+        amount_wei: int,
+        bridge_id: int,
+        dest_chain_id: int,
+        subnet_token_info: dict | None,
+        wait_for_receipt: bool = True,
+    ) -> str:
+        """Execute ERC20 token withdrawal transaction.
+
+        Returns:
+            Transaction hash (str)
+        """
+        if subnet_token_info:
+            await self._ensure_allowance(
+                w3,
+                subnet_token_info["address"],
+                contract.address,
+                amount_wei,
+                wait_for_receipt=wait_for_receipt,
+            )
+
+        try:
+            return cast(
+                str,
+                await self._build_and_send_tx(
+                    w3,
+                    contract.functions.withdrawToken(
+                        from_addr, symbol_bytes32, amount_wei, bridge_id, dest_chain_id
+                    ),
+                    wait_for_receipt=wait_for_receipt,
+                ),
+            )
+        except Exception:
+            if subnet_token_info:
+                # Best-effort: revoke the approval to prevent a dangling allowance
+                try:
+                    await self._ensure_allowance(
+                        w3,
+                        subnet_token_info["address"],
+                        contract.address,
+                        0,
+                        wait_for_receipt=wait_for_receipt,
+                    )
+                except Exception:
+                    pass
+            raise
 
     async def _ensure_allowance(
         self, w3, token_address, spender_address, amount_wei, wait_for_receipt: bool = True

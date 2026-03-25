@@ -649,6 +649,80 @@ class TestTransferClient:
         await client.deposit("USDC", 1, "Avalanche")
         client.mainnet_providers["Avalanche"].eth.wait_for_transaction_receipt.assert_called()
 
+    async def test_erc20_deposit_revokes_allowance_on_failure(self, client):
+        """When the deposit tx fails after approval, _ensure_allowance is called with 0 to revoke."""
+        client.token_data = {
+            "USDC": {"Avalanche": {"chain_id": 43114, "evmdecimals": 6, "address": "0xUSDC"}}
+        }
+        ensure_calls = []
+
+        async def fake_ensure_allowance(w3, token_addr, spender, amount, **kwargs):
+            ensure_calls.append(amount)
+            if amount > 0:
+                return  # approval succeeds
+            # revoke call also succeeds (no-op)
+
+        client._ensure_allowance = fake_ensure_allowance
+        client._build_and_send_tx = AsyncMock(side_effect=Exception("deposit reverted"))
+        client._get_l1_token_info = AsyncMock(
+            return_value={"address": "0xUSDC", "evmdecimals": 6}
+        )
+
+        from dexalot_sdk.utils.result import Result
+
+        client.get_deposit_bridge_fee = AsyncMock(return_value=Result.ok(0))
+        res = await client.deposit("USDC", 1, "Avalanche")
+        assert not res.success
+        # First call approves amount_wei, second call revokes with 0
+        assert len(ensure_calls) == 2
+        assert ensure_calls[0] > 0
+        assert ensure_calls[1] == 0
+
+    async def test_erc20_deposit_no_revoke_when_no_token_info(self, client):
+        """When there is no L1 token info, _ensure_allowance is never called on deposit failure."""
+        ensure_calls = []
+
+        async def fake_ensure_allowance(w3, token_addr, spender, amount, **kwargs):
+            ensure_calls.append(amount)
+
+        client._ensure_allowance = fake_ensure_allowance
+        client._build_and_send_tx = AsyncMock(side_effect=Exception("deposit reverted"))
+        client._get_l1_token_info = AsyncMock(return_value=None)
+
+        from dexalot_sdk.utils.result import Result
+
+        client.get_deposit_bridge_fee = AsyncMock(return_value=Result.ok(0))
+        res = await client.deposit("USDC", 1, "Avalanche")
+        assert not res.success
+        assert ensure_calls == []
+
+    async def test_erc20_withdraw_revokes_allowance_on_failure(self, client):
+        """When the withdraw tx fails after approval, _ensure_allowance is called with 0 to revoke."""
+        subnet_chain_id = client.subnet_chain_id
+        client.token_data = {
+            "USDC": {
+                "Dexalot": {"chain_id": subnet_chain_id, "evmdecimals": 6, "address": "0xSUBNET_USDC"}
+            }
+        }
+        client.chain_config = {
+            "Avalanche": {"chain_id": 43114, "rpc_url": "https://rpc.example.com"}
+        }
+
+        ensure_calls = []
+
+        async def fake_ensure_allowance(w3, token_addr, spender, amount, **kwargs):
+            ensure_calls.append(amount)
+
+        client._ensure_allowance = fake_ensure_allowance
+        client._build_and_send_tx = AsyncMock(side_effect=Exception("withdraw reverted"))
+        client._get_token_decimals = MagicMock(return_value=6)
+
+        res = await client.withdraw("USDC", 1, "Avalanche")
+        assert not res.success
+        assert len(ensure_calls) == 2
+        assert ensure_calls[0] > 0
+        assert ensure_calls[1] == 0
+
     async def test_exceptions_and_edge_cases(self, client):
         # 1. get_all_portfolio_balances exception
         client.portfolio_sub_contract.functions.getBalances.side_effect = Exception("Err")

@@ -271,7 +271,7 @@ except Exception as e:
 
 ### M-1: WebSocket private-topic signature has no freshness guarantee on the client side
 
-**Status:** Open
+**Status:** 🔶 Mitigated — backend clock-skew window (±30 000 ms) documented in code comment; `config.ws_time_offset_ms` (env: `DEXALOT_WS_TIME_OFFSET_MS`) added to compensate for known clock skew. No client-side enforcement or retry on rejection — coordinate with backend to confirm the window and add enforcement if needed.
 
 **Finding:**
 `_subscribe_topic` sends `ts = int(time.time() * 1000)` but there is no client-side check
@@ -295,7 +295,7 @@ is rejected by the server due to clock skew.
 
 ### M-2: ERC20 approval is not revoked when the subsequent transaction fails
 
-**Status:** Open
+**Status:** ✅ Resolved — `_execute_erc20_deposit` and the new `_execute_erc20_withdrawal` helper both wrap the main tx in a try/except that calls `_ensure_allowance(..., 0)` on failure (best-effort, swallows secondary exceptions). Three unit tests added: `test_erc20_deposit_revokes_allowance_on_failure`, `test_erc20_deposit_no_revoke_when_no_token_info`, `test_erc20_withdraw_revokes_allowance_on_failure`.
 
 **Finding:**
 `_ensure_allowance` approves exactly `amount_wei`. If the deposit/withdrawal transaction fails
