@@ -83,6 +83,11 @@ class DexalotConfig:
     provider_failover_cooldown: int = 60  # Seconds before retrying failed provider
     provider_failover_max_failures: int = 3  # Max failures before marking provider unhealthy
 
+    # ERC20 balance concurrency limit
+    # Maximum number of concurrent balanceOf RPC calls in _fetch_erc20_balances_list.
+    # Prevents overwhelming the RPC provider when a chain has many tokens.
+    erc20_balance_concurrency: int = 10
+
     # RPC security settings
     # If False (default), http:// RPC URLs are rejected at provider setup time with ValueError.
     # Set to True only for local development or trusted private networks.
@@ -180,6 +185,7 @@ class DexalotConfig:
                 "DEXALOT_PROVIDER_FAILOVER_MAX_FAILURES", 3
             ),
             "allow_insecure_rpc": get_env_bool("DEXALOT_ALLOW_INSECURE_RPC", False),
+            "erc20_balance_concurrency": get_env_int("DEXALOT_ERC20_BALANCE_CONCURRENCY", 10),
         }
 
         # API Base URL logic

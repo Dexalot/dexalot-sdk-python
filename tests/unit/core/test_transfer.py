@@ -1,3 +1,4 @@
+import asyncio
 import os
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -1178,6 +1179,87 @@ class TestTransferClient:
         assert isinstance(result, list)
         assert len(result) == 0
         assert mock_provider.eth.contract.called
+
+    async def test_fetch_erc20_balances_list_concurrency_limit(self, client):
+        """At most erc20_balance_concurrency calls run simultaneously."""
+        client.config.erc20_balance_concurrency = 3
+        n_tokens = 9
+
+        client.token_data = {
+            f"TOK{i}": {
+                "Avalanche": {
+                    "chain_id": 43114,
+                    "address": f"0x{'0' * 39}{i}",
+                    "evmdecimals": 18,
+                }
+            }
+            for i in range(1, n_tokens + 1)
+        }
+
+        in_flight = 0
+        max_in_flight = 0
+
+        async def slow_balance():
+            nonlocal in_flight, max_in_flight
+            in_flight += 1
+            max_in_flight = max(max_in_flight, in_flight)
+            await asyncio.sleep(0)
+            in_flight -= 1
+            return 10**18  # 1.0 token
+
+        mock_provider = MagicMock()
+        mock_contract = MagicMock()
+        mock_balance_of = MagicMock()
+        mock_balance_of.call = slow_balance
+        mock_contract.functions.balanceOf.return_value = mock_balance_of
+        mock_provider.eth.contract.return_value = mock_contract
+
+        result = await client._fetch_erc20_balances_list(
+            43114, "Avalanche", mock_provider, VALID_ADDRESS
+        )
+        assert len(result) == n_tokens
+        assert max_in_flight <= client.config.erc20_balance_concurrency
+
+    async def test_fetch_erc20_balances_list_concurrency_config(self, client):
+        """Results are correct when concurrency is limited to 1 (fully serialised)."""
+        client.config.erc20_balance_concurrency = 1
+
+        client.token_data = {
+            "TOKA": {"Avalanche": {"chain_id": 43114, "address": "0xTokenA", "evmdecimals": 6}},
+            "TOKB": {"Avalanche": {"chain_id": 43114, "address": "0xTokenB", "evmdecimals": 18}},
+        }
+
+        call_order: list[str] = []
+
+        def make_balance_coro(symbol: str, amount: int):
+            async def _coro():
+                call_order.append(symbol)
+                return amount
+
+            return _coro
+
+        mock_provider = MagicMock()
+
+        def contract_factory(address, abi):
+            mock_contract = MagicMock()
+            symbol = "TOKA" if address == "0xTokenA" else "TOKB"
+            amount = 5 * 10**6 if symbol == "TOKA" else 2 * 10**18
+            mock_balance_of = MagicMock()
+            mock_balance_of.call = make_balance_coro(symbol, amount)
+            mock_contract.functions.balanceOf.return_value = mock_balance_of
+            return mock_contract
+
+        mock_provider.eth.contract.side_effect = contract_factory
+
+        result = await client._fetch_erc20_balances_list(
+            43114, "Avalanche", mock_provider, VALID_ADDRESS
+        )
+        assert len(result) == 2
+        symbols = {r["symbol"] for r in result}
+        assert symbols == {"TOKA", "TOKB"}
+        balances = {r["symbol"]: r["balance"] for r in result}
+        assert balances["TOKA"] == "5.0"
+        assert balances["TOKB"] == "2.0"
 
     async def test_remove_gas_exception(self, client):
         """Test remove_gas exception handling."""

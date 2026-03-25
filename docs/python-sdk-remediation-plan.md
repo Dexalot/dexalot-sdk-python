@@ -521,7 +521,7 @@ Note: This is a significant change to cache semantics. Start with the highest-va
 
 ### P-4: `_fetch_erc20_balances_list` fires unbounded parallel RPC calls
 
-**Status:** Open
+**Status:** ✅ Resolved — `asyncio.Semaphore(self.config.erc20_balance_concurrency)` added to `_fetch_erc20_balances_list` in `transfer.py`. Default cap is 10 concurrent `balanceOf` calls, configurable via `DexalotConfig.erc20_balance_concurrency` (env: `DEXALOT_ERC20_BALANCE_CONCURRENCY`). Two unit tests added: `test_fetch_erc20_balances_list_concurrency_limit` (verifies max in-flight ≤ limit) and `test_fetch_erc20_balances_list_concurrency_config` (verifies correct results at concurrency=1).
 
 **Finding:**
 All tokens on a chain are queried in a single `asyncio.gather(*tasks)` with no concurrency

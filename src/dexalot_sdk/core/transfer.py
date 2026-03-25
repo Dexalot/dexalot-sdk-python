@@ -425,7 +425,13 @@ class TransferClient(DexalotBaseClient):
         if not tasks:
             return []
 
-        results = await asyncio.gather(*tasks, return_exceptions=True)
+        sem = asyncio.Semaphore(self.config.erc20_balance_concurrency)
+
+        async def _guarded(coro):
+            async with sem:
+                return await coro
+
+        results = await asyncio.gather(*(_guarded(t) for t in tasks), return_exceptions=True)
         balances = []
 
         for (symbol, token_address, decimals), balance_wei in zip(
