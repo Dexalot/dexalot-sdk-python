@@ -1,12 +1,13 @@
+import asyncio
 import json
 import logging
-import threading
 import time
 from collections.abc import Callable
 from enum import Enum
 from typing import Any
 
-import websocket
+import websockets
+import websockets.exceptions
 
 from ..utils.observability import get_logger
 
@@ -24,6 +25,12 @@ class WebSocketManager:
     """
     Manages a persistent WebSocket connection with support for multiple topic subscriptions,
     automatic reconnection, and heartbeat/ping-pong.
+
+    Uses the ``websockets`` async library; all I/O runs on the asyncio event loop.
+    No threading is used.  ``connect()`` and ``subscribe()``/``unsubscribe()`` are
+    synchronous entry points that schedule work on the running event loop via
+    ``loop.create_task()``.  ``disconnect()`` is ``async def`` and can be awaited to
+    cleanly cancel the background task.
     """
 
     def __init__(
@@ -33,249 +40,67 @@ class WebSocketManager:
         config: Any,
         logger: logging.Logger | None = None,
     ):
-        """
-        Initialize WebSocketManager.
-
-        Args:
-            ws_url: WebSocket URL to connect to
-            account: Optional Account instance for private topic authentication
-            config: DexalotConfig instance with WebSocket settings
-            logger: Optional logger instance
-        """
         self.ws_url = ws_url
         self.account = account
         self.config = config
         self.logger = logger or get_logger(__name__)
 
+        # Store the running event loop at construction time.  The SDK always
+        # instantiates WebSocketManager from async contexts (DexalotBaseClient
+        # methods are all async), so the loop is always available here.
+        self._loop: asyncio.AbstractEventLoop = asyncio.get_event_loop()
+
         # Connection state
         self._state = ConnectionState.DISCONNECTED
-        self._state_lock = threading.Lock()
-        self._ws: websocket.WebSocketApp | None = None
-        self._ws_thread: threading.Thread | None = None
+        self._ws: websockets.ClientConnection | None = None
+        self._run_task: asyncio.Task[None] | None = None
+        self._should_reconnect = False
 
         # Subscriptions: key -> (callback, is_private, meta)
-        # meta is None (legacy topics) or {"kind": "orderbook", "pair", "decimal"} per docs/websocket.md
+        # meta is None (legacy topics) or {"kind": "orderbook", "pair", "decimal"}
         self._subscriptions: dict[str, tuple[Callable, bool, dict[str, Any] | None]] = {}
-        self._subscriptions_lock = threading.Lock()
 
         # Reconnection state
         self._reconnect_attempts = 0
         self._reconnect_delay = config.ws_reconnect_initial_delay
-        self._should_reconnect = False
 
-        # Ping/pong state
-        self._last_pong_time: float | None = None
-        self._ping_thread: threading.Thread | None = None
-        self._stop_ping = threading.Event()
+    # ------------------------------------------------------------------
+    # Public properties
+    # ------------------------------------------------------------------
 
     @property
     def state(self) -> ConnectionState:
         """Get current connection state."""
-        with self._state_lock:
-            return self._state
+        return self._state
 
     @property
     def is_connected(self) -> bool:
         """Check if WebSocket is connected."""
-        return self.state == ConnectionState.CONNECTED
+        return self._state == ConnectionState.CONNECTED
+
+    # ------------------------------------------------------------------
+    # Sync public API  (schedule work on the event loop)
+    # ------------------------------------------------------------------
 
     def connect(self) -> None:
         """
-        Establish WebSocket connection.
-        Raises RuntimeError if WebSocket is disabled in config.
+        Start the WebSocket background task.
+
+        This is a synchronous entry point that schedules the async ``_run``
+        coroutine on the event loop.  Raises ``RuntimeError`` if the WebSocket
+        manager is disabled in config.  Idempotent when already connecting/connected.
         """
         if not self.config.ws_manager_enabled:
             raise RuntimeError(
                 "WebSocket Manager is disabled. Set ws_manager_enabled=True in config."
             )
-
-        with self._state_lock:
-            if self._state in (ConnectionState.CONNECTING, ConnectionState.CONNECTED):
-                self.logger.debug("WebSocket already connecting or connected")
-                return
-            self._state = ConnectionState.CONNECTING
-
-        try:
-            self._ws = websocket.WebSocketApp(
-                self.ws_url,
-                on_open=self._on_open,
-                on_message=self._on_message,
-                on_error=self._on_error,
-                on_close=self._on_close,
-            )
-
-            self._should_reconnect = True
-            self._ws_thread = threading.Thread(target=self._run_forever, daemon=True)
-            self._ws_thread.start()
-        except Exception as e:
-            with self._state_lock:
-                self._state = ConnectionState.DISCONNECTED
-            self.logger.error(f"Failed to create WebSocket connection: {e}")
-            raise
-
-    def _run_forever(self) -> None:
-        """Run WebSocket in a separate thread."""
-        ws = self._ws
-        if ws is None:
-            return
-        try:
-            ws.run_forever(
-                ping_interval=self.config.ws_ping_interval,
-                ping_timeout=self.config.ws_ping_timeout,
-            )
-        except Exception as e:
-            self.logger.error(f"WebSocket run_forever error: {e}")
-
-    def _on_open(self, ws: websocket.WebSocketApp) -> None:
-        """Handle WebSocket connection opened."""
-        self.logger.info("WebSocket connection opened")
-        with self._state_lock:
-            self._state = ConnectionState.CONNECTED
-            self._reconnect_attempts = 0
-            self._reconnect_delay = self.config.ws_reconnect_initial_delay
-
-        # Start ping thread
-        self._start_ping_thread()
-
-        # Re-subscribe to all active topics (copy keys to avoid holding
-        # _subscriptions_lock while _subscribe_topic re-acquires it).
-        with self._subscriptions_lock:
-            keys = list(self._subscriptions.keys())
-        for subscription_key in keys:
-            self._subscribe_topic(ws, subscription_key)
-
-    def _on_message(self, ws: websocket.WebSocketApp, message: str) -> None:
-        """Handle incoming WebSocket message."""
-        try:
-            data = json.loads(message)
-            self.logger.debug(f"WebSocket message received: {data}")
-
-            # Handle pong messages
-            if isinstance(data, dict) and data.get("type") == "pong":
-                self._last_pong_time = time.time()
-                return
-
-            # Dexalot order book stream: type "orderBooks", pair "BASE/QUOTE" (docs/websocket.md)
-            if data.get("type") == "orderBooks" and data.get("pair"):
-                pair = data["pair"]
-                with self._subscriptions_lock:
-                    specs = list(self._subscriptions.items())
-                for _sub_key, (callback, _priv, meta) in specs:
-                    if meta and meta.get("kind") == "orderbook" and meta.get("pair") == pair:
-                        try:
-                            callback(data)
-                        except Exception as e:
-                            self.logger.error(f"Error in orderbook callback for {pair}: {e}")
-                return
-
-            # Legacy: messages with a "topic" field
-            topic = data.get("topic") if isinstance(data, dict) else None
-
-            if topic:
-                with self._subscriptions_lock:
-                    if topic in self._subscriptions:
-                        callback, _, _meta = self._subscriptions[topic]
-                        try:
-                            callback(data)
-                        except Exception as e:
-                            self.logger.error(f"Error in callback for topic {topic}: {e}")
-            else:
-                # Broadcast to all callbacks if no topic specified
-                with self._subscriptions_lock:
-                    for callback, _, _meta in self._subscriptions.values():
-                        try:
-                            callback(data)
-                        except Exception as e:
-                            self.logger.error(f"Error in callback: {e}")
-
-        except json.JSONDecodeError as e:
-            self.logger.error(f"Failed to parse WebSocket message: {e}")
-        except Exception as e:
-            self.logger.error(f"Error handling WebSocket message: {e}")
-
-    def _on_error(self, ws: websocket.WebSocketApp, error: Exception) -> None:
-        """Handle WebSocket error."""
-        self.logger.error(f"WebSocket error: {error}")
-
-    def _on_close(self, ws: websocket.WebSocketApp, close_status_code: int, close_msg: str) -> None:
-        """Handle WebSocket connection closed."""
-        self.logger.info(f"WebSocket closed: {close_status_code} {close_msg}")
-        self._stop_ping_thread()
-
-        with self._state_lock:
-            if self._should_reconnect and self._state != ConnectionState.DISCONNECTED:
-                self._state = ConnectionState.RECONNECTING
-                self._schedule_reconnect()
-            else:
-                self._state = ConnectionState.DISCONNECTED
-
-    def _schedule_reconnect(self) -> None:
-        """Schedule reconnection attempt with exponential backoff."""
-        if not self._should_reconnect:
+        if self._state in (ConnectionState.CONNECTING, ConnectionState.CONNECTED):
+            self.logger.debug("WebSocket already connecting or connected")
             return
 
-        max_attempts = self.config.ws_reconnect_max_attempts
-        if max_attempts > 0 and self._reconnect_attempts >= max_attempts:
-            self.logger.error(f"Max reconnection attempts ({max_attempts}) reached")
-            with self._state_lock:
-                self._state = ConnectionState.DISCONNECTED
-            return
-
-        self._reconnect_attempts += 1
-        delay = min(
-            self._reconnect_delay,
-            self.config.ws_reconnect_max_delay,
-        )
-        self.logger.info(f"Scheduling reconnect in {delay}s (attempt {self._reconnect_attempts})")
-
-        def reconnect():
-            time.sleep(delay)
-            if self._should_reconnect:
-                try:
-                    self.connect()
-                except Exception as e:
-                    self.logger.error(f"Reconnection failed: {e}")
-                    # Exponential backoff
-                    self._reconnect_delay *= self.config.ws_reconnect_exponential_base
-                    self._schedule_reconnect()
-
-        threading.Thread(target=reconnect, daemon=True).start()
-        # Increase delay for next attempt
-        self._reconnect_delay *= self.config.ws_reconnect_exponential_base
-
-    def _start_ping_thread(self) -> None:
-        """Start ping thread for heartbeat."""
-        self._stop_ping.clear()
-        if self._ping_thread and self._ping_thread.is_alive():
-            return
-
-        def ping_loop():
-            while not self._stop_ping.is_set() and self.is_connected:
-                time.sleep(self.config.ws_ping_interval)
-                if not self._stop_ping.is_set() and self._ws:
-                    try:
-                        # Check if we got a pong recently
-                        if (
-                            self._last_pong_time
-                            and time.time() - self._last_pong_time > self.config.ws_ping_timeout * 2
-                        ):
-                            self.logger.warning("No pong received, connection may be dead")
-                            if self._ws:
-                                self._ws.close()
-                        else:
-                            # Send ping (websocket-client handles this automatically via ping_interval)
-                            pass
-                    except Exception as e:
-                        self.logger.error(f"Error in ping loop: {e}")
-
-        self._ping_thread = threading.Thread(target=ping_loop, daemon=True)
-        self._ping_thread.start()
-
-    def _stop_ping_thread(self) -> None:
-        """Stop ping thread."""
-        self._stop_ping.set()
-        if self._ping_thread:
-            self._ping_thread.join(timeout=0.35)
+        self._state = ConnectionState.CONNECTING
+        self._should_reconnect = True
+        self._run_task = self._loop.create_task(self._run())
 
     def subscribe(
         self,
@@ -287,154 +112,308 @@ class WebSocketManager:
         orderbook_decimal: int | None = None,
     ) -> None:
         """
-        Subscribe with a callback.
+        Register a subscription callback.
 
-        Public order books use the pair payload from docs/websocket.md. Pass orderbook_pair /
-        orderbook_decimal when known; otherwise a key starting with "OrderBook/" is mapped
-        to a pair subscribe with default decimal 8.
+        Synchronous.  Stores the subscription locally and, if already connected,
+        schedules the wire subscribe message on the event loop.  Auto-connects if
+        not yet connected.
         """
         if not self.config.ws_manager_enabled:
             raise RuntimeError(
                 "WebSocket Manager is disabled. Set ws_manager_enabled=True in config."
             )
 
-        pair = orderbook_pair
-        dec = orderbook_decimal
-        if not is_private and pair is None and subscription_key.startswith("OrderBook/"):
-            pair = subscription_key[len("OrderBook/") :]
-        if pair is not None and dec is None:
-            dec = 8
+        meta = _build_meta(subscription_key, is_private, orderbook_pair, orderbook_decimal)
+        self._subscriptions[subscription_key] = (callback, is_private, meta)
 
-        meta: dict[str, Any] | None
-        if pair is not None:
-            orderbook_dec = dec if dec is not None else 8
-            meta = {"kind": "orderbook", "pair": pair, "decimal": int(orderbook_dec)}
-        else:
-            meta = None
-
-        with self._subscriptions_lock:
-            self._subscriptions[subscription_key] = (callback, is_private, meta)
-
-        # If connected, send subscription immediately
         if self.is_connected and self._ws:
-            self._subscribe_topic(self._ws, subscription_key)
+            self._loop.create_task(self._send_subscribe(subscription_key))
         elif not self.is_connected:
-            # Auto-connect if not connected
             self.connect()
 
-    def _subscribe_topic(self, ws: websocket.WebSocketApp, subscription_key: str) -> None:
-        """Send subscription message for a subscription key (see docs/websocket.md)."""
-        with self._subscriptions_lock:
-            spec = self._subscriptions.get(subscription_key)
+    def unsubscribe(self, subscription_key: str) -> None:
+        """Remove a subscription and send the wire unsubscribe message if connected."""
+        spec = self._subscriptions.pop(subscription_key, None)
+        if spec is None:
+            return
+        self.logger.info(f"Unsubscribed from: {subscription_key}")
+        if self.is_connected and self._ws:
+            self._loop.create_task(self._send_unsubscribe(subscription_key, spec))
+
+    # ------------------------------------------------------------------
+    # Async public API
+    # ------------------------------------------------------------------
+
+    async def disconnect(self) -> None:
+        """
+        Close the WebSocket connection and cancel the background task.
+
+        Safe to call even if not connected.  After this returns the manager is
+        in ``DISCONNECTED`` state and all subscriptions are cleared.
+        """
+        self._should_reconnect = False
+
+        if self._ws is not None:
+            try:
+                await self._ws.close()
+            except Exception:
+                pass
+
+        if self._run_task is not None and not self._run_task.done():
+            self._run_task.cancel()
+            try:
+                await self._run_task
+            except (asyncio.CancelledError, Exception):
+                pass
+
+        self._state = ConnectionState.DISCONNECTED
+        self._subscriptions.clear()
+        self.logger.info("WebSocket disconnected and cleaned up")
+
+    # ------------------------------------------------------------------
+    # Background coroutine
+    # ------------------------------------------------------------------
+
+    async def _run(self) -> None:
+        """
+        Background coroutine: connect → re-subscribe → message loop → reconnect.
+
+        Loops while ``_should_reconnect`` is True, applying exponential backoff
+        between attempts.  Exits cleanly on ``asyncio.CancelledError``.
+        """
+        while self._should_reconnect:
+            cancelled = False
+            try:
+                async with websockets.connect(
+                    self.ws_url,
+                    ping_interval=self.config.ws_ping_interval,
+                    ping_timeout=self.config.ws_ping_timeout,
+                ) as ws:
+                    self._ws = ws
+                    self._state = ConnectionState.CONNECTED
+                    self._reconnect_attempts = 0
+                    self._reconnect_delay = self.config.ws_reconnect_initial_delay
+                    self.logger.info("WebSocket connection opened")
+
+                    # Re-subscribe all registered topics (handles reconnect scenario)
+                    for key in list(self._subscriptions):
+                        await self._send_subscribe(key)
+
+                    async for raw in ws:
+                        if isinstance(raw, bytes):
+                            raw = raw.decode()
+                        self._handle_message(raw)
+
+            except asyncio.CancelledError:
+                cancelled = True
+            except Exception as e:
+                self.logger.error(f"WebSocket error: {e}")
+            finally:
+                self._ws = None
+
+            if cancelled or not self._should_reconnect:
+                self._state = ConnectionState.DISCONNECTED
+                break
+            self._state = ConnectionState.RECONNECTING
+            if not await self._backoff():
+                break
+
+    async def _backoff(self) -> bool:
+        """
+        Sleep for the current reconnect delay, then update state for next attempt.
+
+        Returns False when max reconnect attempts is reached (caller should stop),
+        True otherwise.
+        """
+        max_attempts = self.config.ws_reconnect_max_attempts
+        if max_attempts > 0 and self._reconnect_attempts >= max_attempts:
+            self.logger.error(f"Max reconnection attempts ({max_attempts}) reached")
+            self._should_reconnect = False
+            self._state = ConnectionState.DISCONNECTED
+            return False
+
+        self._reconnect_attempts += 1
+        delay = min(self._reconnect_delay, self.config.ws_reconnect_max_delay)
+        self.logger.info(f"Scheduling reconnect in {delay}s (attempt {self._reconnect_attempts})")
+        try:
+            await asyncio.sleep(delay)
+        except asyncio.CancelledError:
+            return False
+        self._reconnect_delay *= self.config.ws_reconnect_exponential_base
+        return True
+
+    # ------------------------------------------------------------------
+    # Wire protocol helpers
+    # ------------------------------------------------------------------
+
+    async def _send_subscribe(self, subscription_key: str) -> None:
+        """Build and send the subscribe wire message for a subscription key."""
+        if self._ws is None:
+            return
+        spec = self._subscriptions.get(subscription_key)
         if not spec:
             return
         _callback, is_private, meta = spec
 
+        payload = _build_subscribe_payload(
+            subscription_key, is_private, meta, self.account, self.config
+        )
+        if payload is None:
+            return
+
+        try:
+            await self._ws.send(json.dumps(payload))
+            self.logger.info(f"Subscribed: {subscription_key}")
+        except websockets.exceptions.ConnectionClosed:
+            pass  # Connection closed during teardown — expected
+        except Exception as e:
+            self.logger.error(f"Failed to subscribe {subscription_key}: {e}")
+
+    async def _send_unsubscribe(
+        self, subscription_key: str, spec: tuple[Callable, bool, dict[str, Any] | None]
+    ) -> None:
+        """Build and send the unsubscribe wire message."""
+        if self._ws is None:
+            return
+        _callback, _is_private, meta = spec
         if meta and meta.get("kind") == "orderbook":
             pair = meta["pair"]
-            dec = meta["decimal"]
             payload: dict[str, Any] = {
-                "type": "subscribe",
+                "type": "unsubscribe",
                 "data": pair,
                 "pair": pair,
-                "decimal": dec,
+                "decimal": meta["decimal"],
             }
             addr = getattr(self.account, "address", None) if self.account else None
             if addr:
                 payload["traderaddress"] = addr
-        elif is_private:
-            if not self.account:
-                self.logger.warning(
-                    f"Cannot subscribe to private topic {subscription_key} without account"
-                )
-                return
-
-            payload = {"type": "subscribe", "topics": [subscription_key]}
-
-            # Generate authentication signature (legacy private topics).
-            # The Dexalot backend accepts private-topic signatures whose timestamp is
-            # within ±30 000 ms of server time. If the local clock is skewed, set
-            # config.ws_time_offset_ms (env: DEXALOT_WS_TIME_OFFSET_MS) to compensate.
-            time_offset_ms = getattr(self.config, "ws_time_offset_ms", 0)
-            ts = int(time.time() * 1000) + time_offset_ms
-            msg_to_sign = f"{self.account.address}{ts}"
-
-            from eth_account.messages import encode_defunct
-
-            message_hash = encode_defunct(text=msg_to_sign)
-            signed_message = self.account.sign_message(message_hash)
-            signature = signed_message.signature.hex()
-
-            payload["address"] = self.account.address
-            payload["signature"] = signature
-            payload["timestamp"] = ts
         else:
-            payload = {"type": "subscribe", "topics": [subscription_key]}
+            payload = {"type": "unsubscribe", "topics": [subscription_key]}
 
         try:
-            ws.send(json.dumps(payload))
-            self.logger.info(f"Subscribed: {subscription_key}")
+            await self._ws.send(json.dumps(payload))
+        except websockets.exceptions.ConnectionClosed:
+            pass  # Connection closed during teardown — expected
         except Exception as e:
-            self.logger.error(f"Failed to subscribe {subscription_key}: {e}")
+            self.logger.error(f"Failed to unsubscribe {subscription_key}: {e}")
 
-    def unsubscribe(self, subscription_key: str) -> None:
-        """
-        Unsubscribe from a subscription key (pair or legacy topic).
-        """
-        with self._subscriptions_lock:
-            spec = self._subscriptions.pop(subscription_key, None)
-        if spec is None:
-            return
-        _callback, is_private, meta = spec
-        self.logger.info(f"Unsubscribed from: {subscription_key}")
+    # ------------------------------------------------------------------
+    # Message routing
+    # ------------------------------------------------------------------
 
-        if self.is_connected and self._ws:
-            try:
-                if meta and meta.get("kind") == "orderbook":
-                    pair = meta["pair"]
-                    payload: dict[str, Any] = {
-                        "type": "unsubscribe",
-                        "data": pair,
-                        "pair": pair,
-                        "decimal": meta["decimal"],
-                    }
-                    addr = getattr(self.account, "address", None) if self.account else None
-                    if addr:
-                        payload["traderaddress"] = addr
-                else:
-                    payload = {"type": "unsubscribe", "topics": [subscription_key]}
-                self._ws.send(json.dumps(payload))
-            except Exception as e:
-                self.logger.error(f"Failed to unsubscribe {subscription_key}: {e}")
+    def _handle_message(self, raw: str) -> None:
+        """Parse and route an incoming WebSocket message to registered callbacks."""
+        try:
+            data = json.loads(raw)
+            self.logger.debug(f"WebSocket message received: {data}")
 
-    def disconnect(self) -> None:
-        """Close WebSocket connection and cleanup."""
-        self._should_reconnect = False
-        self._stop_ping_thread()
+            # Dexalot order book stream: type "orderBooks", pair "BASE/QUOTE"
+            if data.get("type") == "orderBooks" and data.get("pair"):
+                pair = data["pair"]
+                for _sub_key, (callback, _priv, meta) in list(self._subscriptions.items()):
+                    if meta and meta.get("kind") == "orderbook" and meta.get("pair") == pair:
+                        try:
+                            callback(data)
+                        except Exception as e:
+                            self.logger.error(f"Error in orderbook callback for {pair}: {e}")
+                return
 
-        if self._ws:
-            try:
-                self._ws.keep_running = False
-            except Exception:
-                pass
-            try:
-                self._ws.close()
-            except Exception:
-                pass
+            # Legacy: messages with a "topic" field
+            topic = data.get("topic") if isinstance(data, dict) else None
+            if topic:
+                if topic in self._subscriptions:
+                    callback, _, _meta = self._subscriptions[topic]
+                    try:
+                        callback(data)
+                    except Exception as e:
+                        self.logger.error(f"Error in callback for topic {topic}: {e}")
+            else:
+                # Broadcast to all callbacks if no topic specified
+                for callback, _, _meta in list(self._subscriptions.values()):
+                    try:
+                        callback(data)
+                    except Exception as e:
+                        self.logger.error(f"Error in callback: {e}")
 
-        if self._ws_thread and self._ws_thread.is_alive():
-            # Short timeout: thread is daemon; long joins block asyncio if disconnect() is
-            # awaited from async code without asyncio.to_thread (see close_websocket).
-            self._ws_thread.join(timeout=0.5)
-            if self._ws_thread.is_alive():
-                self.logger.debug(
-                    "WebSocket thread did not exit within join timeout (daemon; will stop with process)"
-                )
+        except json.JSONDecodeError as e:
+            self.logger.error(f"Failed to parse WebSocket message: {e}")
+        except Exception as e:
+            self.logger.error(f"Error handling WebSocket message: {e}")
 
-        with self._state_lock:
-            self._state = ConnectionState.DISCONNECTED
 
-        with self._subscriptions_lock:
-            self._subscriptions.clear()
+# ------------------------------------------------------------------
+# Module-level helpers
+# ------------------------------------------------------------------
 
-        self.logger.info("WebSocket disconnected and cleaned up")
+
+def _build_meta(
+    subscription_key: str,
+    is_private: bool,
+    orderbook_pair: str | None,
+    orderbook_decimal: int | None,
+) -> dict[str, Any] | None:
+    """Build the subscription meta dict (orderbook info or None for legacy topics)."""
+    pair = orderbook_pair
+    dec = orderbook_decimal
+    if not is_private and pair is None and subscription_key.startswith("OrderBook/"):
+        pair = subscription_key[len("OrderBook/"):]
+    if pair is not None and dec is None:
+        dec = 8
+
+    if pair is not None:
+        return {"kind": "orderbook", "pair": pair, "decimal": int(dec if dec is not None else 8)}
+    return None
+
+
+def _build_subscribe_payload(
+    subscription_key: str,
+    is_private: bool,
+    meta: dict[str, Any] | None,
+    account: Any | None,
+    config: Any,
+) -> dict[str, Any] | None:
+    """
+    Build the wire-protocol subscribe payload (docs/websocket.md).
+
+    Returns None if the payload cannot be built (e.g. private topic without account).
+    """
+    if meta and meta.get("kind") == "orderbook":
+        pair = meta["pair"]
+        dec = meta["decimal"]
+        payload: dict[str, Any] = {
+            "type": "subscribe",
+            "data": pair,
+            "pair": pair,
+            "decimal": dec,
+        }
+        addr = getattr(account, "address", None) if account else None
+        if addr:
+            payload["traderaddress"] = addr
+        return payload
+
+    if is_private:
+        if not account:
+            return None  # caller logs the warning
+
+        payload = {"type": "subscribe", "topics": [subscription_key]}
+
+        # Generate authentication signature (legacy private topics).
+        # The Dexalot backend accepts private-topic signatures whose timestamp is
+        # within ±30 000 ms of server time.  If the local clock is skewed, set
+        # config.ws_time_offset_ms (env: DEXALOT_WS_TIME_OFFSET_MS) to compensate.
+        time_offset_ms = getattr(config, "ws_time_offset_ms", 0)
+        ts = int(time.time() * 1000) + time_offset_ms
+        msg_to_sign = f"{account.address}{ts}"
+
+        from eth_account.messages import encode_defunct
+
+        message_hash = encode_defunct(text=msg_to_sign)
+        signed_message = account.sign_message(message_hash)
+        signature = signed_message.signature.hex()
+
+        payload["address"] = account.address
+        payload["signature"] = signature
+        payload["timestamp"] = ts
+        return payload
+
+    return {"type": "subscribe", "topics": [subscription_key]}

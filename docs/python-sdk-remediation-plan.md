@@ -329,7 +329,7 @@ except Exception:
 
 ### M-3: Synchronous WebSocket library mixed into async codebase
 
-**Status:** Open
+**Status:** ✅ Resolved — replaced `websocket-client`+threading with the `websockets` async library. `WebSocketManager` now runs entirely on the asyncio event loop: `connect()` schedules an `asyncio.Task` for the background `_run()` coroutine; `disconnect()` is `async def` and cancels that task. No `threading.Thread` remains in the WebSocket implementation. `close_websocket()` in `clob.py` simplified to `await asyncio.wait_for(mgr.disconnect(), ...)`. `listen_to_events()` (a separate one-shot sync method that used `websocket-client` directly) was removed as it was superseded by `subscribe_to_events()`. Unit tests in `TestWebSocketManager` fully rewritten for the async implementation.
 
 **Finding:**
 `WebSocketManager` uses the `websocket-client` library (synchronous) with `threading.Thread`.

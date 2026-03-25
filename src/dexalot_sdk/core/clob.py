@@ -1,11 +1,7 @@
 import asyncio
-import json
-import threading
 import time
 from collections.abc import Callable
 from typing import Any, cast
-
-import websocket
 
 from ..constants import (
     ENDPOINT_SIGNED_ORDERS,
@@ -1346,177 +1342,20 @@ class CLOBClient(DexalotBaseClient):
     async def close_websocket(self, *, grace_s: float = 3.0) -> None:
         """Close WebSocket connection and cleanup.
 
-        Runs ``disconnect()`` on a **daemon** thread and optionally waits up to ``grace_s``
-        seconds for it to finish (polls with short async sleeps). We avoid
-        ``asyncio.to_thread`` / the default ``ThreadPoolExecutor`` so loop shutdown does not
-        block on ``shutdown_default_executor()``.
-
-        Use ``grace_s=0`` when tearing down after task cancellation (e.g. Ctrl+C under
-        pytest-asyncio): ``disconnect()`` can block inside ``websocket-client`` longer than
-        any grace period; waiting would only delay returning and invite a second SIGINT
-        (``KeyboardInterrupt``), while the daemon thread keeps finishing in the background.
-
-        On timeout or ``CancelledError`` during the wait loop we return without re-raising.
+        Awaits ``mgr.disconnect()`` (which cancels the background asyncio task)
+        with an optional timeout.  On timeout or ``CancelledError`` we return
+        without re-raising so that test/fixture teardown can finish cleanly.
         """
         if not hasattr(self, "_ws_manager") or self._ws_manager is None:
             return
         mgr = self._ws_manager
         self._ws_manager = None
 
-        def _sync_disconnect() -> None:
-            try:
-                mgr.disconnect()
-            except Exception:
-                pass
-
-        done = threading.Event()
-
-        def _run_disconnect() -> None:
-            try:
-                _sync_disconnect()
-            finally:
-                done.set()
-
-        threading.Thread(target=_run_disconnect, daemon=True).start()
-
-        if grace_s <= 0:
-            await asyncio.sleep(0)
-            return
-
-        loop = asyncio.get_running_loop()
-        deadline = loop.time() + grace_s
+        timeout = grace_s if grace_s > 0 else 1.0
         try:
-            while not done.is_set():
-                if loop.time() >= deadline:
-                    self.logger.warning(
-                        "WebSocket disconnect exceeded %.1fs; daemon thread still finishing",
-                        grace_s,
-                    )
-                    break
-                await asyncio.sleep(0.05)
-        except asyncio.CancelledError:
-            # Do not re-raise: allow test/fixture finally to finish after Ctrl+C.
+            await asyncio.wait_for(mgr.disconnect(), timeout=timeout)
+        except (TimeoutError, asyncio.CancelledError, Exception):
             pass
-
-        await asyncio.sleep(0)
-
-    @track_method("websocket")
-    def listen_to_events(self, topic, duration_seconds=10):
-        """
-        Listen to WebSocket events for a specific topic for a duration.
-        topic: e.g. "OrderBook/AVAX/USDC" or legacy private channel names.
-
-        Note: This method creates a temporary connection. For persistent subscriptions,
-        use subscribe_to_events() instead.
-
-        Public order books use the pair subscribe shape from docs/websocket.md.
-
-        This method works independently of the ws_manager_enabled setting, allowing one-off
-        WebSocket connections even when the persistent WebSocketManager is disabled.
-        """
-        import threading
-
-        messages = []
-
-        ws_url = ws_api_url_for_rest_base(self.api_base_url)
-
-        def on_message(ws, message):
-            self.logger.debug(f"WS Message: {message}")
-            messages.append(json.loads(message))
-
-        def on_error(ws, error):
-            self.logger.error(f"WS Error: {error}")
-            # pass  # print(f"WS Error: {error}")
-
-        def on_close(ws, close_status_code, close_msg):
-            self.logger.info(f"WS Closed: {close_status_code} {close_msg}")
-            # pass  # print("WS Closed")
-
-        def on_open(ws):
-            self.logger.info("WS Opened")
-            pair: str | None = None
-            if isinstance(topic, str) and topic.startswith("OrderBook/"):
-                pair = topic[len("OrderBook/") :]
-            elif isinstance(topic, str) and "/" in topic and topic.count("/") == 1:
-                pair = topic
-
-            if pair and topic not in ["Orders", "Executions", "Balances"]:
-                pd = self.pairs.get(pair) if isinstance(self.pairs, dict) else None
-                dec = 8
-                if isinstance(pd, dict):
-                    dec = int(
-                        pd.get("quote_display_decimals")
-                        or pd.get("base_display_decimals")
-                        or 8
-                    )
-                payload_ob: dict[str, Any] = {
-                    "type": "subscribe",
-                    "data": pair,
-                    "pair": pair,
-                    "decimal": dec,
-                }
-                if self.account:
-                    addr = cast(str, cast(Any, self.account).address)
-                    payload_ob["traderaddress"] = addr
-                ws.send(json.dumps(payload_ob))
-                return
-
-            payload: dict[str, Any] = {"type": "subscribe", "topics": [topic]}
-
-            # Check if private topic
-            if topic in ["Orders", "Executions", "Balances"]:
-                if not self.account:
-                    pass  # print("Cannot subscribe to private topic without account.")
-                    return
-
-                # Auth logic
-                # 1. Get nonce/timestamp?
-                # Docs say:
-                # {
-                #   "type": "subscribe",
-                #   "topics": ["Orders"],
-                #   "address": "0x...",
-                #   "signature": "0x...",
-                #   "timestamp": 1234567890
-                # }
-                # Signature matches: keccak256(address + timestamp) ?
-                # Need to check docs for exact signature format.
-                # Assuming standard: sign(address + timestamp)
-
-                ts = int(time.time() * 1000)
-                msg_to_sign = f"{cast(str, cast(Any, self.account).address)}{ts}"
-                # This is a guess. Let's look at docs if possible.
-                # Docs link provided: https://docs.dexalot.com/en/apiv2/Websocket.html
-                # I can't browse, but I can assume standard or try to read if I had the tool.
-                # I'll implement a generic signature mechanism if I can't verify.
-                # "The signature is generated by signing the concatenation of the user's address and the timestamp."
-
-                from eth_account.messages import encode_defunct
-
-                message_hash = encode_defunct(text=msg_to_sign)
-                # Use Account instance method - never expose private key
-                signed_message = self.account.sign_message(message_hash)
-                signature = signed_message.signature.hex()
-
-                payload["address"] = cast(str, cast(Any, self.account).address)
-                payload["signature"] = signature
-                payload["timestamp"] = ts
-
-            ws.send(json.dumps(payload))
-
-        ws = websocket.WebSocketApp(
-            ws_url, on_open=on_open, on_message=on_message, on_error=on_error, on_close=on_close
-        )
-
-        wst = threading.Thread(target=ws.run_forever)
-        wst.daemon = True
-        wst.start()
-
-        time.sleep(duration_seconds)
-        ws.close()
-        wst.join(timeout=1)
-
-        return messages
 
     async def _ensure_pair_exists(self, pair):
         """Ensure pair exists in local cache, fetching if necessary."""

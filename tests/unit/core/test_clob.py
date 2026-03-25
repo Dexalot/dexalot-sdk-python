@@ -1,3 +1,4 @@
+import asyncio
 import json
 import os
 import time
@@ -1113,16 +1114,6 @@ class TestCLOBClient:
         # call_args is tuple of args. First arg is trader address. Second is client ID.
         assert len(call_args[1]) == 32
 
-    def test_listen_to_events(self, client):
-        """Test listen_to_events placeholder."""
-        # listen_to_events works independently of ws_manager_enabled
-        with patch("dexalot_sdk.core.clob.websocket.WebSocketApp") as mock_ws:
-            mock_ws_instance = MagicMock()
-            mock_ws.return_value = mock_ws_instance
-            mock_ws_instance.run_forever.side_effect = lambda: None
-            client.listen_to_events("OrderBook/AVAX/USDC", duration_seconds=0.1)
-            mock_ws.assert_called_once()
-
     async def test_validations_and_errors(self, client):
         """Test various validation and error paths."""
         # cancel_list_orders no account
@@ -1456,52 +1447,6 @@ class TestCLOBClient:
         )
         assert not result.success
 
-    def test_listen_to_events_logic(self, client):
-        """Test listen_to_events inner logic."""
-        # listen_to_events works independently of ws_manager_enabled
-        # WebSocket is still synchronous in the SDK (uses threading)
-        # So we keep this test synchronous but fix any awaited calls if any.
-        # Wait, the SDK call is listen_to_events which is def (sync).
-        # But it uses self.w3_l1.eth.account.sign_message which is currently shadowed by AsyncWeb3?
-        # No, eth.account is usually sync even in AsyncWeb3 if not using await.
-
-        # Mock WebSocketApp instance
-        mock_ws_instance = MagicMock()
-        with patch(
-            "dexalot_sdk.core.clob.websocket.WebSocketApp", return_value=mock_ws_instance
-        ) as mock_ws_app:
-            # Mock run_forever to simulate connection and message
-            def side_effect_run_forever(dispatcher=None):
-                # Simulate on_open
-                mock_ws_app.call_args[1]["on_open"](mock_ws_instance)
-                # Simulate on_message
-                mock_ws_app.call_args[1]["on_message"](
-                    mock_ws_instance, json.dumps({"type": "data"})
-                )
-                # Simulate on_error
-                mock_ws_app.call_args[1]["on_error"](mock_ws_instance, "Error")
-                # Simulate on_close
-                mock_ws_app.call_args[1]["on_close"](mock_ws_instance, 1000, "Closed")
-
-            mock_ws_instance.run_forever.side_effect = side_effect_run_forever
-
-            # Mock signature generation - now using Account instance method
-            mock_signed_message = MagicMock()
-            # signature is usually HexBytes which has .hex()
-            mock_signed_message.signature.hex = MagicMock(return_value="0xSignature")
-            # Mock the Account instance's sign_message method
-            client.account.sign_message = MagicMock(return_value=mock_signed_message)
-
-            # 1. Public Topic
-            client.listen_to_events("OrderBook/AVAX/USDC", duration_seconds=1)
-
-            # 2. Private Topic (Orders)
-            mock_ws_instance.reset_mock()
-            client.listen_to_events("Orders", duration_seconds=1)
-
-            # Verify subscribe messages were sent
-            assert mock_ws_instance.send.called
-
     async def test_clob_missing_coverage(self, client):
         """Test various error paths in clob client."""
         client.account = None
@@ -1666,22 +1611,6 @@ class TestCLOBClient:
             {"order_id": 1234, "amount": 1, "price": 1, "pair": "AVAX/USDC", "side": "BUY"},  # int
         ]
         await client.cancel_add_list(replacements)
-
-        client.account = None
-        # listen_to_events works independently of ws_manager_enabled
-        # Mock websocket to avoid actual connection
-        with patch("dexalot_sdk.core.clob.websocket.WebSocketApp") as mock_ws:
-            # We need to capture on_open and call it
-            mock_ws_instance = MagicMock()
-            mock_ws.return_value = mock_ws_instance
-
-            def side_effect(dispatcher=None):
-                mock_ws.call_args[1]["on_open"](mock_ws_instance)
-
-            mock_ws_instance.run_forever.side_effect = side_effect
-
-            client.listen_to_events("Orders", duration_seconds=0.1)
-            mock_ws_instance.send.assert_not_called()
 
         client.account = MagicMock()
         client.account.address = "0xUser"
@@ -2418,31 +2347,7 @@ class TestCLOBClient:
 
     def test_websocket_disabled_by_default(self, client):
         """Test that WebSocket Manager is disabled by default."""
-        # Default config should have ws_manager_enabled=False
         assert client.config.ws_manager_enabled is False
-
-        # listen_to_events should still work (independent of ws_manager_enabled)
-        # It creates its own temporary connection
-        with patch("dexalot_sdk.core.clob.websocket.WebSocketApp") as mock_ws:
-            mock_ws_instance = MagicMock()
-            mock_ws.return_value = mock_ws_instance
-            mock_ws_instance.run_forever.side_effect = lambda: None
-            client.listen_to_events("OrderBook/AVAX/USDC", duration_seconds=0.1)
-            # Should attempt to create connection (not return early)
-            mock_ws.assert_called_once()
-
-    def test_listen_to_events_works_when_manager_disabled(self, client):
-        """Test that listen_to_events works independently when WebSocket Manager is disabled."""
-        client.config.ws_manager_enabled = False
-
-        # listen_to_events should still work (creates its own connection)
-        with patch("dexalot_sdk.core.clob.websocket.WebSocketApp") as mock_ws:
-            mock_ws_instance = MagicMock()
-            mock_ws.return_value = mock_ws_instance
-            mock_ws_instance.run_forever.side_effect = lambda: None
-            client.listen_to_events("OrderBook/AVAX/USDC", duration_seconds=0.1)
-            # Should attempt to create connection
-            mock_ws.assert_called_once()
 
     @pytest.mark.asyncio
     async def test_subscribe_to_events_with_ws_disabled(self, client):
@@ -2733,7 +2638,7 @@ class TestCLOBClient:
 
 
 class TestWebSocketManager:
-    """Tests for WebSocketManager class."""
+    """Tests for WebSocketManager (async websockets-based implementation)."""
 
     @pytest.fixture
     def mock_config(self):
@@ -2768,6 +2673,10 @@ class TestWebSocketManager:
             config=mock_config,
         )
 
+    # ------------------------------------------------------------------
+    # Initialization
+    # ------------------------------------------------------------------
+
     def test_websocket_manager_initialization(self, manager, mock_config, mock_account):
         """Test WebSocketManager initialization."""
         assert manager.ws_url == "wss://test.example.com/ws"
@@ -2776,682 +2685,420 @@ class TestWebSocketManager:
         assert manager.state == ConnectionState.DISCONNECTED
         assert not manager.is_connected
 
-    def test_connect_raises_when_disabled(self, manager):
-        """Test that connect() raises error when WebSocket Manager is disabled."""
-        manager.config.ws_manager_enabled = False
+    # ------------------------------------------------------------------
+    # connect() — sync entry point
+    # ------------------------------------------------------------------
 
+    def test_connect_raises_when_disabled(self, manager):
+        """connect() raises RuntimeError when WebSocket Manager is disabled."""
+        manager.config.ws_manager_enabled = False
         with pytest.raises(RuntimeError, match="WebSocket Manager is disabled"):
             manager.connect()
 
-    def test_connect_creates_websocket(self, manager):
-        """Test that connect() creates a WebSocket connection."""
-        with patch("dexalot_sdk.utils.websocket_manager.websocket.WebSocketApp") as mock_ws_class:
-            mock_ws = MagicMock()
-            mock_ws_class.return_value = mock_ws
+    def test_connect_creates_background_task(self, manager):
+        """connect() creates an asyncio Task for the background run loop."""
+        def _consume_coro(coro):
+            coro.close()
+            return MagicMock()
 
+        with patch.object(manager._loop, "create_task", side_effect=_consume_coro) as mock_create_task:
             manager.connect()
+            mock_create_task.assert_called_once()
+            assert manager.state == ConnectionState.CONNECTING
 
-            mock_ws_class.assert_called_once()
-            assert manager._ws is not None
-            assert manager._ws_thread is not None
+    def test_connect_idempotent_when_connecting(self, manager):
+        """connect() does nothing when already in CONNECTING state."""
+        manager._state = ConnectionState.CONNECTING
+        with patch.object(manager._loop, "create_task") as mock_create_task:
+            manager.connect()
+            mock_create_task.assert_not_called()
+
+    def test_connect_idempotent_when_connected(self, manager):
+        """connect() does nothing when already in CONNECTED state."""
+        manager._state = ConnectionState.CONNECTED
+        with patch.object(manager._loop, "create_task") as mock_create_task:
+            manager.connect()
+            mock_create_task.assert_not_called()
+
+    def test_state_property(self, manager):
+        """state property reflects _state directly."""
+        assert manager.state == ConnectionState.DISCONNECTED
+        manager._state = ConnectionState.CONNECTED
+        assert manager.state == ConnectionState.CONNECTED
+
+    # ------------------------------------------------------------------
+    # subscribe() / unsubscribe() — sync registry management
+    # ------------------------------------------------------------------
 
     def test_subscribe_raises_when_disabled(self, manager):
-        """Test that subscribe() raises error when WebSocket Manager is disabled."""
+        """subscribe() raises RuntimeError when WebSocket Manager is disabled."""
         manager.config.ws_manager_enabled = False
-
-        def callback(msg):
-            pass
-
         with pytest.raises(RuntimeError, match="WebSocket Manager is disabled"):
-            manager.subscribe("topic", callback)
+            manager.subscribe("topic", lambda _m: None)
 
-    def test_subscribe_adds_to_registry(self, manager):
-        """Test that subscribe() adds topic to subscription registry."""
+    def test_subscribe_adds_orderbook_to_registry(self, manager):
+        """subscribe() stores orderbook subscription with correct meta."""
         messages = []
-
-        def callback(msg):
-            messages.append(msg)
-
-        manager.subscribe("OrderBook/AVAX/USDC", callback)
+        with patch.object(manager, "connect"):
+            manager.subscribe("OrderBook/AVAX/USDC", messages.append)
 
         assert "OrderBook/AVAX/USDC" in manager._subscriptions
-        callback_func, is_private, meta = manager._subscriptions["OrderBook/AVAX/USDC"]
-        assert callback_func == callback
+        cb, is_private, meta = manager._subscriptions["OrderBook/AVAX/USDC"]
+        assert cb == messages.append
         assert is_private is False
         assert meta is not None and meta["kind"] == "orderbook"
         assert meta["pair"] == "AVAX/USDC"
 
-    def test_subscribe_private_topic(self, manager, mock_account):
-        """Test subscribing to a private topic."""
-        messages = []
-
-        def callback(msg):
-            messages.append(msg)
-
-        manager.subscribe("Orders", callback, is_private=True)
+    def test_subscribe_adds_private_topic_to_registry(self, manager):
+        """subscribe() stores private topic with is_private=True and meta=None."""
+        with patch.object(manager, "connect"):
+            manager.subscribe("Orders", lambda _m: None, is_private=True)
 
         assert "Orders" in manager._subscriptions
-        callback_func, is_private, meta = manager._subscriptions["Orders"]
-        assert callback_func == callback
+        _cb, is_private, meta = manager._subscriptions["Orders"]
         assert is_private is True
         assert meta is None
 
+    def test_subscribe_auto_connects_when_disconnected(self, manager):
+        """subscribe() calls connect() when not yet connected."""
+        with patch.object(manager, "connect") as mock_connect:
+            manager.subscribe("Topic", lambda _m: None)
+            mock_connect.assert_called_once()
+
+    def test_subscribe_schedules_send_when_connected(self, manager):
+        """subscribe() schedules _send_subscribe task when already connected."""
+        manager._state = ConnectionState.CONNECTED
+        manager._ws = MagicMock()
+
+        def _consume_coro(coro):
+            coro.close()
+            return MagicMock()
+
+        with patch.object(manager._loop, "create_task", side_effect=_consume_coro) as mock_create_task:
+            manager.subscribe("Topic", lambda _m: None)
+            mock_create_task.assert_called_once()
+
     def test_unsubscribe_removes_from_registry(self, manager):
-        """Test that unsubscribe() removes topic from registry."""
-
-        def callback(msg):
-            pass
-
-        manager.subscribe("OrderBook/AVAX/USDC", callback)
+        """unsubscribe() removes the subscription key."""
+        with patch.object(manager, "connect"):
+            manager.subscribe("OrderBook/AVAX/USDC", lambda _m: None)
         assert "OrderBook/AVAX/USDC" in manager._subscriptions
 
         manager.unsubscribe("OrderBook/AVAX/USDC")
         assert "OrderBook/AVAX/USDC" not in manager._subscriptions
 
-    def test_disconnect_cleans_up(self, manager):
-        """Test that disconnect() cleans up resources."""
-        with patch("dexalot_sdk.utils.websocket_manager.websocket.WebSocketApp") as mock_ws_class:
-            mock_ws = MagicMock()
-            mock_ws_class.return_value = mock_ws
+    def test_unsubscribe_nonexistent_topic(self, manager):
+        """unsubscribe() on a missing key does not raise."""
+        manager.unsubscribe("NonexistentTopic")  # no exception
 
-            manager.connect()
-            manager.disconnect()
+    def test_unsubscribe_when_not_connected(self, manager):
+        """unsubscribe() when disconnected just removes the entry."""
+        with patch.object(manager, "connect"):
+            manager.subscribe("Topic", lambda _m: None)
+        manager.unsubscribe("Topic")
+        assert "Topic" not in manager._subscriptions
 
-            mock_ws.close.assert_called_once()
-            assert manager.state == ConnectionState.DISCONNECTED
-            assert len(manager._subscriptions) == 0
+    def test_unsubscribe_schedules_send_when_connected(self, manager):
+        """unsubscribe() schedules _send_unsubscribe task when connected."""
+        manager.subscribe("Topic", lambda _m: None)
+        manager._state = ConnectionState.CONNECTED
+        manager._ws = MagicMock()
 
-    def test_on_message_routes_to_callback(self, manager):
-        """Test that on_message routes messages to callbacks."""
-        messages_received = []
+        def _consume_coro(coro):
+            coro.close()
+            return MagicMock()
 
-        def callback(msg):
-            messages_received.append(msg)
+        with patch.object(manager._loop, "create_task", side_effect=_consume_coro) as mock_create_task:
+            manager.unsubscribe("Topic")
+            mock_create_task.assert_called_once()
 
-        manager.subscribe("OrderBook/AVAX/USDC", callback)
+    # ------------------------------------------------------------------
+    # disconnect() — async cleanup
+    # ------------------------------------------------------------------
 
-        # Simulate Dexalot orderBooks message (docs/websocket.md)
+    @pytest.mark.asyncio
+    async def test_disconnect_cleans_up(self, manager):
+        """disconnect() sets DISCONNECTED state and clears subscriptions."""
+        # Patch create_task so connect() doesn't actually schedule _run on the test loop.
+        def _consume_coro(coro):
+            coro.close()
+            return MagicMock()
+
+        with patch.object(manager._loop, "create_task", side_effect=_consume_coro):
+            manager.subscribe("Topic", lambda _m: None)
+        mock_ws = AsyncMock()
+        manager._ws = mock_ws
+
+        await manager.disconnect()
+
+        mock_ws.close.assert_awaited_once()
+        assert manager.state == ConnectionState.DISCONNECTED
+        assert len(manager._subscriptions) == 0
+        assert manager._should_reconnect is False
+
+    @pytest.mark.asyncio
+    async def test_disconnect_close_exception(self, manager):
+        """disconnect() swallows exceptions from ws.close()."""
+        mock_ws = AsyncMock()
+        mock_ws.close.side_effect = Exception("Close error")
+        manager._ws = mock_ws
+
+        await manager.disconnect()  # must not raise
+
+        assert manager.state == ConnectionState.DISCONNECTED
+
+    @pytest.mark.asyncio
+    async def test_disconnect_cancels_run_task(self, manager):
+        """disconnect() cancels the background _run task if running."""
+        mock_task = MagicMock()
+        mock_task.done.return_value = False
+        mock_task.cancel = MagicMock()
+
+        async def fake_await():
+            raise asyncio.CancelledError
+
+        mock_task.__await__ = fake_await
+        manager._run_task = mock_task
+
+        await manager.disconnect()
+
+        mock_task.cancel.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_disconnect_when_no_ws(self, manager):
+        """disconnect() works safely when _ws is None."""
+        manager._ws = None
+        await manager.disconnect()  # no exception
+        assert manager.state == ConnectionState.DISCONNECTED
+
+    # ------------------------------------------------------------------
+    # _handle_message() — message routing (sync)
+    # ------------------------------------------------------------------
+
+    def test_handle_message_routes_orderbook(self, manager):
+        """_handle_message routes orderBooks messages by pair."""
+        received = []
+        with patch.object(manager, "connect"):
+            manager.subscribe("OrderBook/AVAX/USDC", received.append)
+
         message_data = {
             "type": "orderBooks",
             "pair": "AVAX/USDC",
             "decimal": 6,
             "data": {"buyBook": [], "sellBook": []},
         }
-        manager._on_message(MagicMock(), json.dumps(message_data))
+        manager._handle_message(json.dumps(message_data))
 
-        assert len(messages_received) == 1
-        assert messages_received[0]["type"] == "orderBooks"
+        assert len(received) == 1
+        assert received[0]["type"] == "orderBooks"
 
-    def test_on_open_sets_state_connected(self, manager):
-        """Test that on_open sets state to connected."""
-        with patch("dexalot_sdk.utils.websocket_manager.websocket.WebSocketApp"):
-            manager.connect()
+    def test_handle_message_routes_by_topic(self, manager):
+        """_handle_message routes messages with a 'topic' field."""
+        received = []
+        with patch.object(manager, "connect"):
+            manager.subscribe("MyTopic", received.append)
 
-        mock_ws = MagicMock()
-        manager._on_open(mock_ws)
+        manager._handle_message(json.dumps({"topic": "MyTopic", "data": "hello"}))
 
-        assert manager.state == ConnectionState.CONNECTED
-        assert manager.is_connected
+        assert len(received) == 1
+        assert received[0]["data"] == "hello"
 
-    def test_on_close_sets_state_disconnected(self, manager):
-        """Test that on_close sets state to disconnected."""
-        manager._should_reconnect = False
-        manager._on_close(MagicMock(), 1000, "Normal closure")
+    def test_handle_message_broadcasts_without_topic(self, manager):
+        """_handle_message broadcasts to all callbacks when no topic field."""
+        received: list[tuple] = []
+        with patch.object(manager, "connect"):
+            manager.subscribe("A", lambda m: received.append(("A", m)))
+            manager.subscribe("B", lambda m: received.append(("B", m)))
 
-        assert manager.state == ConnectionState.DISCONNECTED
-        assert not manager.is_connected
+        manager._handle_message(json.dumps({"data": "broadcast"}))
 
-    def test_reconnect_scheduling(self, manager):
-        """Test that reconnection is scheduled on connection loss."""
-        manager._should_reconnect = True
+        assert len(received) == 2
 
-        with patch("threading.Thread") as mock_thread_class:
-            manager._schedule_reconnect()
+    def test_handle_message_callback_exception_caught(self, manager):
+        """_handle_message logs callback exceptions and continues."""
 
-            # Verify thread was created for reconnection
-            assert mock_thread_class.called
+        def bad_cb(msg):
+            raise ValueError("boom")
 
-    def test_state_property(self, manager):
-        """Test that state property returns current state."""
-        assert manager.state == ConnectionState.DISCONNECTED
-
-        with manager._state_lock:
-            manager._state = ConnectionState.CONNECTED
-
-        assert manager.state == ConnectionState.CONNECTED
-
-    def test_connect_when_already_connecting(self, manager):
-        """Test that connect() does nothing when already connecting."""
-        with patch("dexalot_sdk.utils.websocket_manager.websocket.WebSocketApp") as mock_ws_class:
-            mock_ws = MagicMock()
-            mock_ws_class.return_value = mock_ws
-
-            # Set state to CONNECTING
-            with manager._state_lock:
-                manager._state = ConnectionState.CONNECTING
-
-            manager.connect()
-
-            # Should not create new WebSocket
-            mock_ws_class.assert_not_called()
-
-    def test_connect_when_already_connected(self, manager):
-        """Test that connect() does nothing when already connected."""
-        with patch("dexalot_sdk.utils.websocket_manager.websocket.WebSocketApp") as mock_ws_class:
-            mock_ws = MagicMock()
-            mock_ws_class.return_value = mock_ws
-
-            # Set state to CONNECTED
-            with manager._state_lock:
-                manager._state = ConnectionState.CONNECTED
-
-            manager.connect()
-
-            # Should not create new WebSocket
-            mock_ws_class.assert_not_called()
-
-    def test_connect_exception_handling(self, manager):
-        """Test that connect() handles exceptions properly."""
-        with patch("dexalot_sdk.utils.websocket_manager.websocket.WebSocketApp") as mock_ws_class:
-            mock_ws_class.side_effect = Exception("Connection failed")
-
-            with pytest.raises(Exception, match="Connection failed"):
-                manager.connect()
-
-            assert manager.state == ConnectionState.DISCONNECTED
-
-    def test_run_forever_exception_handling(self, manager):
-        """Test that _run_forever handles exceptions."""
-        mock_ws = MagicMock()
-        manager._ws = mock_ws
-        mock_ws.run_forever.side_effect = Exception("Run forever error")
-
-        # Should not raise, just log
-        manager._run_forever()
-
-    def test_on_message_pong_handling(self, manager):
-        """Test that pong messages update last_pong_time."""
-        mock_ws = MagicMock()
-        pong_message = json.dumps({"type": "pong"})
-
-        manager._on_message(mock_ws, pong_message)
-
-        assert manager._last_pong_time is not None
-
-    def test_on_message_with_topic(self, manager):
-        """Test message routing when message has topic."""
-        messages_received = []
-
-        def callback(msg):
-            messages_received.append(msg)
-
-        manager.subscribe("OrderBook/AVAX/USDC", callback)
-
-        mock_ws = MagicMock()
-        message = json.dumps({"topic": "OrderBook/AVAX/USDC", "data": "test"})
-
-        manager._on_message(mock_ws, message)
-
-        assert len(messages_received) == 1
-        assert messages_received[0]["data"] == "test"
-
-    def test_on_message_without_topic(self, manager):
-        """Test message broadcasting when message has no topic."""
-        messages_received = []
-
-        def callback1(msg):
-            messages_received.append(("callback1", msg))
-
-        def callback2(msg):
-            messages_received.append(("callback2", msg))
-
-        manager.subscribe("Topic1", callback1)
-        manager.subscribe("Topic2", callback2)
-
-        mock_ws = MagicMock()
-        message = json.dumps({"data": "broadcast"})
-
-        manager._on_message(mock_ws, message)
-
-        assert len(messages_received) == 2
-
-    def test_on_message_broadcast_callback_exception(self, manager):
-        """Test that broadcast callback exceptions are caught."""
-
-        def callback1(msg):
-            raise ValueError("Callback1 error")
-
-        def callback2(msg):
-            raise ValueError("Callback2 error")
-
-        manager.subscribe("Topic1", callback1)
-        manager.subscribe("Topic2", callback2)
-
-        mock_ws = MagicMock()
-        message = json.dumps({"data": "broadcast"})
-
+        with patch.object(manager, "connect"):
+            manager.subscribe("Topic", bad_cb)
         # Should not raise
-        manager._on_message(mock_ws, message)
+        manager._handle_message(json.dumps({"topic": "Topic", "data": "x"}))
 
-    def test_on_message_callback_exception(self, manager):
-        """Test that callback exceptions are caught and logged."""
+    def test_handle_message_json_decode_error(self, manager):
+        """_handle_message handles malformed JSON without raising."""
+        manager._handle_message("not valid json")  # no exception
 
-        def callback(msg):
-            raise ValueError("Callback error")
+    def test_handle_message_bytes_decoded(self, manager):
+        """_handle_message accepts bytes input (decoded to str)."""
+        received = []
+        with patch.object(manager, "connect"):
+            manager.subscribe("OrderBook/AVAX/USDC", received.append)
+        data = json.dumps({"type": "orderBooks", "pair": "AVAX/USDC", "data": {}})
+        manager._handle_message(data)
+        assert len(received) == 1
 
-        manager.subscribe("Topic", callback)
+    # ------------------------------------------------------------------
+    # _build_subscribe_payload (via _send_subscribe, tested via AsyncMock ws)
+    # ------------------------------------------------------------------
 
-        mock_ws = MagicMock()
-        message = json.dumps({"topic": "Topic", "data": "test"})
-
-        # Should not raise
-        manager._on_message(mock_ws, message)
-
-    def test_on_message_json_decode_error(self, manager):
-        """Test that JSON decode errors are handled."""
-        mock_ws = MagicMock()
-        invalid_json = "not valid json"
-
-        # Should not raise
-        manager._on_message(mock_ws, invalid_json)
-
-    def test_on_message_general_exception(self, manager):
-        """Test that general exceptions in _on_message are handled."""
-        mock_ws = MagicMock()
-        # Create a scenario where an exception occurs in the try block
-        # We'll make json.loads succeed but then raise an exception in processing
-        with patch("dexalot_sdk.utils.websocket_manager.json.loads", return_value={"type": "data"}):
-            # Make the subscription lock raise an exception
-            original_lock = manager._subscriptions_lock
-            mock_lock = MagicMock()
-            mock_lock.__enter__ = MagicMock(side_effect=Exception("Lock error"))
-            manager._subscriptions_lock = mock_lock
-
-            # Should not raise, exception should be caught
-            manager._on_message(mock_ws, '{"type": "data"}')
-
-            # Restore
-            manager._subscriptions_lock = original_lock
-
-    def test_on_close_with_reconnect(self, manager):
-        """Test that on_close schedules reconnect when should_reconnect is True."""
-        manager._should_reconnect = True
-
-        with patch("threading.Thread") as mock_thread:
-            with manager._state_lock:
-                manager._state = ConnectionState.CONNECTED
-
-            mock_ws = MagicMock()
-            manager._on_close(mock_ws, 1000, "Normal")
-
-            assert manager.state == ConnectionState.RECONNECTING
-            assert mock_thread.called
-
-    def test_on_close_without_reconnect(self, manager):
-        """Test that on_close sets disconnected when should_reconnect is False."""
-        manager._should_reconnect = False
-
-        with manager._state_lock:
-            manager._state = ConnectionState.CONNECTED
-
-        mock_ws = MagicMock()
-        manager._on_close(mock_ws, 1000, "Normal")
-
-        assert manager.state == ConnectionState.DISCONNECTED
-
-    def test_schedule_reconnect_max_attempts(self, manager):
-        """Test that reconnect stops after max attempts."""
-        manager._should_reconnect = True
-        manager._reconnect_attempts = 10
-        manager.config.ws_reconnect_max_attempts = 10
-
-        manager._schedule_reconnect()
-
-        assert manager.state == ConnectionState.DISCONNECTED
-
-    def test_schedule_reconnect_infinite_attempts(self, manager):
-        """Test that reconnect continues when max_attempts is 0."""
-        manager._should_reconnect = True
-        manager._reconnect_attempts = 100
-        manager.config.ws_reconnect_max_attempts = 0  # Infinite
-
-        with patch("threading.Thread") as mock_thread:
-            manager._schedule_reconnect()
-            # Should still schedule reconnect
-            assert mock_thread.called
-
-    def test_schedule_reconnect_when_disabled(self, manager):
-        """Test that reconnect is not scheduled when should_reconnect is False."""
-        manager._should_reconnect = False
-
-        with patch("threading.Thread") as mock_thread:
-            manager._schedule_reconnect()
-            # Should not schedule reconnect
-            assert not mock_thread.called
-
-    def test_reconnect_error_handling(self, manager):
-        """Test that reconnection errors are handled."""
-        manager._should_reconnect = True
-        manager._reconnect_attempts = 0
-        initial_delay = manager._reconnect_delay
-
-        # Mock connect to raise exception
-        def failing_connect():
-            raise Exception("Reconnect failed")
-
-        manager.connect = failing_connect
-
-        # Capture the reconnect function
-        reconnect_func_captured = [None]
-
-        def capture_thread(target, **kwargs):
-            reconnect_func_captured[0] = target
-            return MagicMock()
-
-        with patch("threading.Thread", side_effect=capture_thread):
-            manager._schedule_reconnect()
-
-            # Wait a bit and call the reconnect function
-            if reconnect_func_captured[0]:
-                reconnect_func_captured[0]()
-
-                # Should have increased reconnect delay
-                assert manager._reconnect_delay > initial_delay
-
-    def test_start_ping_thread(self, manager):
-        """Test that ping thread is started."""
-        manager._start_ping_thread()
-
-        assert manager._ping_thread is not None
-        assert manager._ping_thread.is_alive() or not manager._stop_ping.is_set()
-
-    def test_start_ping_thread_when_already_running(self, manager):
-        """Test that start_ping_thread does nothing if already running."""
-        # Set state to connected so ping thread logic works
-        with manager._state_lock:
-            manager._state = ConnectionState.CONNECTED
-
-        manager._start_ping_thread()
-        first_thread = manager._ping_thread
-        assert first_thread is not None
-
-        # Call again - should return early if thread is alive
-        manager._start_ping_thread()
-
-        # Should be the same thread (the check in _start_ping_thread should prevent new thread)
-        # But threads may stop quickly in tests, so we just verify the method doesn't crash
-        assert manager._ping_thread is not None
-
-    def test_stop_ping_thread(self, manager):
-        """Test that ping thread is stopped."""
-        manager._start_ping_thread()
-        manager._stop_ping_thread()
-
-        # Thread should be stopped
-        assert manager._stop_ping.is_set()
-
-    def test_subscribe_auto_connects(self, manager):
-        """Test that subscribe() auto-connects if not connected."""
-
-        def callback(msg):
-            pass
-
-        with patch.object(manager, "connect") as mock_connect:
-            manager.subscribe("Topic", callback)
-            mock_connect.assert_called_once()
-
-    def test_subscribe_immediate_when_connected(self, manager):
-        """Test that subscribe() sends message immediately when connected."""
-
-        def callback(msg):
-            pass
-
-        mock_ws = MagicMock()
+    @pytest.mark.asyncio
+    async def test_send_subscribe_orderbook_payload(self, manager):
+        """_send_subscribe sends correct orderbook wire payload."""
+        with patch.object(manager, "connect"):
+            manager.subscribe("OrderBook/AVAX/USDC", lambda _m: None)
+        mock_ws = AsyncMock()
         manager._ws = mock_ws
 
-        with manager._state_lock:
-            manager._state = ConnectionState.CONNECTED
+        await manager._send_subscribe("OrderBook/AVAX/USDC")
 
-        with patch.object(manager, "_subscribe_topic") as mock_subscribe:
-            manager.subscribe("Topic", callback)
-            mock_subscribe.assert_called_once_with(mock_ws, "Topic")
+        mock_ws.send.assert_awaited_once()
+        payload = json.loads(mock_ws.send.call_args[0][0])
+        assert payload["type"] == "subscribe"
+        assert payload["pair"] == "AVAX/USDC"
+        assert "decimal" in payload
 
-    def test_subscribe_topic_private_without_account(self, manager):
-        """Test that _subscribe_topic handles private topic without account."""
-        manager.account = None
-        mock_ws = MagicMock()
-
-        manager.subscribe("Orders", lambda _m: None, is_private=True)
-        manager._subscribe_topic(mock_ws, "Orders")
-
-        # Should not send message
-        mock_ws.send.assert_not_called()
-
-    def test_subscribe_topic_private_with_account(self, manager, mock_account):
-        """Test that _subscribe_topic sends auth for private topic."""
+    @pytest.mark.asyncio
+    async def test_send_subscribe_private_topic_with_auth(self, manager, mock_account):
+        """_send_subscribe includes address/signature/timestamp for private topics."""
         manager.account = mock_account
-        mock_ws = MagicMock()
+        with patch.object(manager, "connect"):
+            manager.subscribe("Orders", lambda _m: None, is_private=True)
+        mock_ws = AsyncMock()
+        manager._ws = mock_ws
 
-        manager.subscribe("Orders", lambda _m: None, is_private=True)
-        manager._subscribe_topic(mock_ws, "Orders")
+        await manager._send_subscribe("Orders")
 
-        # Should send message with auth
-        assert mock_ws.send.called
-        call_args = mock_ws.send.call_args[0][0]
-        payload = json.loads(call_args)
+        mock_ws.send.assert_awaited_once()
+        payload = json.loads(mock_ws.send.call_args[0][0])
         assert "address" in payload
         assert "signature" in payload
         assert "timestamp" in payload
 
-    def test_subscribe_topic_private_uses_time_offset(self, manager, mock_account):
-        """Test that _subscribe_topic applies ws_time_offset_ms to the signature timestamp."""
-        import time
-
+    @pytest.mark.asyncio
+    async def test_send_subscribe_private_topic_applies_time_offset(
+        self, manager, mock_account
+    ):
+        """_send_subscribe applies ws_time_offset_ms to the timestamp."""
         manager.account = mock_account
         manager.config.ws_time_offset_ms = 5000
-        mock_ws = MagicMock()
-
-        manager.subscribe("Orders", lambda _m: None, is_private=True)
-        before_ms = int(time.time() * 1000)
-        manager._subscribe_topic(mock_ws, "Orders")
-
-        call_args = mock_ws.send.call_args[0][0]
-        payload = json.loads(call_args)
-        assert payload["timestamp"] >= before_ms + 4000
-
-    def test_subscribe_topic_private_default_no_offset(self, manager, mock_account):
-        """Test that _subscribe_topic uses no offset when ws_time_offset_ms is 0."""
-        import time
-
-        manager.account = mock_account
-        manager.config.ws_time_offset_ms = 0
-        mock_ws = MagicMock()
-
-        manager.subscribe("Orders", lambda _m: None, is_private=True)
-        before_ms = int(time.time() * 1000)
-        manager._subscribe_topic(mock_ws, "Orders")
-        after_ms = int(time.time() * 1000)
-
-        call_args = mock_ws.send.call_args[0][0]
-        payload = json.loads(call_args)
-        assert before_ms - 500 <= payload["timestamp"] <= after_ms + 500
-
-    def test_subscribe_topic_exception(self, manager):
-        """Test that _subscribe_topic handles exceptions."""
-        mock_ws = MagicMock()
-        mock_ws.send.side_effect = Exception("Send failed")
-
-        manager.subscribe("Topic", lambda _x: None)
-        # Should not raise
-        manager._subscribe_topic(mock_ws, "Topic")
-
-    def test_unsubscribe_when_connected(self, manager):
-        """Test that unsubscribe() sends message when connected."""
-
-        def callback(msg):
-            pass
-
-        manager.subscribe("Topic", callback)
-
-        mock_ws = MagicMock()
+        with patch.object(manager, "connect"):
+            manager.subscribe("Orders", lambda _m: None, is_private=True)
+        mock_ws = AsyncMock()
         manager._ws = mock_ws
 
-        with manager._state_lock:
-            manager._state = ConnectionState.CONNECTED
+        before_ms = int(time.time() * 1000)
+        await manager._send_subscribe("Orders")
 
-        manager.unsubscribe("Topic")
+        payload = json.loads(mock_ws.send.call_args[0][0])
+        assert payload["timestamp"] >= before_ms + 4000
 
-        assert mock_ws.send.called
-        call_args = mock_ws.send.call_args[0][0]
-        payload = json.loads(call_args)
+    @pytest.mark.asyncio
+    async def test_send_subscribe_private_without_account(self, manager):
+        """_send_subscribe skips sending when private topic has no account."""
+        manager.account = None
+        with patch.object(manager, "connect"):
+            manager.subscribe("Orders", lambda _m: None, is_private=True)
+        mock_ws = AsyncMock()
+        manager._ws = mock_ws
+
+        await manager._send_subscribe("Orders")
+
+        mock_ws.send.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_send_subscribe_send_exception_caught(self, manager):
+        """_send_subscribe handles send exceptions without raising."""
+        with patch.object(manager, "connect"):
+            manager.subscribe("Topic", lambda _m: None)
+        mock_ws = AsyncMock()
+        mock_ws.send.side_effect = Exception("Send failed")
+        manager._ws = mock_ws
+
+        await manager._send_subscribe("Topic")  # no exception
+
+    @pytest.mark.asyncio
+    async def test_send_unsubscribe_legacy_topic(self, manager):
+        """_send_unsubscribe sends correct unsubscribe payload for legacy topics."""
+        with patch.object(manager, "connect"):
+            manager.subscribe("Topic", lambda _m: None)
+        spec = manager._subscriptions.pop("Topic")
+        mock_ws = AsyncMock()
+        manager._ws = mock_ws
+
+        await manager._send_unsubscribe("Topic", spec)
+
+        mock_ws.send.assert_awaited_once()
+        payload = json.loads(mock_ws.send.call_args[0][0])
         assert payload["type"] == "unsubscribe"
         assert "Topic" in payload["topics"]
 
-    def test_unsubscribe_exception(self, manager):
-        """Test that unsubscribe() handles exceptions."""
-
-        def callback(msg):
-            pass
-
-        manager.subscribe("Topic", callback)
-
-        mock_ws = MagicMock()
-        manager._ws = mock_ws
-        mock_ws.send.side_effect = Exception("Send failed")
-
-        with manager._state_lock:
-            manager._state = ConnectionState.CONNECTED
-
-        # Should not raise
-        manager.unsubscribe("Topic")
-
-    def test_unsubscribe_when_not_connected(self, manager):
-        """Test that unsubscribe() works when not connected."""
-
-        def callback(msg):
-            pass
-
-        manager.subscribe("Topic", callback)
-
-        # Should not raise even if not connected
-        manager.unsubscribe("Topic")
-        assert "Topic" not in manager._subscriptions
-
-    def test_unsubscribe_nonexistent_topic(self, manager):
-        """Test that unsubscribe() handles nonexistent topic."""
-        # Should not raise
-        manager.unsubscribe("NonexistentTopic")
-
-    def test_disconnect_cleanup(self, manager):
-        """Test that disconnect() cleans up all resources."""
-        with patch("dexalot_sdk.utils.websocket_manager.websocket.WebSocketApp") as mock_ws_class:
-            mock_ws = MagicMock()
-            mock_ws_class.return_value = mock_ws
-
-            manager.connect()
-            manager.subscribe("Topic", lambda x: None)
-
-            manager.disconnect()
-
-            mock_ws.close.assert_called_once()
-            assert manager.state == ConnectionState.DISCONNECTED
-            assert len(manager._subscriptions) == 0
-            assert manager._should_reconnect is False
-
-    def test_disconnect_close_exception(self, manager):
-        """Test that disconnect() handles exceptions when closing WebSocket."""
-        mock_ws = MagicMock()
-        manager._ws = mock_ws
-        mock_ws.close.side_effect = Exception("Close error")
-
-        # Should not raise
-        manager.disconnect()
-
-    def test_disconnect_thread_join_timeout(self, manager):
-        """Test that disconnect() handles thread join timeout."""
-        mock_ws = MagicMock()
-        manager._ws = mock_ws
-        mock_thread = MagicMock()
-        mock_thread.is_alive.return_value = True
-        manager._ws_thread = mock_thread
-
-        # Should not raise
-        manager.disconnect()
-
-    def test_on_open_resubscribes(self, manager):
-        """Test that on_open resubscribes to all topics."""
-        callbacks_called = []
-
-        def callback1(msg):
-            callbacks_called.append("callback1")
-
-        def callback2(msg):
-            callbacks_called.append("callback2")
-
-        manager.subscribe("Topic1", callback1)
-        manager.subscribe("Topic2", callback2)
-
-        mock_ws = MagicMock()
-        with patch.object(manager, "_subscribe_topic") as mock_subscribe:
-            manager._on_open(mock_ws)
-
-            # Should resubscribe to both topics
-            assert mock_subscribe.call_count == 2
-
-    def test_ping_thread_checks_pong_timeout(self, manager):
-        """Test that ping thread checks for pong timeout."""
-        manager._last_pong_time = time.time() - 100  # Old pong
-        manager.config.ws_ping_timeout = 10
-        manager.config.ws_ping_interval = 0.01  # Very short for testing
-
-        mock_ws = MagicMock()
+    @pytest.mark.asyncio
+    async def test_send_unsubscribe_orderbook(self, manager):
+        """_send_unsubscribe sends correct pair unsubscribe payload for orderbooks."""
+        with patch.object(manager, "connect"):
+            manager.subscribe("OrderBook/AVAX/USDC", lambda _m: None)
+        spec = manager._subscriptions.pop("OrderBook/AVAX/USDC")
+        mock_ws = AsyncMock()
         manager._ws = mock_ws
 
-        with manager._state_lock:
-            manager._state = ConnectionState.CONNECTED
+        await manager._send_unsubscribe("OrderBook/AVAX/USDC", spec)
 
-        # Start ping thread and let it run briefly
-        manager._start_ping_thread()
-        time.sleep(0.05)  # Wait for ping loop to check timeout
-        manager._stop_ping_thread()
+        mock_ws.send.assert_awaited_once()
+        payload = json.loads(mock_ws.send.call_args[0][0])
+        assert payload["type"] == "unsubscribe"
+        assert payload["pair"] == "AVAX/USDC"
 
-        # Should check pong timeout (may close connection if timeout exceeded)
-        # The ping loop should have detected the old pong time
+    # ------------------------------------------------------------------
+    # _backoff() — reconnect delay logic
+    # ------------------------------------------------------------------
 
-    def test_ping_thread_exception_handling(self, manager):
-        """Test that ping thread handles exceptions."""
-        manager.config.ws_ping_interval = 0.01
-        mock_ws = MagicMock()
-        manager._ws = mock_ws
-        # Make _ws.close() raise an exception
-        mock_ws.close.side_effect = Exception("Close error")
+    @pytest.mark.asyncio
+    async def test_backoff_returns_false_when_max_attempts_reached(self, manager):
+        """_backoff returns False and sets DISCONNECTED when max attempts hit."""
+        manager._should_reconnect = True
+        manager._reconnect_attempts = 10
+        manager.config.ws_reconnect_max_attempts = 10
 
-        with manager._state_lock:
-            manager._state = ConnectionState.CONNECTED
+        with patch("asyncio.sleep", new_callable=AsyncMock):
+            result = await manager._backoff()
 
-        manager._last_pong_time = time.time() - 100  # Old pong
+        assert result is False
+        assert manager.state == ConnectionState.DISCONNECTED
+        assert manager._should_reconnect is False
 
-        # Start ping thread
-        manager._start_ping_thread()
-        time.sleep(0.05)
-        manager._stop_ping_thread()
+    @pytest.mark.asyncio
+    async def test_backoff_returns_true_and_increments_attempts(self, manager):
+        """_backoff returns True and increments _reconnect_attempts normally."""
+        manager._reconnect_attempts = 0
+        initial_delay = manager._reconnect_delay
 
-        # Should not crash, exception should be logged
+        with patch("asyncio.sleep", new_callable=AsyncMock) as mock_sleep:
+            result = await manager._backoff()
 
-    def test_ping_thread_normal_path(self, manager):
-        """Test ping thread normal path (no pong timeout)."""
-        manager.config.ws_ping_interval = 0.01
-        mock_ws = MagicMock()
-        manager._ws = mock_ws
+        assert result is True
+        assert manager._reconnect_attempts == 1
+        mock_sleep.assert_awaited_once()
+        assert manager._reconnect_delay > initial_delay
 
-        with manager._state_lock:
-            manager._state = ConnectionState.CONNECTED
+    @pytest.mark.asyncio
+    async def test_backoff_infinite_when_max_attempts_zero(self, manager):
+        """_backoff always returns True when max_attempts=0 (infinite)."""
+        manager._reconnect_attempts = 999
+        manager.config.ws_reconnect_max_attempts = 0
 
-        manager._last_pong_time = time.time()  # Recent pong
+        with patch("asyncio.sleep", new_callable=AsyncMock):
+            result = await manager._backoff()
 
-        # Start ping thread
-        manager._start_ping_thread()
-        time.sleep(0.05)
-        manager._stop_ping_thread()
+        assert result is True
 
-        # Should not close connection since pong is recent
+    @pytest.mark.asyncio
+    async def test_backoff_returns_false_on_cancelled_error(self, manager):
+        """_backoff returns False when CancelledError raised during sleep."""
+        manager._reconnect_attempts = 0
+
+        with patch("asyncio.sleep", new_callable=AsyncMock) as mock_sleep:
+            mock_sleep.side_effect = asyncio.CancelledError
+            result = await manager._backoff()
+
+        assert result is False
