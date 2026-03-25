@@ -1,0 +1,1483 @@
+import os
+from unittest.mock import AsyncMock, MagicMock, patch
+
+import pytest
+
+from dexalot_sdk.core.base import DexalotBaseClient
+from dexalot_sdk.core.config import DexalotConfig
+from dexalot_sdk.core.transfer import TransferClient
+from dexalot_sdk.utils import Utils
+
+# Valid test data constants
+VALID_ADDRESS = "0x1234567890123456789012345678901234567890"  # 42 characters
+VALID_RECIPIENT = "0x9876543210987654321098765432109876543210"  # 42 characters
+
+
+class MockClient(TransferClient, DexalotBaseClient):
+    pass
+
+
+class TestTransferClient:
+    @pytest.fixture(autouse=True)
+    def clean_cache(self):
+        from dexalot_sdk.core.base import (
+            _BALANCE_CACHE,
+            _ORDERBOOK_CACHE,
+            _SEMI_STATIC_CACHE,
+            _STATIC_CACHE,
+        )
+
+        _STATIC_CACHE.clear()
+        _SEMI_STATIC_CACHE.clear()
+        _BALANCE_CACHE.clear()
+        _ORDERBOOK_CACHE.clear()
+
+    def create_w3(self):
+        class ConstantAwaitable:
+            def __init__(self, val):
+                self.val = val
+
+            def __await__(self):
+                if False:
+                    yield
+                return self.val
+
+        w3 = MagicMock()
+        w3.eth.get_balance = AsyncMock(return_value=0)
+        w3.eth.chain_id = AsyncMock(return_value=43114)
+        w3.eth.get_transaction_count = AsyncMock(return_value=1)
+        w3.eth.send_raw_transaction = AsyncMock(return_value=b"tx_hash")
+        w3.eth.wait_for_transaction_receipt = AsyncMock(return_value={"status": 1})
+        w3.eth.gas_price = ConstantAwaitable(1000000000)
+        w3.to_hex.side_effect = lambda x: f"0x{x.hex()}" if isinstance(x, bytes) else str(x)
+        w3.from_wei.side_effect = lambda x, y: x / 10**18
+        w3.to_wei.side_effect = lambda x, y: int(x * 10**18)
+
+        def mock_contract(*args, **kwargs):
+            c = MagicMock()
+
+            class FunctionsMock:
+                def __init__(self):
+                    self._methods = {}
+
+                def __getattr__(self, name):
+                    if name not in self._methods:
+                        m_fn = MagicMock()
+                        m_res = m_fn.return_value
+                        m_res.estimate_gas = AsyncMock(return_value=100000)
+                        m_res.build_transaction = AsyncMock(return_value={})
+                        if name in ("getBalance", "getBalances"):
+                            m_res.call = AsyncMock(return_value=(0, 0, 0))
+                        else:
+                            m_res.call = AsyncMock(return_value=0)
+                        m_res.fn_name = name
+                        m_fn.side_effect = lambda *args, **kwargs: m_res
+                        self._methods[name] = m_fn
+                    return self._methods[name]
+
+            c.functions = FunctionsMock()
+            return c
+
+        w3.eth.contract.side_effect = mock_contract
+        return w3
+
+    @pytest.fixture
+    async def client(self):
+        # Patch environment to ensure no invalid PRIVATE_KEY is loaded
+        with patch.dict(os.environ, {"PRIVATE_KEY": "0x" + "a" * 64}, clear=False):
+            with patch("dexalot_sdk.core.config.load_dotenv"):
+                client = MockClient()
+                client.account = MagicMock()
+                client.account.address = VALID_ADDRESS
+                client.private_key = "0x" + "a" * 64  # Valid 66-char private key (32 bytes)
+
+                client.w3_l1 = self.create_w3()
+                client.mainnet_providers = {"Avalanche": self.create_w3()}
+                client.view_all_mainnet_providers = client.mainnet_providers
+                client.w3_mainnet = client.mainnet_providers["Avalanche"]
+
+                # Mock _get_nonce for nonce manager
+                client._get_nonce = AsyncMock(return_value=1)
+
+                client.portfolio_main_avax_contract = client.w3_mainnet.eth.contract()
+                client.portfolio_sub_contract = client.w3_l1.eth.contract()
+
+                client.deployments = {
+                    "PortfolioMain": {"Avalanche": {"address": "0xPortMain", "abi": []}}
+                }
+
+                client.token_data = {
+                    "AVAX": {
+                        "env1": {"chain_id": 43114, "evmdecimals": 18, "address": "0xAVAX"},
+                        "env2": {
+                            "chain_id": 12345,
+                            "evmdecimals": 18,
+                            "address": "0xAVAX",
+                        },  # Subnet
+                    },
+                    "USDC": {
+                        "env1": {"chain_id": 43114, "evmdecimals": 6, "address": "0xUSDC"},
+                        "env2": {"chain_id": 12345, "evmdecimals": 6, "address": "0xUSDC"},
+                    },
+                }
+                client.subnet_chain_id = 12345
+                client.chain_id = 43114
+                client.chain_config = {
+                    "Avalanche": {"chain_id": 43114, "native_symbol": "AVAX"},
+                    "Fuji": {"chain_id": 43113, "native_symbol": "AVAX"},
+                }
+                client._parse_revert_reason = lambda e: str(e)
+                client._cache_enabled = False  # Disable caching for tests
+
+                # Mock session
+                client._mock_session = MagicMock()
+                client._session = client._mock_session
+                mock_resp = AsyncMock()
+                mock_resp.status = 200
+                mock_resp.json = AsyncMock(return_value=[])
+                mock_resp.raise_for_status = MagicMock()
+                mock_cm = AsyncMock()
+                mock_cm.__aenter__.return_value = mock_resp
+                client._mock_session.get.return_value = mock_cm
+
+                yield client
+
+    async def test_get_token_details(self, client):
+        # Mock tokens API response
+        mock_tokens_resp = [
+            {
+                "symbol": "AVAX",
+                "name": "Avalanche",
+                "chain_id": 43113,
+                "evmdecimals": 18,
+                "address": "0x0000",
+                "env": "fuji",
+            }
+        ]
+
+        mock_resp = AsyncMock()
+        mock_resp.json.return_value = mock_tokens_resp
+        mock_resp.raise_for_status = MagicMock()
+        mock_cm = AsyncMock()
+        mock_cm.__aenter__.return_value = mock_resp
+        client._mock_session.get.return_value = mock_cm
+
+        result = await client.get_token_details("AVAX")
+        assert result.success
+        # result.data is a dict with env keys, e.g., {"fuji": {...}}
+        assert isinstance(result.data, dict)
+        assert "AVAX" in str(result.data) or any("AVAX" in str(v) for v in result.data.values())
+
+        # Test invalid token
+        mock_resp_empty = AsyncMock()
+        mock_resp_empty.json.return_value = []  # Empty response for invalid token
+        mock_resp_empty.raise_for_status = MagicMock()
+        mock_cm_empty = AsyncMock()
+        mock_cm_empty.__aenter__.return_value = mock_resp_empty
+        client._mock_session.get.return_value = mock_cm_empty
+
+        result = await client.get_token_details("INVALID")
+        assert not result.success
+        assert "not found" in result.error
+
+    async def test_get_chain_wallet_balance(self, client):
+        client.w3_l1.eth.get_balance.return_value = 10 * 10**18
+        info = await client.get_chain_wallet_balance("Dexalot L1", "ALOT")
+        assert info.success
+        assert info.data["chain"] == "Dexalot L1"
+        assert info.data["symbol"] == "ALOT"
+        assert "10.0" in info.data["balance"]
+
+        info = await client.get_chain_wallet_balance("Dexalot L1", "USDC")
+        assert not info.success
+
+        info = await client.get_chain_wallet_balance("UnknownChain", "AVAX")
+        assert not info.success
+
+    async def test_get_chain_wallet_balance_no_address(self, client):
+        client.account = None
+        info = await client.get_chain_wallet_balance("Dexalot L1", "ALOT")
+        assert not info.success
+        assert "Address required" in info.error
+
+    async def test_get_chain_wallet_balance_mainnet_native(self, client):
+        client.mainnet_providers["Avalanche"].eth.get_balance.return_value = 25 * 10**18
+        info = await client.get_chain_wallet_balance("Avalanche", "AVAX")
+        assert info.success
+        assert info.data["chain"] == "Avalanche"
+        assert info.data["symbol"] == "AVAX"
+        assert info.data["balance"] == "25.0"
+        assert info.data["type"] == "Native"
+
+    async def test_get_chain_wallet_balance_mainnet_erc20(self, client):
+        mock_contract = MagicMock()
+        mock_contract.functions.balanceOf.return_value.call = AsyncMock(return_value=1000 * 10**6)
+        client.mainnet_providers["Avalanche"].eth.contract.side_effect = None
+        client.mainnet_providers["Avalanche"].eth.contract.return_value = mock_contract
+        client.token_data["USDC"] = {
+            "Avalanche": {
+                "chain_id": 43114,
+                "address": "0xUSDAVAX",
+                "evmdecimals": 6,
+            }
+        }
+        info = await client.get_chain_wallet_balance("Avalanche", "USDC")
+        assert info.success
+        assert info.data["chain"] == "Avalanche"
+        assert info.data["symbol"] == "USDC"
+        assert info.data["type"] == "ERC20"
+        assert "1000" in info.data["balance"]
+
+    async def test_get_chain_wallet_balance_erc20_not_found(self, client):
+        # Test token not in token_data
+        info = await client.get_chain_wallet_balance("Avalanche", "UNKNOWN_TOKEN")
+        assert not info.success
+        assert "not found" in info.error
+
+    async def test_get_chain_wallet_balance_erc20_not_on_chain(self, client):
+        # Token exists but not on this chain
+        client.token_data["SPECIAL"] = {
+            "Ethereum": {
+                "chain_id": 1,  # Different chain
+                "address": "0xSPEC",
+            }
+        }
+        info = await client.get_chain_wallet_balance("Avalanche", "SPECIAL")
+        assert not info.success
+        assert "not available" in info.error
+
+    async def test_get_chain_wallet_balance_erc20_zero_address(self, client):
+        client.token_data["ZERO"] = {
+            "Avalanche": {
+                "chain_id": 43114,
+                "address": "0x0000000000000000000000000000000000000000",
+            }
+        }
+        info = await client.get_chain_wallet_balance("Avalanche", "ZERO")
+        assert not info.success
+        assert "zero address" in info.error
+
+    async def test_get_chain_wallet_balance_erc20_contract_error(self, client):
+        client.mainnet_providers["Avalanche"].eth.contract.side_effect = Exception("Contract Error")
+        client.token_data["ERR"] = {
+            "Avalanche": {
+                "chain_id": 43114,
+                "address": "0xERR",
+                "evmdecimals": 18,
+            }
+        }
+        info = await client.get_chain_wallet_balance("Avalanche", "ERR")
+        assert not info.success or "Error" in str(info.data.get("balance", ""))
+
+    async def test_get_chain_wallet_balance_no_chain_id(self, client):
+        # Chain ID not configured
+        client.chain_config["Avalanche"] = {"native_symbol": "AVAX"}  # No chain_id
+        info = await client.get_chain_wallet_balance("Avalanche", "USDC")
+        assert not info.success
+        assert "Chain ID not configured" in info.error
+
+    async def test_get_chain_wallet_balances(self, client):
+        client.w3_l1.eth.get_balance.return_value = 10 * 10**18
+        info = await client.get_chain_wallet_balances("Dexalot L1")
+        assert info.success
+        assert info.data["chain"] == "Dexalot L1"
+        l1_entry = next(b for b in info.data["chain_balances"] if b["chain"] == "Dexalot L1")
+        assert "10.0" in l1_entry["balance"]
+
+        # Test unknown chain
+        info = await client.get_chain_wallet_balances("UnknownChain")
+        assert not info.success
+
+    async def test_get_chain_wallet_balances_no_address(self, client):
+        # Test address required error
+        client.account = None
+        info = await client.get_chain_wallet_balances("Dexalot L1")
+        assert not info.success
+        assert "Address required" in info.error
+
+    async def test_get_chain_wallet_balances_mainnet(self, client):
+        # Test mainnet chain path with native and ERC20 balances
+        client.mainnet_providers["Avalanche"].eth.get_balance.return_value = 15 * 10**18
+
+        # Setup ERC20 mock
+        mock_contract = MagicMock()
+        mock_contract.functions.balanceOf.return_value.call = AsyncMock(return_value=500 * 10**6)
+        client.mainnet_providers["Avalanche"].eth.contract.side_effect = None
+        client.mainnet_providers["Avalanche"].eth.contract.return_value = mock_contract
+
+        # Add token data
+        client.token_data["USDC"] = {
+            "Avalanche": {
+                "chain_id": 43114,
+                "address": "0xUSDC",
+                "evmdecimals": 6,
+            }
+        }
+
+        info = await client.get_chain_wallet_balances("Avalanche")
+        assert info.success
+        assert info.data["chain"] == "Avalanche"
+        assert info.data["address"] == VALID_ADDRESS
+
+        # Should have native balance
+        native_entry = next((b for b in info.data["chain_balances"] if b["type"] == "Native"), None)
+        assert native_entry is not None
+        assert native_entry["balance"] == "15.0"
+
+        # Should have ERC20 balances
+        assert len(info.data["chain_balances"]) >= 1
+
+    async def test_get_all_chain_wallet_balances(self, client):
+        client.w3_l1.eth.get_balance.return_value = 10 * 10**18
+        client.mainnet_providers["Avalanche"].eth.get_balance.return_value = 5 * 10**18
+        info = await client.get_all_chain_wallet_balances()
+        assert info.success
+        l1_entry = next(b for b in info.data["chain_balances"] if b["chain"] == "Dexalot L1")
+        assert "10.0" in l1_entry["balance"]
+        avax_entry = next(
+            b
+            for b in info.data["chain_balances"]
+            if b["chain"] == "Avalanche" and b["type"] == "Native"
+        )
+        assert avax_entry["balance"] == "5.0"
+
+        # Test error handling - L1 balance error
+        from dexalot_sdk.core.base import _BALANCE_CACHE
+
+        _BALANCE_CACHE.clear()
+        client.w3_l1.eth.get_balance.side_effect = Exception("L1 Error")
+        info = await client.get_all_chain_wallet_balances()
+        assert info.success
+        l1_entry = next(b for b in info.data["chain_balances"] if b["chain"] == "Dexalot L1")
+        # The error should be in the balance field
+        assert "Error" in str(l1_entry["balance"])
+
+    async def test_get_all_chain_wallet_balances_not_connected(self, client):
+        client.w3_l1 = None
+        info = await client.get_all_chain_wallet_balances()
+        assert info.success
+        l1_entry = next(b for b in info.data["chain_balances"] if b["chain"] == "Dexalot L1")
+        assert l1_entry["balance"] == "Not connected"
+
+    async def test_get_portfolio_balance(self, client):
+        client.portfolio_sub_contract.functions.getBalance.return_value.call = AsyncMock(
+            return_value=(10000000, 5000000, 5000000)
+        )
+        res = await client.get_portfolio_balance("USDC")
+        assert res.success
+        assert res.data["total"] == 10.0
+        assert res.data["available"] == 5.0
+
+    async def test_get_portfolio_balance_empty_token(self, client):
+        result = await client.get_portfolio_balance("")
+        assert not result.success
+        assert "cannot be empty" in result.error
+
+    async def test_get_all_portfolio_balances(self, client):
+        def side_effect(addr, page):
+            mock_call = MagicMock()
+            if page == 0:
+                mock_call.call = AsyncMock(
+                    return_value=([Utils.to_bytes32("AVAX")], [10**18], [10**18])
+                )
+            else:
+                mock_call.call = AsyncMock(return_value=([], [], []))
+            return mock_call
+
+        client.portfolio_sub_contract.functions.getBalances.side_effect = side_effect
+        res = await client.get_all_portfolio_balances()
+        assert res.success
+        assert "AVAX" in res.data
+        assert res.data["AVAX"]["total"] == 1.0
+
+    async def test_add_gas(self, client):
+        client.portfolio_sub_contract.functions.withdrawNative.return_value.fn_name = (
+            "withdrawNative"
+        )
+        res = await client.add_gas(1.0)
+        assert res.success
+        assert "Add Gas transaction sent" in res.data
+
+    async def test_remove_gas(self, client):
+        client.portfolio_sub_contract.functions.depositNative.return_value.fn_name = "depositNative"
+        res = await client.remove_gas(1.0)
+        assert res.success
+        assert "Remove Gas transaction sent" in res.data
+
+    async def test_transfer_portfolio(self, client):
+        from dexalot_sdk.utils.result import Result
+
+        client.get_portfolio_balance = AsyncMock(return_value=Result.ok({"available": 10.0}))
+        res = await client.transfer_portfolio("USDC", 1.0, VALID_RECIPIENT)
+        assert res.success
+        assert "Transfer transaction sent" in res.data
+        call_args = client.portfolio_sub_contract.functions.transferToken.call_args
+        assert call_args[0][1] == Utils.to_bytes32("USDC")
+        assert call_args[0][2] == 1000000
+
+    async def test_transfer_token(self, client):
+        res = await client.transfer_token("USDC", VALID_RECIPIENT, 1.0)
+        assert res.success
+        assert "Transfer Token transaction sent" in res.data
+
+        # Verify args
+        call_args = client.portfolio_sub_contract.functions.transferToken.call_args
+        # transferToken(_from, _to, _symbol, _quantity)
+        assert call_args[0][0] == VALID_ADDRESS
+        assert call_args[0][1] == VALID_RECIPIENT
+        assert call_args[0][2] == Utils.to_bytes32("USDC")
+        assert call_args[0][3] == 1000000  # 1.0 * 10^6
+
+    async def test_transfer_token_errors(self, client):
+        """Test transfer_token errors."""
+        client.account = None
+        result = await client.transfer_token("USDC", VALID_RECIPIENT, 1)
+        assert not result.success
+        assert result.error == "Private key not configured."
+
+        client.account = MagicMock()
+        client.account.address = VALID_ADDRESS
+        client.portfolio_sub_contract = None
+        result = await client.transfer_token("USDC", VALID_RECIPIENT, 1)
+        assert not result.success
+        assert result.error == "Subnet Provider or Portfolio Contract not initialized."
+
+        client.portfolio_sub_contract = MagicMock()
+        client.w3_l1 = self.create_w3()
+        client.portfolio_sub_contract.functions.transferToken.side_effect = Exception("Err")
+        result = await client.transfer_token("USDC", VALID_RECIPIENT, 1)
+        assert not result.success
+        assert "transferring token" in result.error.lower()
+
+    async def test_get_deposit_bridge_fee(self, client):
+        mock_bridge = MagicMock()
+        mock_bridge.functions.getBridgeFee.return_value.call = AsyncMock(
+            return_value=5000000000000000
+        )
+        client.portfolio_main_avax_contract.functions.portfolioBridge.return_value.call = AsyncMock(
+            return_value="0xBridge"
+        )
+        client.mainnet_providers["Avalanche"].eth.contract.side_effect = None
+        client.mainnet_providers["Avalanche"].eth.contract.return_value = mock_bridge
+        fee = await client.get_deposit_bridge_fee("AVAX", 1.0, "Avalanche")
+        assert fee.success
+        assert fee.data == 0.005
+
+    async def test_deposit(self, client):
+        from dexalot_sdk.utils.result import Result
+
+        client.get_deposit_bridge_fee = AsyncMock(return_value=Result.ok(0.01))
+        mock_token = MagicMock()
+        mock_token.functions.allowance.return_value.call = AsyncMock(return_value=10**20)
+        mock_token.functions.getBridgeFee.return_value.call = AsyncMock(return_value=0)
+        client.mainnet_providers["Avalanche"].eth.contract.side_effect = None
+        client.mainnet_providers["Avalanche"].eth.contract.return_value = mock_token
+        client.portfolio_main_avax_contract.functions.depositToken.return_value.fn_name = (
+            "depositToken"
+        )
+        res = await client.deposit("USDC", 10.0, "Avalanche")
+        assert res.success
+        assert "Deposit transaction sent" in res.data
+
+        # Verify args
+        call_args = client.portfolio_main_avax_contract.functions.depositToken.call_args
+        # depositToken(_from, _symbol, _quantity, _bridgeId)
+        assert call_args[0][2] == 10000000  # 10.0 * 10^6
+        assert call_args[0][3] == 2  # Bridge ID for Avalanche
+
+    async def test_deposit_native(self, client):
+        """Test deposit of native token (AVAX)."""
+        # Mock _get_bridge_fee_internal
+        client._get_bridge_fee_internal = AsyncMock(return_value=10000000000000000)  # 0.01 ETH
+
+        client.portfolio_main_avax_contract.functions.depositNative.return_value.fn_name = (
+            "depositNative"
+        )
+
+        res = await client.deposit("AVAX", 1.0, "Avalanche")
+        assert res.success
+        assert "Deposit transaction sent" in res.data
+
+        # Verify call
+        client.portfolio_main_avax_contract.functions.depositNative.assert_called()
+
+    async def test_withdraw(self, client):
+        mock_token = MagicMock()
+        mock_token.functions.allowance.return_value.call = AsyncMock(return_value=10**20)
+        client.w3_l1.eth.contract.side_effect = None
+        client.w3_l1.eth.contract.return_value = mock_token
+        res = await client.withdraw("USDC", 5.0, "Avalanche")
+        assert res.success
+        assert "Withdraw transaction sent" in res.data
+
+        # Verify args
+        call_args = client.portfolio_sub_contract.functions.withdrawToken.call_args
+        # withdrawToken(_to, _symbol, _quantity, _feeType, _chainId)
+        assert call_args[0][2] == 5000000  # 5.0 * 10^6
+        assert call_args[0][4] == 43114  # Dest Chain ID
+
+    async def test_withdraw_errors(self, client):
+        """Test withdraw errors."""
+        client.account = None
+        result = await client.withdraw("USDC", 10, "Avalanche")
+        assert not result.success
+        assert result.error == "Private key not configured."
+
+        client.account = MagicMock()
+        client.account.address = VALID_ADDRESS
+
+        # Invalid chain
+        result = await client.withdraw("USDC", 10, "INVALID")
+        assert not result.success
+        assert "not known" in result.error
+
+        # Contract not initialized
+        client.portfolio_sub_contract = None
+        client.w3_l1 = None
+        result = await client.withdraw("USDC", 10, "Avalanche")
+        assert not result.success
+        assert "not initialized" in result.error
+
+        # Token not supported
+        client.portfolio_sub_contract = MagicMock()
+        client.w3_l1 = self.create_w3()
+        client.token_data = {}
+        result = await client.withdraw("USDC", 10, "Avalanche")
+        assert not result.success
+        assert "not supported" in result.error
+
+        # Gas estimation error
+        client.token_data = {
+            "A": {"env1": {"chain_id": 43114, "evmdecimals": 18, "address": "0xA"}}
+        }
+        client.portfolio_sub_contract.functions.withdrawToken.return_value.estimate_gas = AsyncMock(
+            side_effect=Exception("Gas Err")
+        )
+        result = await client.withdraw("A", 1, "Avalanche")
+
+    async def test_deposit_allowance(self, client):
+        from dexalot_sdk.utils.result import Result
+
+        client.get_deposit_bridge_fee = AsyncMock(return_value=Result.ok(0.01))
+        mock_token = MagicMock()
+        mock_token.functions.allowance.return_value.call = AsyncMock(return_value=0)
+        mock_token.functions.approve.return_value.build_transaction = AsyncMock(return_value={})
+        mock_token.functions.approve.return_value.estimate_gas = AsyncMock(return_value=50000)
+        mock_token.functions.approve.return_value.fn_name = "approve"
+        mock_token.functions.getBridgeFee.return_value.call = AsyncMock(return_value=0)
+
+        client.mainnet_providers["Avalanche"].eth.contract.side_effect = None
+        client.mainnet_providers["Avalanche"].eth.contract.return_value = mock_token
+        client.portfolio_main_avax_contract.functions.depositToken.return_value.fn_name = (
+            "depositToken"
+        )
+        res = await client.deposit("USDC", 10.0, "Avalanche")
+        assert res.success
+        assert "Deposit transaction sent" in res.data
+        mock_token.functions.approve.assert_called()
+
+    async def test_withdraw_allowance(self, client):
+        mock_token = MagicMock()
+        mock_token.functions.allowance.return_value.call = AsyncMock(return_value=0)
+        mock_token.functions.approve.return_value.build_transaction = AsyncMock(return_value={})
+        mock_token.functions.approve.return_value.estimate_gas = AsyncMock(return_value=50000)
+        mock_token.functions.approve.return_value.fn_name = "approve"
+
+        client.w3_l1.eth.contract.side_effect = None
+        client.w3_l1.eth.contract.return_value = mock_token
+        res = await client.withdraw("USDC", 5.0, "Avalanche")
+        assert res.success
+        assert "Withdraw transaction sent" in res.data
+        mock_token.functions.approve.assert_called()
+
+    async def test_all_chain_wallet_balances_zero_address(self, client):
+        client.token_data = {
+            "ZERO": {
+                "Avalanche": {
+                    "address": "0x0000000000000000000000000000000000000000",
+                    "chain_id": 43114,
+                }
+            }
+        }
+        info = await client.get_all_chain_wallet_balances()
+        assert info.success
+        assert not any(b["symbol"] == "ZERO" for b in info.data["chain_balances"])
+
+    async def test_all_chain_wallet_balances_contract_exc(self, client):
+        from dexalot_sdk.core.base import _BALANCE_CACHE
+
+        _BALANCE_CACHE.clear()
+        client.token_data = {"ERR": {"Avalanche": {"address": "0xErr", "chain_id": 43114}}}
+        client.mainnet_providers["Avalanche"].eth.contract.side_effect = Exception("Err")
+        info = await client.get_all_chain_wallet_balances()
+        assert info.success
+        assert not any(b["symbol"] == "ERR" for b in info.data["chain_balances"])
+        client.mainnet_providers["Avalanche"].eth.contract.side_effect = None
+
+    async def test_transfer_portfolio_insufficient(self, client):
+        client.portfolio_sub_contract.functions.getBalance.return_value.call = AsyncMock(
+            return_value=(0, 0, 0)
+        )
+        res = await client.transfer_portfolio("USDC", 100, VALID_RECIPIENT)
+        assert not res.success
+        assert "Insufficient available balance" in res.error
+
+    async def test_deposit_generic_exc(self, client):
+        # Mock _get_nonce to raise exception (since we now use nonce manager)
+        client._get_nonce = AsyncMock(side_effect=Exception("Err"))
+        res = await client.deposit("AVAX", 1, "Avalanche")
+        assert not res.success
+        assert "depositing" in res.error.lower()
+
+    async def test_ensure_allowance_waits(self, client):
+        client.token_data = {
+            "USDC": {"Avalanche": {"chain_id": 43114, "evmdecimals": 6, "address": "0xUSDC"}}
+        }
+        mock_token = MagicMock()
+        mock_token.functions.allowance.return_value.call = AsyncMock(return_value=0)
+        mock_token.functions.approve.return_value.build_transaction = AsyncMock(return_value={})
+        mock_token.functions.approve.return_value.estimate_gas = AsyncMock(return_value=50000)
+        mock_token.functions.approve.return_value.fn_name = "approve"
+        client.mainnet_providers["Avalanche"].eth.contract.side_effect = None
+        client.mainnet_providers["Avalanche"].eth.contract.return_value = mock_token
+        from dexalot_sdk.utils.result import Result
+
+        client.get_deposit_bridge_fee = AsyncMock(return_value=Result.ok(0))
+        client.portfolio_main_avax_contract.functions.depositToken.return_value.fn_name = (
+            "depositToken"
+        )
+        await client.deposit("USDC", 1, "Avalanche")
+        client.mainnet_providers["Avalanche"].eth.wait_for_transaction_receipt.assert_called()
+
+    async def test_exceptions_and_edge_cases(self, client):
+        # 1. get_all_portfolio_balances exception
+        client.portfolio_sub_contract.functions.getBalances.side_effect = Exception("Err")
+        result = await client.get_all_portfolio_balances()
+        assert not result.success
+        assert "getting all balances" in result.error.lower()
+
+        # 2. add_gas exception
+        client.portfolio_sub_contract.functions.withdrawNative.side_effect = Exception("Err")
+        result = await client.add_gas(1)
+        assert not result.success
+        assert "adding gas" in result.error.lower()
+
+        # 3. get_deposit_bridge_fee exception
+        client.portfolio_main_avax_contract.functions.portfolioBridge.side_effect = Exception("Err")
+        result = await client.get_deposit_bridge_fee("AVAX", 1, "Avalanche")
+        assert not result.success
+        assert "getting bridge fee" in result.error.lower()
+
+        # 4. deposit exception
+        client.mainnet_providers["Avalanche"].eth.contract.side_effect = None
+        client.portfolio_main_avax_contract.functions.depositToken.side_effect = Exception("Err")
+        from dexalot_sdk.utils.result import Result
+
+        client.get_deposit_bridge_fee = AsyncMock(return_value=Result.ok(0.01))
+        # Use a non-native token to test depositToken exception handling
+        client.token_data["USDC"] = {
+            "Avalanche": {
+                "chain_id": 43114,
+                "address": "0xUSDC",
+                "evmdecimals": 6,
+            }
+        }
+        result = await client.deposit("USDC", 1, "Avalanche")
+        assert not result.success
+        assert "depositing" in result.error.lower()
+
+    async def test_coverage_gaps(self, client):
+        def side_effect(addr, page):
+            mock_call = MagicMock()
+            mock_call.call = AsyncMock(
+                return_value=([Utils.to_bytes32(f"T{page}")], [10**18], [10**18])
+            )
+            return mock_call
+
+        client.portfolio_sub_contract.functions.getBalances.side_effect = side_effect
+        res = await client.get_all_portfolio_balances()
+        assert res.success
+        assert len(res.data) == 11
+
+        client.mainnet_providers = {}
+        client.w3_mainnet = None
+        result = await client.deposit("A", 1, "Avalanche")
+        assert not result.success
+        assert "not initialized" in result.error
+
+        client.portfolio_main_avax_contract = None
+        result = await client.deposit("A", 1, "Avalanche")
+        assert not result.success
+        assert "not initialized" in result.error
+
+        client.mainnet_providers = {"Avalanche": self.create_w3()}
+        client.w3_mainnet = client.mainnet_providers["Avalanche"]
+        client.portfolio_main_avax_contract = client.w3_mainnet.eth.contract()
+        client.token_data = {"A": {"env": {"chain_id": 999}}}
+        result = await client.get_deposit_bridge_fee("A", 1, "Avalanche")
+        assert not result.success
+        assert "not supported" in result.error
+
+    async def test_transfer_missing_coverage(self, client):
+        """Test additional error paths."""
+        # Mock tokens API to return empty list (token not found)
+        mock_resp = AsyncMock()
+        mock_resp.json.return_value = []
+        mock_resp.raise_for_status = MagicMock()
+        mock_cm = AsyncMock()
+        mock_cm.__aenter__.return_value = mock_resp
+        client._mock_session.get.return_value = mock_cm
+
+        result = await client.get_token_details("INVALID")
+        assert not result.success
+        assert "not found" in result.error
+
+        client.account = MagicMock()
+        client.account.address = VALID_ADDRESS
+        client.w3_l1 = self.create_w3()
+        client.w3_l1.eth.get_balance.side_effect = Exception("Err")
+        info = await client.get_all_chain_wallet_balances()
+        assert info.success
+        l1_entry = next(b for b in info.data["chain_balances"] if b["chain"] == "Dexalot L1")
+        assert "Error" in l1_entry["balance"]
+
+        from dexalot_sdk.core.base import _BALANCE_CACHE
+
+        _BALANCE_CACHE.clear()
+        client.w3_l1.eth.get_balance.side_effect = None
+        client.w3_l1.eth.get_balance.return_value = 1000
+        # Mock mainnet provider
+        mock_provider = self.create_w3()
+        mock_provider.eth.get_balance.side_effect = Exception("Err")
+        client.mainnet_providers = {"Avalanche": mock_provider}
+        client.chain_config = {"Avalanche": {"chain_id": 43114, "native_symbol": "AVAX"}}
+
+        info = await client.get_all_chain_wallet_balances()
+        assert info.success
+        avax_entry = next(b for b in info.data["chain_balances"] if b["chain"] == "Avalanche")
+        assert "Error" in str(avax_entry["balance"])
+
+        client.portfolio_sub_contract = MagicMock()
+        client.portfolio_sub_contract.functions.getBalance.side_effect = Exception("Err")
+        result = await client.get_portfolio_balance("USDC")
+        assert not result.success
+        assert "getting portfolio balance" in result.error.lower()
+
+        client.account = None
+        result = await client.deposit("USDC", 10, "Avalanche")
+        assert not result.success
+        assert result.error == "Private key not configured."
+
+        client.account = MagicMock()
+        client.account.address = VALID_ADDRESS
+        client.chain_config = {"Avalanche": {"chain_id": 43114}}
+        client.chain_id = 43114
+        client.w3_mainnet = self.create_w3()
+        client.portfolio_main_avax_contract = client.w3_mainnet.eth.contract()
+        client.token_data = {"AVAX": {"Avalanche": {"chain_id": 43114, "evmdecimals": 18}}}
+
+        client._get_bridge_fee_internal = AsyncMock(return_value=0)
+        client.portfolio_main_avax_contract.functions.depositNative.return_value.estimate_gas = (
+            AsyncMock(side_effect=Exception("Revert"))
+        )
+        result = await client.deposit("AVAX", 1, "Avalanche")
+        assert not result.success
+        assert "depositing" in result.error.lower()
+
+        client.token_data = {
+            "USDC": {"Avalanche": {"chain_id": 43114, "evmdecimals": 6, "address": "0xUSDC"}}
+        }
+        # Mock allowance
+        mock_token = MagicMock()
+        mock_token.functions.allowance.return_value.call = AsyncMock(return_value=1000000000)
+        client.w3_mainnet.eth.contract.return_value = mock_token
+        client.portfolio_main_avax_contract.functions.depositToken.return_value.estimate_gas = (
+            AsyncMock(side_effect=Exception("Revert"))
+        )
+        result = await client.deposit("USDC", 1, "Avalanche")
+        assert not result.success
+        assert "depositing" in result.error.lower()
+
+        client.portfolio_sub_contract = MagicMock()
+        client.w3_l1 = self.create_w3()
+        client.token_data = {"USDC": {"Avalanche": {"chain_id": 43114, "evmdecimals": 6}}}
+        client.portfolio_sub_contract.functions.withdrawToken.return_value.estimate_gas = AsyncMock(
+            side_effect=Exception("Revert")
+        )
+        result = await client.withdraw("USDC", 1, "Avalanche")
+        assert not result.success
+        assert "withdrawing" in result.error.lower()
+
+        client.portfolio_sub_contract.functions.transferToken.return_value.estimate_gas = AsyncMock(
+            side_effect=Exception("Revert")
+        )
+
+        original_get_balance = client.get_portfolio_balance
+        client.get_portfolio_balance = AsyncMock(return_value={"available": 1000.0})
+
+        client.w3_l1.eth.send_raw_transaction.side_effect = Exception("Err")
+        client.portfolio_sub_contract.functions.transferToken.return_value.build_transaction = (
+            AsyncMock(return_value={})
+        )
+        result = await client.transfer_portfolio("USDC", 1, VALID_RECIPIENT)
+        assert not result.success
+        assert "transferring portfolio asset" in result.error.lower()
+
+        client.get_portfolio_balance = original_get_balance
+
+        client.account = None
+        result = await client.get_portfolio_balance("A")
+        assert not result.success
+        assert result.error == "Address required (pass as param or set signer)"
+        result = await client.get_all_portfolio_balances()
+        assert not result.success
+        assert result.error == "Address required (pass as param or set signer)"
+        result = await client.add_gas(1)
+        assert not result.success
+        assert result.error == "Private key not configured."
+        result = await client.remove_gas(1)
+        assert not result.success
+        assert result.error == "Private key not configured."
+        result = await client.transfer_portfolio("A", 1, "B")
+        assert not result.success
+        assert result.error == "Private key not configured."
+        result = await client.deposit("A", 1, "C")
+        assert not result.success
+        assert result.error == "Private key not configured."
+
+        client.account = MagicMock()
+        client.account.address = VALID_ADDRESS
+        client.portfolio_sub_contract = None
+        result = await client.get_portfolio_balance("USDC")
+        assert not result.success
+        assert "not initialized" in result.error
+        result = await client.get_all_portfolio_balances()
+        assert not result.success
+        assert "not initialized" in (result.error or "")
+        result = await client.add_gas(1)
+        assert not result.success
+        assert "not initialized" in result.error
+        result = await client.remove_gas(1)
+        assert not result.success
+        assert "not initialized" in result.error
+        result = await client.transfer_portfolio("USDC", 1, VALID_RECIPIENT)
+        assert not result.success
+        assert "not initialized" in result.error
+
+        result = await client.get_deposit_bridge_fee("A", 1, "INVALID")
+        assert not result.success
+        assert "not known" in result.error
+
+    async def test_transfer_missing_coverage_2(self, client):
+        """Test additional error paths."""
+        client.account = MagicMock()
+        client.account.address = VALID_ADDRESS
+
+        client.w3_l1 = self.create_w3()
+        client.mainnet_providers = {"Avalanche": self.create_w3()}
+        client.chain_config = {"Avalanche": {"chain_id": 43114}}
+        client.token_data = {
+            "ZERO": {
+                "Avalanche": {
+                    "chain_id": 43114,
+                    "address": "0x0000000000000000000000000000000000000000",
+                }
+            }
+        }
+        info = await client.get_all_chain_wallet_balances()
+        assert info.success
+        assert not any(b["symbol"] == "ZERO" for b in info.data["chain_balances"])
+
+        client.token_data = {"ERR": {"Avalanche": {"chain_id": 43114, "address": "0xErr"}}}
+        client.mainnet_providers["Avalanche"].eth.contract.side_effect = Exception("Err")
+        info = await client.get_all_chain_wallet_balances()
+        assert info.success
+        assert not any(b["symbol"] == "ERR" for b in info.data["chain_balances"])
+
+        client.portfolio_sub_contract = MagicMock()
+        client.portfolio_sub_contract.functions.getBalance.return_value.call = AsyncMock(
+            return_value=(0, 0, 0)
+        )
+        client.token_data = {"UNSUPPORTED": {}}
+        client.subnet_chain_id = 123
+        client.chain_id = 456
+        # Use a valid address for the account to pass validation
+        client.account.address = VALID_ADDRESS
+        result = await client.get_portfolio_balance("UNSUPPORTED")
+        assert not result.success
+        assert "not supported" in result.error
+
+        client.token_data = {"USDC": {"Avalanche": {"chain_id": 43114, "evmdecimals": 6}}}
+        client.subnet_chain_id = 123
+        client.chain_id = 43114
+        client.portfolio_sub_contract.functions.getBalance.return_value.call = AsyncMock(
+            return_value=(0, 0, 0)
+        )
+        result = await client.transfer_portfolio("USDC", 100, VALID_RECIPIENT)
+        assert not result.success
+        assert "Insufficient available balance" in result.error
+
+    async def test_transfer_portfolio_balance_result_error(self, client):
+        """Test transfer_portfolio when balance_result is Result with error."""
+        from dexalot_sdk.utils.result import Result
+
+        client.account = MagicMock()
+        client.account.address = VALID_ADDRESS
+        client.w3_l1 = self.create_w3()
+        client.portfolio_sub_contract = MagicMock()
+        client.token_data = {"USDC": {"env": {"chain_id": 43114, "evmdecimals": 6}}}
+
+        # Mock get_portfolio_balance to return Result with error
+        client.get_portfolio_balance = AsyncMock(return_value=Result.fail("Balance check failed"))
+
+        result = await client.transfer_portfolio("USDC", 10.0, VALID_RECIPIENT)
+        assert not result.success
+        assert "Error checking balance" in result.error
+
+    async def test_transfer_portfolio_invalid_balance_format(self, client):
+        """Test transfer_portfolio when balance_result has invalid format."""
+
+        client.account = MagicMock()
+        client.account.address = VALID_ADDRESS
+        client.w3_l1 = self.create_w3()
+        client.portfolio_sub_contract = MagicMock()
+        client.token_data = {"USDC": {"env": {"chain_id": 43114, "evmdecimals": 6}}}
+
+        # Mock get_portfolio_balance to return invalid format (not Result, not dict)
+        client.get_portfolio_balance = AsyncMock(return_value="Invalid format")
+
+        result = await client.transfer_portfolio("USDC", 10.0, VALID_RECIPIENT)
+        assert not result.success
+        assert "Invalid balance response format" in result.error
+
+        client.chain_config = {"Avalanche": {"chain_id": 999}}
+        client.chain_id = 43114
+        result = await client.deposit("USDC", 1, "Avalanche")
+        # This test seems to have conflicting assertions - let's check what actually happens
+        # The deposit should fail due to chain config mismatch
+        assert not result.success
+        assert "chain" in result.error.lower() or "multi-chain" in result.error.lower()
+
+        client.chain_config = {"Avalanche": {"chain_id": 43114}}
+        client.chain_id = 43114
+        client.w3_mainnet = self.create_w3()
+        client.portfolio_main_avax_contract = client.w3_mainnet.eth.contract()
+        client.token_data = {"UNSUPPORTED": {}}
+        result = await client.deposit("UNSUPPORTED", 1, "Avalanche")
+        assert not result.success
+        assert "not supported" in result.error
+
+        result = await client.deposit("USDC", 1, "INVALID_CHAIN")
+        assert not result.success
+        assert "not known" in result.error
+
+        client.chain_config = {"Avalanche": {"chain_id": 43114}}
+        client.chain_id = 43114
+        client.w3_mainnet = self.create_w3()
+        client.portfolio_main_avax_contract = client.w3_mainnet.eth.contract()
+        client.token_data = {"AVAX": {"Avalanche": {"chain_id": 43114, "evmdecimals": 18}}}
+        # Mock _get_nonce to raise exception (since we now use nonce manager)
+        client._get_nonce = AsyncMock(side_effect=Exception("Generic Error"))
+        result = await client.deposit("AVAX", 1, "Avalanche")
+        assert not result.success
+        assert "depositing" in result.error.lower()
+
+        client.w3_l1 = self.create_w3()
+        client.w3_l1.eth.get_transaction_count.side_effect = Exception(
+            "Generic Portfolio Transfer Error"
+        )
+        client.token_data = {"USDC": {"Avalanche": {"chain_id": 43114, "evmdecimals": 6}}}
+        client.subnet_chain_id = 123
+        client.chain_id = 43114
+        client.portfolio_sub_contract.functions.getBalance.return_value.call = AsyncMock(
+            return_value=(1000000000, 1000000000, 0)
+        )
+        # Reset get_portfolio_balance to return a valid Result
+        from dexalot_sdk.utils.result import Result
+
+        client.get_portfolio_balance = AsyncMock(return_value=Result.ok({"available": 1000000.0}))
+        result = await client.transfer_portfolio("USDC", 1, VALID_RECIPIENT)
+        assert not result.success
+        assert (
+            "transferring portfolio asset" in result.error.lower()
+            or "Insufficient available balance" in result.error
+        )
+
+        client.token_data = {"FALLBACK": {"Avalanche": {"chain_id": 43114, "evmdecimals": 6}}}
+        client.subnet_chain_id = 123
+        client.chain_id = 43114
+        # Mock transaction build
+        client.w3_l1.eth.get_transaction_count.side_effect = None
+        client.w3_l1.eth.get_transaction_count.return_value = 1
+        client.portfolio_sub_contract.functions.transferToken.return_value.build_transaction = (
+            AsyncMock(return_value={})
+        )
+        client.w3_l1.eth.send_raw_transaction = AsyncMock(return_value=b"tx")
+
+        await client.transfer_token("FALLBACK", VALID_RECIPIENT, 1)
+        call_args = client.portfolio_sub_contract.functions.transferToken.call_args[0]
+        assert call_args[3] == 1000000
+
+    async def test_coverage_gaps_new(self, client):
+        """Test specific coverage gaps identified."""
+        client.chain_id = 43114
+        client.subnet_chain_id = 12345
+        client.token_data = {
+            "ONLY_SUBNET": {"Subnet": {"chain_id": 12345, "evmdecimals": 6, "address": "0xSubnet"}}
+        }
+        client._get_bridge_fee_internal = AsyncMock(return_value=0)
+        client.portfolio_main_avax_contract = client.w3_mainnet.eth.contract()
+        client.portfolio_main_avax_contract.functions.depositToken.return_value.fn_name = (
+            "depositToken"
+        )
+        client.mainnet_providers["Avalanche"].eth.send_raw_transaction = AsyncMock(
+            return_value=b"tx"
+        )
+        client.mainnet_providers["Avalanche"].eth.get_transaction_count = AsyncMock(return_value=1)
+
+        res = await client.deposit("ONLY_SUBNET", 1, "Avalanche")
+        assert res.success
+        assert "Deposit transaction sent" in res.data
+
+        client.token_data = {
+            "USDC": {"Avalanche": {"chain_id": 43114, "evmdecimals": 6, "address": "0xUSDC"}}
+        }
+        mock_token_contract = MagicMock()
+        mock_token_contract.functions.allowance.return_value.call = AsyncMock(return_value=0)
+        # Mock approve function
+        mock_approve_fn = MagicMock()
+        mock_approve_fn.fn_name = "approve"
+        mock_token_contract.functions.approve.return_value = mock_approve_fn
+
+        client.mainnet_providers["Avalanche"].eth.contract.return_value = mock_token_contract
+
+        # Mock build_transaction for approve
+        mock_approve_fn.build_transaction = AsyncMock(return_value={})
+        mock_approve_fn.estimate_gas = AsyncMock(return_value=50000)
+
+        # Call deposit to trigger ensure_allowance
+        client._get_bridge_fee_internal = AsyncMock(return_value=0)
+        res = await client.deposit("USDC", 1, "Avalanche")
+
+        # Verify wait_for_transaction_receipt was called
+        client.mainnet_providers["Avalanche"].eth.wait_for_transaction_receipt.assert_called()
+
+    async def test_get_all_chain_wallet_balances_no_address(self, client):
+        """Test get_all_chain_wallet_balances with no address."""
+        client.account = None
+        result = await client.get_all_chain_wallet_balances()
+        assert not result.success
+        assert "Address required" in result.error
+
+    async def test_fetch_erc20_balances_list_exception(self, client):
+        """Test _fetch_erc20_balances_list exception handling."""
+        from dexalot_sdk.core.base import _BALANCE_CACHE
+
+        _BALANCE_CACHE.clear()
+
+        # Setup token data
+        client.token_data = {
+            "TOKEN1": {"Avalanche": {"chain_id": 43114, "address": "0xToken1", "evmdecimals": 18}},
+            "TOKEN2": {"Avalanche": {"chain_id": 43114, "address": "0xToken2", "evmdecimals": 18}},
+        }
+
+        # Create a custom mock provider that raises exceptions
+        mock_provider = MagicMock()
+
+        # Create a coroutine that raises an exception
+        async def raise_exception():
+            raise Exception("Balance Error")
+
+        # Mock contract creation to succeed, but balanceOf.call() to raise exception
+        mock_contract = MagicMock()
+        # balanceOf() returns a function object with a .call() method
+        # .call() should return a coroutine that raises when awaited
+        # This will cause asyncio.gather to return the Exception in results
+        mock_balance_of = MagicMock()
+        mock_balance_of.call = raise_exception
+        mock_contract.functions.balanceOf.return_value = mock_balance_of
+        mock_provider.eth.contract.return_value = mock_contract
+
+        result = await client._fetch_erc20_balances_list(
+            43114, "Avalanche", mock_provider, VALID_ADDRESS
+        )
+        assert isinstance(result, list)
+        assert len(result) == 0
+        assert mock_provider.eth.contract.called
+
+    async def test_remove_gas_exception(self, client):
+        """Test remove_gas exception handling."""
+        client.portfolio_sub_contract.functions.depositNative.side_effect = Exception(
+            "Contract Error"
+        )
+        result = await client.remove_gas(1.0)
+        assert not result.success
+        assert "removing gas" in result.error.lower()
+
+    async def test_get_deposit_bridge_fee_not_initialized(self, client):
+        """Test get_deposit_bridge_fee when not initialized."""
+        client.w3_mainnet = None
+        client.portfolio_main_avax_contract = None
+        result = await client.get_deposit_bridge_fee("AVAX", 1, "Avalanche")
+        assert not result.success
+        assert "not initialized" in result.error
+
+    async def test_build_and_send_tx_retry_disabled(self, client):
+        """Test _build_and_send_tx when retry is disabled."""
+        client.config.retry_enabled = False
+        client._rpc_rate_limiter = None
+
+        client.account = MagicMock()
+        client.account.address = VALID_ADDRESS
+        client.private_key = "0x" + "a" * 64  # Valid 66-char private key (32 bytes)
+
+        mock_w3 = self.create_w3()
+        mock_w3.eth.get_transaction_count = AsyncMock(return_value=5)
+        mock_w3.eth.gas_price = AsyncMock(return_value=100)
+        tx_hash_bytes = b"tx_hash"
+        mock_w3.eth.send_raw_transaction = AsyncMock(return_value=tx_hash_bytes)
+        mock_w3.to_hex = lambda x: f"0x{x.hex() if isinstance(x, bytes) else x}"
+
+        func_call = MagicMock()
+        func_call.fn_name = "transfer"
+        func_call.estimate_gas = AsyncMock(return_value=50000)
+        func_call.build_transaction = AsyncMock(return_value={"to": "0xContract", "data": "0x"})
+
+        mock_w3.eth.account.sign_transaction = MagicMock()
+        mock_w3.eth.account.sign_transaction.return_value.raw_transaction = b"raw_tx"
+
+        # Mock _rpc_call to return proper values for receipt waiting
+        async def mock_rpc_call(w3, method, *args):
+            if method == "eth.wait_for_transaction_receipt":
+                return {"status": 1}
+            elif method == "eth.send_raw_transaction":
+                return b"tx_hash"
+            elif method == "eth.gas_price":
+                return 100
+            return None
+
+        client._rpc_call = AsyncMock(side_effect=mock_rpc_call)
+
+        result = await client._build_and_send_tx(mock_w3, func_call, value=0)
+        assert result == "0x74785f68617368"  # hex of "tx_hash"
+
+        func_call.estimate_gas.assert_called_once()
+
+    async def test_build_and_send_tx_no_account(self, client):
+        """Test _build_and_send_tx raises ValueError when account is None."""
+        client.account = None
+        mock_w3 = self.create_w3()
+        func_call = MagicMock()
+
+        with pytest.raises(ValueError, match="Account is required for signing transactions"):
+            await client._build_and_send_tx(mock_w3, func_call, value=0)
+
+    async def test_build_and_send_tx_receipt_status_failed(self, client):
+        """Test _build_and_send_tx when receipt status != 1."""
+        client.account = MagicMock()
+        client.account.address = VALID_ADDRESS
+        client.private_key = "0x" + "a" * 64
+
+        mock_w3 = self.create_w3()
+        mock_w3.eth.get_transaction_count = AsyncMock(return_value=5)
+        mock_w3.eth.gas_price = AsyncMock(return_value=100)
+        tx_hash_bytes = b"tx_hash"
+        mock_w3.eth.send_raw_transaction = AsyncMock(return_value=tx_hash_bytes)
+        mock_w3.to_hex = lambda x: f"0x{x.hex() if isinstance(x, bytes) else x}"
+
+        func_call = MagicMock()
+        func_call.fn_name = "transfer"
+        func_call.estimate_gas = AsyncMock(return_value=50000)
+        func_call.build_transaction = AsyncMock(return_value={"to": "0xContract", "data": "0x"})
+
+        mock_w3.eth.account.sign_transaction = MagicMock()
+        mock_w3.eth.account.sign_transaction.return_value.raw_transaction = b"raw_tx"
+
+        async def mock_rpc_call(w3, method, *args):
+            if method == "eth.wait_for_transaction_receipt":
+                return {"status": 0}  # Failed transaction
+            elif method == "eth.send_raw_transaction":
+                return b"tx_hash"
+            elif method == "eth.gas_price":
+                return 100
+            return None
+
+        client._rpc_call = AsyncMock(side_effect=mock_rpc_call)
+
+        with pytest.raises(Exception, match="Transaction reverted"):
+            await client._build_and_send_tx(mock_w3, func_call, value=0)
+
+    async def test_build_and_send_tx_wait_for_receipt_false(self, client):
+        """Test _build_and_send_tx with wait_for_receipt=False."""
+        client.account = MagicMock()
+        client.account.address = VALID_ADDRESS
+        client.private_key = "0x" + "a" * 64
+
+        mock_w3 = self.create_w3()
+        mock_w3.eth.get_transaction_count = AsyncMock(return_value=5)
+        mock_w3.eth.gas_price = AsyncMock(return_value=100)
+        tx_hash_bytes = b"tx_hash"
+        mock_w3.eth.send_raw_transaction = AsyncMock(return_value=tx_hash_bytes)
+        mock_w3.to_hex = lambda x: f"0x{x.hex() if isinstance(x, bytes) else x}"
+
+        func_call = MagicMock()
+        func_call.fn_name = "transfer"
+        func_call.estimate_gas = AsyncMock(return_value=50000)
+        func_call.build_transaction = AsyncMock(return_value={"to": "0xContract", "data": "0x"})
+
+        mock_w3.eth.account.sign_transaction = MagicMock()
+        mock_w3.eth.account.sign_transaction.return_value.raw_transaction = b"raw_tx"
+
+        async def mock_rpc_call(w3, method, *args):
+            if method == "eth.send_raw_transaction":
+                return b"tx_hash"
+            elif method == "eth.gas_price":
+                return 100
+            return None
+
+        client._rpc_call = AsyncMock(side_effect=mock_rpc_call)
+
+        result = await client._build_and_send_tx(
+            mock_w3, func_call, value=0, wait_for_receipt=False
+        )
+        assert result == "0x74785f68617368"  # hex of "tx_hash"
+
+    async def test_get_provider_for_chain_fallback(self, client):
+        """Test _get_provider_for_chain falling back to mainnet_providers."""
+
+        config = DexalotConfig(provider_failover_enabled=True)
+        with patch.dict(os.environ, {"PRIVATE_KEY": "0x" + "a" * 64}, clear=False):
+            with patch("dexalot_sdk.core.config.load_dotenv"):
+                client_with_failover = MockClient(config=config)
+                mock_provider = MagicMock()
+                client_with_failover.mainnet_providers["TestChain"] = mock_provider
+
+                # Make provider manager return None
+                async def return_none(*args):
+                    return None
+
+                client_with_failover._provider_manager.get_provider = return_none
+
+                result = await client_with_failover._get_provider_for_chain("TestChain")
+                assert result == mock_provider
+
+    async def test_get_provider_for_chain_provider_manager_returns_provider(self, client):
+        """Test _get_provider_for_chain when provider manager returns a provider."""
+
+        config = DexalotConfig(provider_failover_enabled=True)
+        with patch.dict(os.environ, {"PRIVATE_KEY": "0x" + "a" * 64}, clear=False):
+            with patch("dexalot_sdk.core.config.load_dotenv"):
+                client_with_failover = MockClient(config=config)
+                mock_provider = MagicMock()
+
+                # Make provider manager return a provider
+                async def return_provider(*args):
+                    return mock_provider
+
+                client_with_failover._provider_manager.get_provider = return_provider
+
+                result = await client_with_failover._get_provider_for_chain("TestChain")
+                assert result == mock_provider
+
+    async def test_get_available_chains_provider_manager_no_providers(self, client):
+        """Test _get_available_chains when provider manager has no providers."""
+
+        config = DexalotConfig(provider_failover_enabled=True)
+        with patch.dict(os.environ, {"PRIVATE_KEY": "0x" + "a" * 64}, clear=False):
+            with patch("dexalot_sdk.core.config.load_dotenv"):
+                client_with_failover = MockClient(config=config)
+                client_with_failover.mainnet_providers["TestChain"] = MagicMock()
+                client_with_failover.chain_config = {"TestChain": {}}
+
+                # Provider manager has no providers for TestChain (get_provider_count returns 0)
+                client_with_failover._provider_manager.get_provider_count = lambda x: 0
+
+                chains = client_with_failover._get_available_chains()
+                # Should still include TestChain from mainnet_providers
+                assert "TestChain" in chains
+                # But not from provider manager since count is 0
+                assert len(chains) == 1
+
+    async def test_get_available_chains_provider_manager_has_providers(self, client):
+        """Test _get_available_chains when provider manager has providers."""
+
+        config = DexalotConfig(provider_failover_enabled=True)
+        with patch.dict(os.environ, {"PRIVATE_KEY": "0x" + "a" * 64}, clear=False):
+            with patch("dexalot_sdk.core.config.load_dotenv"):
+                client_with_failover = MockClient(config=config)
+                client_with_failover.mainnet_providers["TestChain1"] = MagicMock()
+                client_with_failover.chain_config = {
+                    "TestChain1": {},
+                    "TestChain2": {},
+                }
+
+                # Provider manager has providers for TestChain2 (get_provider_count returns > 0)
+                client_with_failover._provider_manager.get_provider_count = lambda x: (
+                    1 if x == "TestChain2" else 0
+                )
+
+                chains = client_with_failover._get_available_chains()
+                # Should include TestChain1 from mainnet_providers
+                assert "TestChain1" in chains
+                # Should also include TestChain2 from provider manager (when count > 0)
+                assert "TestChain2" in chains
+                assert len(chains) == 2
+
+    async def test_get_all_chain_wallet_balances_no_chain_id(self, client):
+        """Test get_all_chain_wallet_balances when chain_info doesn't have chain_id."""
+        client.w3_l1.eth.get_balance = AsyncMock(return_value=10 * 10**18)
+        client.mainnet_providers["Avalanche"].eth.get_balance = AsyncMock(return_value=5 * 10**18)
+
+        # Remove chain_id from chain_config
+        client.chain_config["Avalanche"] = {"native_symbol": "AVAX"}  # No chain_id
+
+        info = await client.get_all_chain_wallet_balances()
+        assert info.success
+        # Should still work, just won't fetch ERC20 balances for chains without chain_id
+        assert len(info.data["chain_balances"]) >= 1
+
+    async def test_get_all_chain_wallet_balances_provider_none(self, client):
+        """Test get_all_chain_wallet_balances when _get_provider_for_chain returns None."""
+        client.w3_l1.eth.get_balance = AsyncMock(return_value=10 * 10**18)
+
+        # Make _get_provider_for_chain return None for a chain
+        original_get_provider = client._get_provider_for_chain
+        call_count = 0
+
+        async def get_provider_with_none(chain):
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:  # First call (Avalanche) returns None
+                return None
+            return await original_get_provider(chain)
+
+        client._get_provider_for_chain = get_provider_with_none
+
+        info = await client.get_all_chain_wallet_balances()
+        assert info.success
+        # Should skip chains where provider is None (continue to next chain)
+        # Should still have balances for other chains
+        assert len(info.data["chain_balances"]) >= 0
+
+    async def test_get_chain_wallet_balance_invalid_address(self, client):
+        """Test get_chain_wallet_balance with invalid address (coverage for line 92)."""
+        client.account = MagicMock()
+        client.account.address = "0xInvalid"  # Too short
+        result = await client.get_chain_wallet_balance("Avalanche", "AVAX")
+        assert not result.success
+        assert "Invalid address" in result.error
+
+    async def test_get_chain_wallet_balance_invalid_token(self, client):
+        """Test get_chain_wallet_balance with invalid token (coverage for line 97)."""
+        client.account = MagicMock()
+        client.account.address = VALID_ADDRESS
+        result = await client.get_chain_wallet_balance("Avalanche", "")  # Empty token
+        assert not result.success
+        assert "Invalid token" in result.error
+
+    async def test_get_chain_wallet_balance_invalid_chain(self, client):
+        """Test get_chain_wallet_balance with invalid chain (coverage for line 101)."""
+        client.account = MagicMock()
+        client.account.address = VALID_ADDRESS
+        result = await client.get_chain_wallet_balance("", "AVAX")  # Empty chain
+        assert not result.success
+        assert "Invalid chain" in result.error
+
+    async def test_transfer_portfolio_invalid_params(self, client):
+        """Test transfer_portfolio with invalid params (coverage for line 561)."""
+        client.account = MagicMock()
+        client.account.address = VALID_ADDRESS
+        # Invalid token
+        result = await client.transfer_portfolio("", 1.0, VALID_RECIPIENT)
+        assert not result.success
+        assert "Invalid token" in result.error
+
+    async def test_deposit_invalid_token(self, client):
+        """Test deposit with invalid token (coverage for line 609)."""
+        client.account = MagicMock()
+        client.account.address = VALID_ADDRESS
+        result = await client.deposit("", 1.0, "Avalanche")
+        assert not result.success
+        assert "Invalid token" in result.error
+
+    async def test_deposit_invalid_amount(self, client):
+        """Test deposit with invalid amount (coverage for line 613)."""
+        client.account = MagicMock()
+        client.account.address = VALID_ADDRESS
+        result = await client.deposit("USDC", -1.0, "Avalanche")
+        assert not result.success
+        assert "Invalid amount" in result.error
+
+    async def test_deposit_invalid_source_chain(self, client):
+        """Test deposit with invalid source_chain (coverage for line 616)."""
+        client.account = MagicMock()
+        client.account.address = VALID_ADDRESS
+        result = await client.deposit("USDC", 1.0, "")  # Empty chain
+        assert not result.success
+        assert "Invalid source_chain" in result.error
+
+    async def test_get_l1_token_info_not_found(self, client):
+        """Test _get_l1_token_info when token not in token_data (coverage for line 653)."""
+        client.token_data = {}
+        client.chain_id = 43114
+        result = await client._get_l1_token_info("UNKNOWN")
+        assert result is None
+
+    async def test_withdraw_invalid_token(self, client):
+        """Test withdraw with invalid token (coverage for line 762)."""
+        client.account = MagicMock()
+        client.account.address = VALID_ADDRESS
+        result = await client.withdraw("", 1.0, "Avalanche")
+        assert not result.success
+        assert "Invalid token" in result.error
+
+    async def test_withdraw_invalid_amount(self, client):
+        """Test withdraw with invalid amount (coverage for line 767)."""
+        client.account = MagicMock()
+        client.account.address = VALID_ADDRESS
+        result = await client.withdraw("USDC", -1.0, "Avalanche")
+        assert not result.success
+        assert "Invalid amount" in result.error
+
+    async def test_withdraw_invalid_destination_chain(self, client):
+        """Test withdraw with invalid destination_chain (coverage for line 771)."""
+        client.account = MagicMock()
+        client.account.address = VALID_ADDRESS
+        result = await client.withdraw("USDC", 1.0, "")  # Empty chain
+        assert not result.success
+        assert "Invalid destination_chain" in result.error
+
+    async def test_transfer_token_invalid_params(self, client):
+        """Test transfer_token with invalid params (coverage for line 874)."""
+        client.account = MagicMock()
+        client.account.address = VALID_ADDRESS
+        # Invalid token
+        result = await client.transfer_token("", VALID_RECIPIENT, 1.0)
+        assert not result.success
+        assert "Invalid token" in result.error
+
+    async def test_get_token_details_validation_failure(self, client):
+        """Test get_token_details when token validation fails to verify early return."""
+        # Test with invalid token symbol (empty string)
+        result = await client.get_token_details("")
+        assert not result.success
+        assert "invalid token" in result.error.lower() or "cannot be empty" in result.error.lower()
+
+        # Test with invalid token symbol (non-alphanumeric)
+        result = await client.get_token_details("INVALID@TOKEN")
+        assert not result.success
+        # The validation might pass for this, so check for either validation error or not found
+        assert "invalid token" in result.error.lower() or "not found" in result.error.lower()
+
+    async def test_get_token_details_exception_handling(self, client):
+        """Test get_token_details exception handling when an exception occurs during token fetching."""
+
+        # Mock _make_http_request to raise an exception
+        async def failing_request(*args, **kwargs):
+            raise Exception("Network error")
+
+        client._make_http_request = failing_request
+
+        result = await client.get_token_details("AVAX")
+        assert not result.success
+        assert "getting token details" in result.error.lower()

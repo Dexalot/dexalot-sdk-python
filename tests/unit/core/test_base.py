@@ -1,0 +1,2409 @@
+import os
+from unittest.mock import AsyncMock, MagicMock, mock_open, patch
+
+import pytest
+
+from dexalot_sdk.core.base import DexalotBaseClient
+
+
+class TestDexalotBaseClient:
+    @pytest.fixture
+    def mock_env(self):
+        with patch.dict(
+            os.environ,
+            {
+                "PARENTENV": "fuji-multi",
+                "API_BASE_URL_TESTNET": "https://api.dexalot-test.com",
+                "PRIVATE_KEY": "0x" + "1" * 64,  # 66 chars total (0x + 64 hex chars = 32 bytes)
+            },
+        ):
+            yield
+
+    @pytest.fixture(autouse=True)
+    def clean_cache(self):
+        from dexalot_sdk.core.base import (
+            _BALANCE_CACHE,
+            _ORDERBOOK_CACHE,
+            _SEMI_STATIC_CACHE,
+            _STATIC_CACHE,
+        )
+
+        _STATIC_CACHE.clear()
+        _SEMI_STATIC_CACHE.clear()
+        _BALANCE_CACHE.clear()
+        _ORDERBOOK_CACHE.clear()
+
+    @pytest.fixture
+    def client(self, mock_env):
+        # Mock errors.json loading
+        with patch("builtins.open", mock_open(read_data='{"E001": "Some Error"}')):
+            with patch("dexalot_sdk.core.base.aiohttp.ClientSession") as mock_session_cls:
+                client = DexalotBaseClient()
+                # Store the mock on the client to easily access it in tests
+                client._mock_session = mock_session_cls.return_value
+                # Default mock for get to return a context manager
+                mock_cm = AsyncMock()
+                client._mock_session.get.return_value = mock_cm
+
+                # Force client to use this session (connect normally creates a new one)
+                client._session = client._mock_session
+
+                yield client
+
+    async def test_init(self, client):
+        """Test initialization of DexalotBaseClient."""
+        assert client.parent_env == "fuji-multi"
+        assert client.api_base_url == "https://api.dexalot-test.com"
+        assert client.account is not None
+        assert (
+            client.account.address == "0x19E7E376E7C213B7E7e7e46cc70A5dD086DAff2A"
+        )  # Address for key 0x1111...1111 (64 hex chars)
+        assert client.error_codes == {"E001": "Some Error"}
+
+    async def test_parse_revert_reason(self, client):
+        """Test revert reason parsing."""
+        assert client._parse_revert_reason("Execution reverted: E001") == "E001: Some Error"
+        assert client._parse_revert_reason("Unknown Error") == "Unknown Error"
+
+    @patch("dexalot_sdk.utils.provider_manager.AsyncWeb3")
+    @patch("dexalot_sdk.core.base.AsyncWeb3")
+    async def test_initialize_client_success(self, mock_web3_base, mock_web3_provider, client):
+        """Test successful client initialization."""
+
+        # Mock API responses
+        mock_env_resp = [
+            {
+                "env": "fuji-multi-subnet",
+                "chainid": 432204,
+                "type": "subnet",
+                "rpc": "https://subnet-rpc",
+            },
+            {
+                "env": "fuji-multi-avax",
+                "chainid": 43113,
+                "type": "mainnet",
+                "network": "Fuji",
+                "rpc": "https://fuji-rpc",
+                "native_token_symbol": "AVAX",
+            },
+        ]
+
+        mock_tokens_resp = [
+            {"symbol": "AVAX", "env": "fuji-multi-subnet", "address": "0x123"},
+            {"symbol": "USDC", "env": "fuji-multi-subnet", "address": "0x456"},
+        ]
+
+        mock_rfq_resp = {"AVAX/USDC": {}}
+
+        mock_deploy_resp_tp = [{"env": "fuji-multi-subnet", "address": "0xTP", "abi": []}]
+        mock_deploy_resp_port = [{"env": "fuji-multi-subnet", "address": "0xPS", "abi": []}]
+        mock_deploy_resp_rfq = [{"env": "fuji-multi-avax", "address": "0xRFQ", "abi": []}]
+
+        # Setup side effects for client._session.get
+        def side_effect(url, params=None, **kwargs):
+            mock_resp = AsyncMock()
+            mock_resp.raise_for_status = MagicMock()
+            if "environments" in url:
+                mock_resp.json.return_value = mock_env_resp
+            elif "tokens" in url:
+                mock_resp.json.return_value = mock_tokens_resp
+            elif "rfq/pairs" in url:
+                mock_resp.json.return_value = mock_rfq_resp
+            elif "deployment" in url:
+                ctype = params.get("contracttype")
+                if ctype == "TradePairs":
+                    mock_resp.json.return_value = mock_deploy_resp_tp
+                elif ctype == "Portfolio":
+                    mock_resp.json.return_value = mock_deploy_resp_port
+                elif ctype == "MainnetRFQ":
+                    mock_resp.json.return_value = mock_deploy_resp_rfq
+
+            # Setup __aenter__ for async context manager
+            mock_cm = AsyncMock()
+            mock_cm.__aenter__.return_value = mock_resp
+            return mock_cm
+
+        session = client._mock_session
+        session.get.side_effect = side_effect
+
+        # Configure both AsyncWeb3 mocks to return the same mock instance
+        mock_web3_instance = MagicMock()
+        mock_web3_base.return_value = mock_web3_instance
+        mock_web3_provider.return_value = mock_web3_instance
+
+        # Run initialization
+        res = await client.initialize_client()
+
+        assert res.success
+        assert res.data == "Client initialized with all configurations."
+        assert client.subnet_chain_id == 432204
+        assert client.env == "fuji-multi-avax"
+        assert "Fuji" in client.chain_config
+        assert client.token_data["AVAX"]["fuji-multi-subnet"]["address"] == "0x123"
+        assert client.deployments["TradePairs"]["address"] == "0xTP"
+
+        # Verify Web3 initialization
+        assert client.w3_l1 is not None
+        assert client.w3_mainnet is not None
+
+    async def test_initialize_client_failure(self, client):
+        """Test initialization failure handling."""
+        client._mock_session.get.side_effect = Exception("API Down")
+
+        res = await client.initialize_client()
+        assert not res.success
+        assert "initializing client" in res.error.lower()
+
+    def test_transform_environment_from_api(self, client):
+        """Test _transform_environment_from_api with various field name combinations."""
+        # Test lowercase fields transformed to snake_case
+        env1 = {
+            "chainid": 43113,
+            "type": "mainnet",
+            "chain_instance": "https://rpc.example.com",
+            "chain_display_name": "Fuji",
+            "env": "fuji-multi-avax",
+        }
+        transformed1 = client._transform_environment_from_api(env1)
+        assert transformed1["chain_id"] == 43113
+        assert transformed1["env_type"] == "mainnet"
+        assert transformed1["rpc"] == "https://rpc.example.com"
+        assert transformed1["network"] == "Fuji"
+
+        # Test snake_case fields
+        env2 = {
+            "chain_id": 12345,
+            "type": "subnet",
+            "chain_instance": "https://subnet.example.com",
+            "chain_display_name": "Dexalot Subnet",
+            "env": "fuji-multi-subnet",
+        }
+        transformed2 = client._transform_environment_from_api(env2)
+        assert transformed2["chain_id"] == 12345
+        assert transformed2["env_type"] == "subnet"
+        assert transformed2["rpc"] == "https://subnet.example.com"
+        assert transformed2["network"] == "Dexalot Subnet"
+
+        # Test mixed fields (prefer existing snake_case)
+        env3 = {
+            "chain_id": 43114,
+            "env_type": "mainnet",
+            "chainid": 999,  # Should be ignored
+            "type": "subnet",  # Should be ignored
+            "rpc": "https://rpc.example.com",
+            "network": "Avalanche",
+        }
+        transformed3 = client._transform_environment_from_api(env3)
+        assert transformed3["chain_id"] == 43114  # Prefer existing
+        assert transformed3["env_type"] == "mainnet"  # Prefer existing
+
+        # Test missing optional fields
+        env4 = {"chainid": 43113, "env_type": "mainnet"}
+        transformed4 = client._transform_environment_from_api(env4)
+        assert transformed4["chain_id"] == 43113
+        assert transformed4["env_type"] == "mainnet"
+        assert "rpc" not in transformed4 or transformed4.get("rpc") is None
+        assert "network" not in transformed4 or transformed4.get("network") is None
+
+    def test_transform_token_from_api(self, client):
+        """Test _transform_token_from_api with various field name combinations."""
+        # Test lowercase fields transformed to snake_case
+        token1 = {
+            "symbol": "AVAX",
+            "name": "Avalanche",
+            "evmdecimals": 18,
+            "chainid": 43113,
+            "chain_display_name": "Fuji",
+            "address": "0x123",
+        }
+        transformed1 = client._transform_token_from_api(token1)
+        assert transformed1["evm_decimals"] == 18
+        assert transformed1["chain_id"] == 43113
+        assert transformed1["network"] == "Fuji"
+
+        # Test snake_case fields preserved/transformed
+        token2 = {
+            "symbol": "USDC",
+            "name": "USD Coin",
+            "decimals": 6,
+            "chain_id": 43114,
+            "network": "Avalanche",
+            "address": "0x456",
+        }
+        transformed2 = client._transform_token_from_api(token2)
+        assert transformed2["evm_decimals"] == 6
+        assert transformed2["chain_id"] == 43114
+        assert transformed2["network"] == "Avalanche"
+
+        # Test mixed fields (prefer existing snake_case)
+        token3 = {
+            "symbol": "ETH",
+            "evm_decimals": 18,
+            "chain_id": 43114,
+            "evmdecimals": 999,  # Should be ignored
+            "chainid": 999,  # Should be ignored
+            "network": "Avalanche",
+            "chain_display_name": "Fuji",  # Should be ignored
+            "address": "0x789",
+        }
+        transformed3 = client._transform_token_from_api(token3)
+        assert transformed3["evm_decimals"] == 18  # Prefer existing
+        assert transformed3["chain_id"] == 43114  # Prefer existing
+        assert transformed3["network"] == "Avalanche"  # Prefer existing
+
+        # Test missing optional fields
+        token4 = {"symbol": "BTC", "chainid": 43113, "evmdecimals": 8}
+        transformed4 = client._transform_token_from_api(token4)
+        assert transformed4["evm_decimals"] == 8
+        assert transformed4["chain_id"] == 43113
+        assert "network" not in transformed4 or transformed4.get("network") is None
+
+    async def test_get_environments(self, client):
+        """Test get_environments."""
+        mock_resp = AsyncMock()
+        mock_resp.json.return_value = [{"env": "test"}]
+        mock_resp.raise_for_status = MagicMock()
+
+        mock_cm = AsyncMock()
+        mock_cm.__aenter__.return_value = mock_resp
+        client._mock_session.get.return_value = mock_cm
+
+        res = await client.get_environments()
+        assert res.success
+        assert res.data == [{"env": "test"}]
+
+    async def test_get_environments_transforms_field_names(self, client):
+        """Test get_environments transforms API field names to snake_case."""
+        mock_resp = AsyncMock()
+        mock_resp.json.return_value = [
+            {
+                "chainid": 43113,
+                "env_type": "mainnet",
+                "rpc": "https://rpc.example.com",
+                "network": "Fuji",
+                "env": "fuji-multi-avax",
+            },
+            {
+                "chain_id": 12345,
+                "type": "subnet",
+                "chain_instance": "https://subnet.example.com",
+                "chain_display_name": "Dexalot Subnet",
+                "env": "fuji-multi-subnet",
+            },
+        ]
+        mock_resp.raise_for_status = MagicMock()
+
+        mock_cm = AsyncMock()
+        mock_cm.__aenter__.return_value = mock_resp
+        client._mock_session.get.return_value = mock_cm
+
+        res = await client.get_environments()
+        assert res.success
+        assert len(res.data) == 2
+
+        # First env: lowercase fields transformed to snake_case
+        assert res.data[0]["chain_id"] == 43113
+        assert res.data[0]["env_type"] == "mainnet"
+        assert res.data[0]["rpc"] == "https://rpc.example.com"
+        assert res.data[0]["network"] == "Fuji"
+
+        # Second env: snake_case fields preserved/transformed
+        assert res.data[1]["chain_id"] == 12345
+        assert res.data[1]["env_type"] == "subnet"
+        assert res.data[1]["rpc"] == "https://subnet.example.com"
+        assert res.data[1]["network"] == "Dexalot Subnet"
+
+    async def test_get_environments_preserves_existing_snake_case(self, client):
+        """Test get_environments prefers existing snake_case fields over transformations."""
+        mock_resp = AsyncMock()
+        mock_resp.json.return_value = [
+            {
+                "chain_id": 43114,
+                "env_type": "mainnet",
+                "chainid": 999,  # Should be ignored
+                "type": "subnet",  # Should be ignored
+                "rpc": "https://rpc.example.com",
+                "network": "Avalanche",
+            }
+        ]
+        mock_resp.raise_for_status = MagicMock()
+
+        mock_cm = AsyncMock()
+        mock_cm.__aenter__.return_value = mock_resp
+        client._mock_session.get.return_value = mock_cm
+
+        res = await client.get_environments()
+        assert res.success
+        assert res.data[0]["chain_id"] == 43114  # Prefer existing snake_case
+        assert res.data[0]["env_type"] == "mainnet"  # Prefer existing snake_case
+
+    async def test_get_tokens_transforms_field_names(self, client):
+        """Test get_tokens transforms API field names to snake_case."""
+        client.chain_config = {
+            "Fuji": {"chain_id": 43113},
+            "Avalanche": {"chain_id": 43114},
+        }
+
+        mock_resp = AsyncMock()
+        mock_resp.json.return_value = [
+            {
+                "symbol": "AVAX",
+                "name": "Avalanche",
+                "evmdecimals": 18,
+                "chainid": 43113,
+                "chain_display_name": "Fuji",
+                "address": "0x123",
+            },
+            {
+                "symbol": "USDC",
+                "name": "USD Coin",
+                "decimals": 6,
+                "chain_id": 43114,
+                "network": "Avalanche",
+                "address": "0x456",
+            },
+        ]
+        mock_resp.raise_for_status = MagicMock()
+
+        mock_cm = AsyncMock()
+        mock_cm.__aenter__.return_value = mock_resp
+        client._mock_session.get.return_value = mock_cm
+
+        res = await client.get_tokens()
+        assert res.success
+        assert len(res.data) == 2
+
+        # First token: lowercase fields transformed to snake_case
+        avax_token = next((t for t in res.data if t["symbol"] == "AVAX"), None)
+        assert avax_token is not None
+        assert avax_token["decimals"] == 18
+        assert avax_token["chain_id"] == 43113
+        assert avax_token["chain"] == "Fuji"
+
+        # Second token: snake_case fields preserved/transformed
+        usdc_token = next((t for t in res.data if t["symbol"] == "USDC"), None)
+        assert usdc_token is not None
+        assert usdc_token["decimals"] == 6
+        assert usdc_token["chain_id"] == 43114
+        assert usdc_token["chain"] == "Avalanche"
+
+    async def test_get_tokens_preserves_existing_snake_case(self, client):
+        """Test get_tokens prefers existing snake_case fields over transformations."""
+        client.chain_config = {
+            "Avalanche": {"chain_id": 43114},
+        }
+
+        mock_resp = AsyncMock()
+        mock_resp.json.return_value = [
+            {
+                "symbol": "ETH",
+                "evm_decimals": 18,
+                "chain_id": 43114,
+                "evmdecimals": 999,  # Should be ignored
+                "chainid": 999,  # Should be ignored
+                "network": "Avalanche",
+                "chain_display_name": "Fuji",  # Should be ignored
+                "address": "0x789",
+            }
+        ]
+        mock_resp.raise_for_status = MagicMock()
+
+        mock_cm = AsyncMock()
+        mock_cm.__aenter__.return_value = mock_resp
+        client._mock_session.get.return_value = mock_cm
+
+        res = await client.get_tokens()
+        assert res.success
+        token = next((t for t in res.data if t["symbol"] == "ETH"), None)
+        assert token is not None
+        assert token["decimals"] == 18  # Prefer existing snake_case
+        assert token["chain_id"] == 43114  # Prefer existing snake_case
+        assert token["chain"] == "Avalanche"  # Prefer existing network
+
+    async def test_get_mainnets(self, client):
+        """Test get_mainnets."""
+        # Mock environments call (needed since get_mainnets calls get_environments)
+        mock_env_resp = [
+            {
+                "env": "fuji-multi-avax",
+                "chainid": 43113,
+                "rpc": "https://fuji.example.com",
+            }
+        ]
+
+        mock_resp = AsyncMock()
+        mock_resp.json.return_value = mock_env_resp
+        mock_resp.raise_for_status = MagicMock()
+        mock_cm = AsyncMock()
+        mock_cm.__aenter__.return_value = mock_resp
+        client._mock_session.get.return_value = mock_cm
+
+        client.chain_config = {
+            "Avalanche": {"chain_id": 43114},
+            "Fuji": {"chain_id": 43113},
+            "Other": {},  # Missing chain_id
+        }
+
+        res = await client.get_mainnets()
+        assert res.success
+        assert res.data == {43114: "Avalanche", 43113: "Fuji"}
+        assert "Other" not in res.data.values()
+
+    async def test_get_mainnets_error(self, client):
+        """Test get_mainnets error handling."""
+        # Mock environments call to succeed first
+        mock_env_resp = [
+            {
+                "env": "fuji-multi-avax",
+                "chainid": 43113,
+                "rpc": "https://fuji.example.com",
+            }
+        ]
+
+        mock_resp = AsyncMock()
+        mock_resp.json.return_value = mock_env_resp
+        mock_resp.raise_for_status = MagicMock()
+        mock_cm = AsyncMock()
+        mock_cm.__aenter__.return_value = mock_resp
+        client._mock_session.get.return_value = mock_cm
+
+        # Make chain_config raise an exception when iterated
+        class ErrorDict:
+            def items(self):
+                raise Exception("Test error")
+
+        client.chain_config = ErrorDict()
+        result = await client.get_mainnets()
+        assert not result.success
+        assert "getting mainnets" in result.error.lower() or "test error" in result.error.lower()
+
+    async def test_get_deployment(self, client):
+        """Test get_deployment."""
+        # Mock environments call (needed for get_deployment)
+        mock_env_resp = [
+            {
+                "env": "fuji-multi-subnet",
+                "chainid": 432204,
+                "rpc": "https://subnet.example.com",
+            }
+        ]
+        mock_deploy_resp_tp = [{"env": "fuji-multi-subnet", "address": "0xTP", "abi": {"abi": []}}]
+        mock_deploy_resp_port = [
+            {"env": "fuji-multi-subnet", "address": "0xPS", "abi": {"abi": []}}
+        ]
+        mock_deploy_resp_rfq = [{"env": "fuji-multi-avax", "address": "0xRFQ", "abi": {"abi": []}}]
+
+        def side_effect(url, params=None, **kwargs):
+            mock_resp = AsyncMock()
+            mock_resp.raise_for_status = MagicMock()
+            if "environments" in url:
+                mock_resp.json.return_value = mock_env_resp
+            elif "deployment" in url:
+                ctype = params.get("contracttype")
+                if ctype == "TradePairs":
+                    mock_resp.json.return_value = mock_deploy_resp_tp
+                elif ctype == "Portfolio":
+                    mock_resp.json.return_value = mock_deploy_resp_port
+                elif ctype == "MainnetRFQ":
+                    mock_resp.json.return_value = mock_deploy_resp_rfq
+
+            mock_cm = AsyncMock()
+            mock_cm.__aenter__.return_value = mock_resp
+            return mock_cm
+
+        client._mock_session.get.side_effect = side_effect
+        client.w3_l1 = MagicMock()
+        client.w3_l1.eth.contract = MagicMock(return_value=MagicMock())
+
+        res = await client.get_deployment()
+        assert res.success
+        assert "TradePairs" in res.data
+        assert "PortfolioSub" in res.data
+        assert "MainnetRFQ" in res.data
+
+    async def test_get_deployment_error(self, client):
+        """Test get_deployment error handling."""
+        # Mock environments call to succeed
+        mock_env_resp = [
+            {
+                "env": "fuji-multi-subnet",
+                "chainid": 432204,
+                "rpc": "https://subnet.example.com",
+            }
+        ]
+
+        def side_effect(url, params=None, **kwargs):
+            mock_resp = AsyncMock()
+            if "environments" in url:
+                mock_resp.json.return_value = mock_env_resp
+                mock_resp.raise_for_status = MagicMock()
+            elif "deployment" in url:
+                # Make deployment fetch raise an exception
+                def raise_error():
+                    raise Exception("Test error fetching deployments")
+
+                mock_resp.raise_for_status = raise_error
+            mock_cm = AsyncMock()
+            mock_cm.__aenter__.return_value = mock_resp
+            return mock_cm
+
+        client._mock_session.get.side_effect = side_effect
+
+        result = await client.get_deployment()
+        assert not result.success
+        assert "getting deployment" in result.error.lower() or "test error" in result.error.lower()
+
+    def test_transform_deployment_from_api_prefers_existing_lowercase(self, client):
+        """Test _transform_deployment_from_api prefers existing lowercase fields."""
+        item = {"env": "fuji-multi-subnet", "address": "0xAddress", "abi": ["function test()"]}
+        transformed = client._transform_deployment_from_api(item)
+        assert transformed["env"] == "fuji-multi-subnet"
+        assert transformed["address"] == "0xAddress"
+        assert transformed["abi"] == ["function test()"]
+
+    def test_transform_deployment_from_api_transforms_env(self, client):
+        """Test _transform_deployment_from_api transforms Env to env."""
+        item = {"Env": "fuji-multi-subnet", "address": "0xAddress", "abi": []}
+        transformed = client._transform_deployment_from_api(item)
+        assert transformed["env"] == "fuji-multi-subnet"
+
+    def test_transform_deployment_from_api_transforms_environment(self, client):
+        """Test _transform_deployment_from_api transforms environment to env."""
+        item = {"environment": "fuji-multi-subnet", "address": "0xAddress", "abi": []}
+        transformed = client._transform_deployment_from_api(item)
+        assert transformed["env"] == "fuji-multi-subnet"
+
+    def test_transform_deployment_from_api_transforms_address(self, client):
+        """Test _transform_deployment_from_api transforms Address to address."""
+        item = {"env": "fuji-multi-subnet", "Address": "0xAddress", "abi": []}
+        transformed = client._transform_deployment_from_api(item)
+        assert transformed["address"] == "0xAddress"
+
+    def test_transform_deployment_from_api_transforms_contract_address(self, client):
+        """Test _transform_deployment_from_api transforms contractAddress to address."""
+        item = {"env": "fuji-multi-subnet", "contractAddress": "0xAddress", "abi": []}
+        transformed = client._transform_deployment_from_api(item)
+        assert transformed["address"] == "0xAddress"
+
+    def test_transform_deployment_from_api_transforms_abi(self, client):
+        """Test _transform_deployment_from_api transforms Abi to abi."""
+        item = {"env": "fuji-multi-subnet", "address": "0xAddress", "Abi": ["function test()"]}
+        transformed = client._transform_deployment_from_api(item)
+        assert transformed["abi"] == ["function test()"]
+
+    def test_transform_deployment_from_api_transforms_abi_uppercase(self, client):
+        """Test _transform_deployment_from_api transforms ABI to abi."""
+        item = {"env": "fuji-multi-subnet", "address": "0xAddress", "ABI": ["function test()"]}
+        transformed = client._transform_deployment_from_api(item)
+        assert transformed["abi"] == ["function test()"]
+
+    async def test_process_deployment_item_applies_transformation(self, client):
+        """Test _process_deployment_item applies transformation."""
+        client.w3_l1 = MagicMock()
+        client.w3_l1.eth.contract = MagicMock(return_value=MagicMock())
+
+        # Item with non-standard field names
+        item = {
+            "Env": "fuji-multi-subnet",
+            "Address": "0xTransformed",
+            "Abi": {"abi": ["function test()"]},
+        }
+
+        # Transform and process
+        transformed = client._transform_deployment_from_api(item)
+        client._process_deployment_item(transformed, "TradePairs")
+
+        assert "TradePairs" in client.deployments
+        assert client.deployments["TradePairs"]["address"] == "0xTransformed"
+        assert client.deployments["TradePairs"]["abi"] == ["function test()"]
+
+    async def test_init_production(self):
+        """Test initialization with production environment."""
+        with patch.dict(
+            os.environ,
+            {
+                "PARENTENV": "production-multi",
+                "API_BASE_URL_MAINNET": "https://api.dexalot.com/",  # With trailing slash to test removal
+                "PRIVATE_KEY": "",
+            },
+        ):
+            with patch("dexalot_sdk.core.config.load_dotenv"):
+                with patch(
+                    "builtins.open", side_effect=FileNotFoundError
+                ):  # Test missing errors.json
+                    # No longer needs to patch requests.Session
+                    client = DexalotBaseClient()
+                    assert client.api_base_url == "https://api.dexalot.com"
+                    assert client.account is None
+                    assert client.error_codes == {}
+
+    async def test_init_invalid_key(self):
+        """Test initialization with invalid private key."""
+        with patch.dict(os.environ, {"PRIVATE_KEY": "invalid_key"}):
+            # Invalid key (doesn't start with "0x") should raise ValueError during validation
+            with pytest.raises(ValueError, match='private_key must start with "0x"'):
+                DexalotBaseClient()
+
+    async def test_init_with_explicit_signer(self):
+        """Test initialization with explicit signer parameter (lines 78-79)."""
+        mock_account = MagicMock()
+        mock_account.address = "0xExplicitSigner"
+
+        with patch.dict(
+            os.environ,
+            {
+                "PRIVATE_KEY": "0x" + "0" * 62 + "01"
+            },  # 66 chars total (0x + 64 hex chars = 32 bytes)
+        ):
+            # Pass explicit signer - should use it instead of PRIVATE_KEY
+            client = DexalotBaseClient(signer=mock_account)
+            assert client.account == mock_account
+            assert client.account.address == "0xExplicitSigner"
+            # private_key attribute no longer exists - we only use Account object for signing
+
+    async def test_init_account_from_key_exception(self):
+        """Test initialization when Account.from_key() raises an exception (lines 133-134)."""
+        with patch.dict(
+            os.environ,
+            {"PRIVATE_KEY": "0x" + "1" * 64},  # Valid format but will mock to fail
+        ):
+            with patch("dexalot_sdk.core.base.Account.from_key") as mock_from_key:
+                # Mock Account.from_key to raise an exception
+                mock_from_key.side_effect = ValueError("Invalid private key format")
+                with patch("builtins.open", mock_open(read_data='{"E001": "Some Error"}')):
+                    with patch("dexalot_sdk.core.base.aiohttp.ClientSession"):
+                        client = DexalotBaseClient()
+                        # Should handle exception gracefully and set account to None
+                        assert client.account is None
+
+    async def test_init_with_parent_env_param(self):
+        """Test initialization with explicit parent_env parameter."""
+        with patch.dict(os.environ, {"PARENTENV": "should-be-overridden"}):
+            client = DexalotBaseClient(parent_env="production-multi")
+            assert client.parent_env == "production-multi"
+            assert client.api_base_url == "https://api.dexalot.com"
+
+    async def test_set_signer(self, client):
+        """Test set_signer method (lines 120-121)."""
+        # Initially has account from PRIVATE_KEY
+        assert client.account is not None
+
+        # Create new mock signer
+        new_signer = MagicMock()
+        new_signer.address = "0xNewSigner"
+
+        # Set new signer
+        client.set_signer(new_signer)
+
+        # Verify signer was updated
+        assert client.account == new_signer
+        assert client.account.address == "0xNewSigner"
+        # private_key attribute no longer exists - we only use Account object for signing
+
+    async def test_repr_with_account(self, client):
+        """Test __repr__ method when account is set."""
+        # Manually set account using a valid 32-byte private key
+        from eth_account import Account
+
+        # Use a valid 32-byte key for Account creation (66 chars total)
+        valid_key = "0x" + "1" * 64
+        client.account = Account.from_key(valid_key)
+        repr_str = repr(client)
+        assert "DexalotBaseClient" in repr_str
+        assert "parent_env" in repr_str
+        assert "api_base_url" in repr_str
+        assert "Account(address=" in repr_str
+        assert client.account.address in repr_str
+        # Ensure private key is never exposed
+        assert "private_key" not in repr_str.lower()
+        assert valid_key not in repr_str
+
+    async def test_repr_without_account(self, mock_env):
+        """Test __repr__ method when account is None."""
+        with patch("builtins.open", mock_open(read_data='{"E001": "Some Error"}')):
+            with patch("dexalot_sdk.core.base.aiohttp.ClientSession"):
+                client = DexalotBaseClient()
+                client.account = None
+                repr_str = repr(client)
+                assert "DexalotBaseClient" in repr_str
+                assert "parent_env" in repr_str
+                assert "api_base_url" in repr_str
+                assert "account=None" in repr_str
+
+    async def test_get_environments_failure(self, client):
+        """Test get_environments failure."""
+        client._mock_session.get.side_effect = Exception("Network Error")
+        result = await client.get_environments()
+        assert not result.success
+        assert "Network Error" in result.error or "getting environments" in result.error
+
+    @patch("dexalot_sdk.utils.provider_manager.AsyncWeb3")
+    @patch("dexalot_sdk.core.base.AsyncWeb3")
+    async def test_initialize_client_production_and_errors(
+        self, mock_web3_base, mock_web3_provider, client
+    ):
+        """Test initialize_client with production env and error handling."""
+        client.parent_env = "production-multi"
+        client.env = "production-multi-avax"
+
+        # Mock production environment response
+        mock_env_resp = [
+            {
+                "env": "production-multi-subnet",
+                "chainid": 43114,  # Using 43114 for subnet to trigger that branch if logic allows, or just standard prod ID
+                "type": "subnet",
+                "rpc": "https://subnet-rpc",
+            },
+            {
+                "env": "production-multi-avax",
+                "chainid": 43114,
+                "type": "mainnet",
+                "network": "Avalanche",
+                "rpc": "https://avax-rpc",
+                "native_token_symbol": "AVAX",
+            },
+        ]
+
+        # Mock deployment response for PortfolioMain (Avalanche)
+        mock_deploy_resp_port_main = [
+            {"env": "production-multi-avax", "address": "0xPSMain", "abi": []}
+        ]
+
+        call_count_rfq = 0
+
+        def smart_side_effect(url, params=None, **kwargs):
+            nonlocal call_count_rfq
+            mock_resp = AsyncMock()
+            mock_resp.raise_for_status = MagicMock()
+
+            if "environments" in url:
+                mock_resp.json.return_value = mock_env_resp
+            elif "tokens" in url:
+                mock_resp.json.return_value = []
+            elif "rfq/pairs" in url:
+                # Fail the loop calls
+                if call_count_rfq < 1:
+                    call_count_rfq += 1
+                    raise Exception("RFQ Loop Error")
+                # Succeed the fallback call
+                mock_resp.json.return_value = {"Fallback": "Data"}
+                mock_resp.status = 200
+            elif "deployment" in url:
+                ctype = params.get("contracttype")
+                if ctype == "Portfolio":
+                    mock_resp.json.return_value = mock_deploy_resp_port_main
+                else:
+                    mock_resp.json.return_value = []
+
+            mock_cm = AsyncMock()
+            mock_cm.__aenter__.return_value = mock_resp
+            return mock_cm
+
+        client._mock_session.get.side_effect = smart_side_effect
+
+        # Configure both AsyncWeb3 mocks to return the same mock instance
+        mock_web3_instance = MagicMock()
+        mock_web3_base.return_value = mock_web3_instance
+        mock_web3_provider.return_value = mock_web3_instance
+
+        await client.initialize_client()
+
+        # Verify Production Env settings
+        assert client.env == "production-multi-avax"
+
+        assert "Avalanche" in client.deployments["PortfolioMain"]
+
+        # Verify RFQ Fallback
+        assert 43114 in client.rfq_pairs
+        assert client.rfq_pairs[43114] == {"Fallback": "Data"}
+
+    @patch("dexalot_sdk.utils.provider_manager.AsyncWeb3")
+    @patch("dexalot_sdk.core.base.AsyncWeb3")
+    async def test_web3_init_failure(self, mock_web3_base, mock_web3_provider, client):
+        """Test Web3 provider initialization failure."""
+        client.parent_env = "production-multi"
+        mock_env_resp = [
+            {
+                "env": "production-multi-avax",
+                "chainid": 43114,
+                "type": "mainnet",
+                "network": "Avalanche",
+                "rpc": "https://avax-rpc",
+            }
+        ]
+
+        mock_resp = AsyncMock()
+        mock_resp.json.return_value = mock_env_resp
+        mock_resp.raise_for_status = MagicMock()
+
+        mock_cm = AsyncMock()
+        mock_cm.__aenter__.return_value = mock_resp
+        client._mock_session.get.return_value = mock_cm
+
+        # Make Web3 raise exception
+        mock_web3_base.side_effect = Exception("Web3 Init Failed")
+        mock_web3_provider.side_effect = Exception("Web3 Init Failed")
+
+        await client.initialize_client()
+
+        # Check that it didn't crash and logged warning
+        assert "Avalanche" in client.chain_config
+        assert "Avalanche" not in client.mainnet_providers
+
+    async def test_coverage_gaps(self, client):
+        """Test edge cases in initialization."""
+
+        # Unknown environment
+        mock_resp = AsyncMock()
+        mock_resp.json.return_value = [{"chainid": 999, "env": "unknown"}]
+        mock_resp.raise_for_status = MagicMock()
+        mock_cm = AsyncMock()
+        mock_cm.__aenter__.return_value = mock_resp
+        client._mock_session.get.return_value = mock_cm
+
+        await client.initialize_client()
+
+        # RFQ fallback failure
+        def side_effect_rfq(url, params=None, **kwargs):
+            mock_resp = AsyncMock()
+            mock_resp.raise_for_status = MagicMock()
+            if "environments" in url:
+                mock_resp.json.return_value = []
+            elif "rfq/pairs" in url:
+                raise Exception("RFQ Fail")
+            else:
+                mock_resp.json.return_value = []
+
+            mock_cm = AsyncMock()
+            mock_cm.__aenter__.return_value = mock_resp
+            return mock_cm
+
+        client._mock_session.get = MagicMock(side_effect=side_effect_rfq)
+        await client.initialize_client()
+
+        # PortfolioMain missing
+
+        client._mock_session.get.side_effect = None
+
+        env_resp = [
+            {
+                "env": "production-multi-avax",
+                "chainid": 43114,
+                "type": "mainnet",
+                "network": "Avalanche",
+                "rpc": "http://rpc",
+            }
+        ]
+        port_resp = [{"env": "production-multi-avax", "address": "0xAddr", "abi": []}]
+
+        def side_effect_port(url, params=None, **kwargs):
+            mock_resp = AsyncMock()
+            mock_resp.raise_for_status = MagicMock()
+            if "environments" in url:
+                mock_resp.json.return_value = env_resp
+            elif "deployment" in url and params.get("contracttype") == "Portfolio":
+                mock_resp.json.return_value = port_resp
+            else:
+                mock_resp.json.return_value = []
+
+            mock_cm = AsyncMock()
+            mock_cm.__aenter__.return_value = mock_resp
+            return mock_cm
+
+        client._mock_session.get.side_effect = side_effect_port
+
+        if "PortfolioMain" in client.deployments:
+            del client.deployments["PortfolioMain"]
+
+        await client.initialize_client()
+        assert "Avalanche" in client.deployments["PortfolioMain"]
+
+    async def test_get_tokens_with_cached_data(self, client):
+        """Test get_tokens() with cached token_data."""
+        # Setup chain_config with mainnet chain IDs
+        client.chain_config = {
+            "Avalanche": {"chain_id": 43114},
+            "Fuji": {"chain_id": 43113},
+        }
+
+        # Mock environments call (needed for get_tokens)
+        mock_env_resp = [
+            {
+                "env": "fuji-multi-avax",
+                "chainid": 43113,
+                "rpc": "https://fuji.example.com",
+            }
+        ]
+
+        # Mock tokens API response
+        mock_tokens_resp = [
+            {
+                "symbol": "AVAX",
+                "name": "Avalanche",
+                "chain_id": 43113,
+                "evmdecimals": 18,
+                "address": "0x0000000000000000000000000000000000000000",
+                "chain_display_name": "Fuji",
+            },
+            {
+                "symbol": "USDC",
+                "name": "USD Coin",
+                "chain_id": 43113,
+                "evmdecimals": 6,
+                "address": "0x123",
+                "chain_display_name": "Fuji",
+            },
+        ]
+
+        def side_effect(url, params=None, **kwargs):
+            mock_resp = AsyncMock()
+            mock_resp.raise_for_status = MagicMock()
+            if "environments" in url:
+                mock_resp.json.return_value = mock_env_resp
+            elif "tokens" in url:
+                mock_resp.json.return_value = mock_tokens_resp
+
+            mock_cm = AsyncMock()
+            mock_cm.__aenter__.return_value = mock_resp
+            return mock_cm
+
+        client._mock_session.get.side_effect = side_effect
+
+        result = await client.get_tokens()
+        assert result.success
+        tokens = result.data
+        assert isinstance(tokens, list)
+        assert len(tokens) == 2
+        assert tokens[0]["symbol"] in ["AVAX", "USDC"]
+        assert tokens[0]["chain_id"] == 43113
+
+    async def test_get_tokens_with_duplicate_symbols(self, client):
+        """Test get_tokens() handles duplicate symbols correctly."""
+        client.chain_config = {"Fuji": {"chain_id": 43113}}
+
+        # Mock environments and tokens API
+        mock_env_resp = [
+            {"env": "fuji-multi-avax", "chainid": 43113, "rpc": "https://fuji.example.com"}
+        ]
+        mock_tokens_resp = [
+            {
+                "symbol": "AVAX",
+                "name": "Avalanche",
+                "chain_id": 43113,
+                "evmdecimals": 18,
+                "address": "0x0000",
+                "chain_display_name": "Fuji",
+            }
+        ]
+
+        def side_effect(url, params=None, **kwargs):
+            mock_resp = AsyncMock()
+            mock_resp.raise_for_status = MagicMock()
+            if "environments" in url:
+                mock_resp.json.return_value = mock_env_resp
+            elif "tokens" in url:
+                mock_resp.json.return_value = mock_tokens_resp
+            mock_cm = AsyncMock()
+            mock_cm.__aenter__.return_value = mock_resp
+            return mock_cm
+
+        client._mock_session.get.side_effect = side_effect
+
+        result = await client.get_tokens()
+        assert result.success
+        tokens = result.data
+        assert len(tokens) == 1  # Should only return one even if duplicate
+
+    async def test_get_tokens_duplicate_symbol_skip(self, client):
+        """Test get_tokens() skips duplicate symbols."""
+        client.chain_config = {"Fuji": {"chain_id": 43113}}
+
+        # Mock environments and tokens API
+        mock_env_resp = [
+            {"env": "fuji-multi-avax", "chainid": 43113, "rpc": "https://fuji.example.com"}
+        ]
+        mock_tokens_resp = [
+            {
+                "symbol": "AVAX",
+                "name": "Avalanche",
+                "chain_id": 43113,
+                "evmdecimals": 18,
+                "address": "0x0000",
+                "chain_display_name": "Fuji",
+            },
+            {
+                "symbol": "USDC",
+                "name": "USD Coin",
+                "chain_id": 43113,
+                "evmdecimals": 6,
+                "address": "0x123",
+                "chain_display_name": "Fuji",
+            },
+        ]
+
+        def side_effect(url, params=None, **kwargs):
+            mock_resp = AsyncMock()
+            mock_resp.raise_for_status = MagicMock()
+            if "environments" in url:
+                mock_resp.json.return_value = mock_env_resp
+            elif "tokens" in url:
+                mock_resp.json.return_value = mock_tokens_resp
+            mock_cm = AsyncMock()
+            mock_cm.__aenter__.return_value = mock_resp
+            return mock_cm
+
+        client._mock_session.get.side_effect = side_effect
+
+        result = await client.get_tokens()
+        assert result.success
+        tokens = result.data
+        assert len(tokens) == 2
+        symbols = [t["symbol"] for t in tokens]
+        assert "AVAX" in symbols
+        assert "USDC" in symbols
+        assert symbols.count("AVAX") == 1
+
+    async def test_get_tokens_fallback_to_api(self, client):
+        """Test get_tokens() falls back to API when token_data is not cached."""
+        client.chain_config = {"Fuji": {"chain_id": 43113}}
+        client.token_data = None  # No cached data
+
+        # Mock environments and tokens API
+        mock_env_resp = [
+            {"env": "fuji-multi-avax", "chainid": 43113, "rpc": "https://fuji.example.com"}
+        ]
+        mock_tokens = [
+            {
+                "symbol": "AVAX",
+                "name": "Avalanche",
+                "chain_id": 43113,
+                "evmdecimals": 18,
+                "address": "0x0000",
+                "chain_display_name": "Fuji",
+            }
+        ]
+
+        def side_effect(url, params=None, **kwargs):
+            mock_resp = AsyncMock()
+            mock_resp.raise_for_status = MagicMock()
+            if "environments" in url:
+                mock_resp.json.return_value = mock_env_resp
+            elif "tokens" in url:
+                mock_resp.json.return_value = mock_tokens
+            mock_cm = AsyncMock()
+            mock_cm.__aenter__.return_value = mock_resp
+            return mock_cm
+
+        client._mock_session.get.side_effect = side_effect
+
+        result = await client.get_tokens()
+        assert result.success
+        tokens = result.data
+        assert isinstance(tokens, list)
+        assert len(tokens) == 1
+        assert tokens[0]["symbol"] == "AVAX"
+
+    async def test_get_tokens_api_error(self, client):
+        """Test get_tokens() handles API errors."""
+        client.chain_config = {"Fuji": {"chain_id": 43113}}
+        client.token_data = None
+
+        # Mock environments to succeed, tokens to fail
+        mock_env_resp = [
+            {"env": "fuji-multi-avax", "chainid": 43113, "rpc": "https://fuji.example.com"}
+        ]
+
+        def side_effect(url, params=None, **kwargs):
+            if "environments" in url:
+                mock_resp = AsyncMock()
+                mock_resp.json.return_value = mock_env_resp
+                mock_resp.raise_for_status = MagicMock()
+                mock_cm = AsyncMock()
+                mock_cm.__aenter__.return_value = mock_resp
+                return mock_cm
+            elif "tokens" in url:
+                # Raise exception for tokens API
+                raise Exception("API Error")
+
+        client._mock_session.get.side_effect = side_effect
+
+        result = await client.get_tokens()
+        assert not result.success
+        assert "API Error" in result.error or "getting tokens" in result.error
+
+    async def test_get_tokens_filters_by_mainnet_chain_id(self, client):
+        """Test get_tokens() only includes mainnet tokens."""
+        client.chain_config = {"Fuji": {"chain_id": 43113}}
+
+        # Mock environments and tokens API
+        mock_env_resp = [
+            {"env": "fuji-multi-avax", "chainid": 43113, "rpc": "https://fuji.example.com"}
+        ]
+        mock_tokens_resp = [
+            {
+                "symbol": "AVAX",
+                "name": "Avalanche",
+                "chain_id": 43113,  # Mainnet
+                "evmdecimals": 18,
+                "address": "0x0000",
+                "chain_display_name": "Fuji",
+            }
+        ]
+
+        def side_effect(url, params=None, **kwargs):
+            mock_resp = AsyncMock()
+            mock_resp.raise_for_status = MagicMock()
+            if "environments" in url:
+                mock_resp.json.return_value = mock_env_resp
+            elif "tokens" in url:
+                mock_resp.json.return_value = mock_tokens_resp
+            mock_cm = AsyncMock()
+            mock_cm.__aenter__.return_value = mock_resp
+            return mock_cm
+
+        client._mock_session.get.side_effect = side_effect
+
+        result = await client.get_tokens()
+        assert result.success
+        tokens = result.data
+        assert len(tokens) == 1
+        assert tokens[0]["chain_id"] == 43113
+
+    async def test_get_tokens_with_chainid_field(self, client):
+        """Test get_tokens() handles both chain_id and chainid fields."""
+        client.chain_config = {"Fuji": {"chain_id": 43113}}
+        client.token_data = None
+
+        # Mock environments and tokens API
+        mock_env_resp = [
+            {"env": "fuji-multi-avax", "chainid": 43113, "rpc": "https://fuji.example.com"}
+        ]
+        mock_tokens = [
+            {
+                "symbol": "AVAX",
+                "name": "Avalanche",
+                "chainid": 43113,  # Using chainid instead of chain_id
+                "evmdecimals": 18,
+                "address": "0x0000",
+                "chain_display_name": "Fuji",
+            }
+        ]
+
+        def side_effect(url, params=None, **kwargs):
+            mock_resp = AsyncMock()
+            mock_resp.raise_for_status = MagicMock()
+            if "environments" in url:
+                mock_resp.json.return_value = mock_env_resp
+            elif "tokens" in url:
+                mock_resp.json.return_value = mock_tokens
+            mock_cm = AsyncMock()
+            mock_cm.__aenter__.return_value = mock_resp
+            return mock_cm
+
+        client._mock_session.get.side_effect = side_effect
+
+        result = await client.get_tokens()
+        assert result.success
+        tokens = result.data
+        assert len(tokens) == 1
+        assert tokens[0]["chain_id"] == 43113
+
+    async def test_get_tokens_with_decimals_fallback(self, client):
+        """Test get_tokens() uses decimals fallback when evmdecimals missing."""
+        client.chain_config = {"Fuji": {"chain_id": 43113}}
+
+        # Mock environments and tokens API
+        mock_env_resp = [
+            {"env": "fuji-multi-avax", "chainid": 43113, "rpc": "https://fuji.example.com"}
+        ]
+        mock_tokens_resp = [
+            {
+                "symbol": "AVAX",
+                "name": "Avalanche",
+                "chain_id": 43113,
+                "decimals": 18,  # Using decimals instead of evmdecimals
+                "address": "0x0000",
+                "chain_display_name": "Fuji",
+            }
+        ]
+
+        def side_effect(url, params=None, **kwargs):
+            mock_resp = AsyncMock()
+            mock_resp.raise_for_status = MagicMock()
+            if "environments" in url:
+                mock_resp.json.return_value = mock_env_resp
+            elif "tokens" in url:
+                mock_resp.json.return_value = mock_tokens_resp
+            mock_cm = AsyncMock()
+            mock_cm.__aenter__.return_value = mock_resp
+            return mock_cm
+
+        client._mock_session.get.side_effect = side_effect
+
+        result = await client.get_tokens()
+        assert result.success
+        tokens = result.data
+        assert tokens[0]["decimals"] == 18
+
+    async def test_get_tokens_with_network_fallback(self, client):
+        """Test get_tokens() uses network field when chain_display_name missing."""
+        client.chain_config = {"Fuji": {"chain_id": 43113}}
+
+        # Mock environments and tokens API
+        mock_env_resp = [
+            {"env": "fuji-multi-avax", "chainid": 43113, "rpc": "https://fuji.example.com"}
+        ]
+        mock_tokens_resp = [
+            {
+                "symbol": "AVAX",
+                "name": "Avalanche",
+                "chain_id": 43113,
+                "evmdecimals": 18,
+                "address": "0x0000",
+                "network": "Fuji",  # Using network instead of chain_display_name
+            }
+        ]
+
+        def side_effect(url, params=None, **kwargs):
+            mock_resp = AsyncMock()
+            mock_resp.raise_for_status = MagicMock()
+            if "environments" in url:
+                mock_resp.json.return_value = mock_env_resp
+            elif "tokens" in url:
+                mock_resp.json.return_value = mock_tokens_resp
+            mock_cm = AsyncMock()
+            mock_cm.__aenter__.return_value = mock_resp
+            return mock_cm
+
+        client._mock_session.get.side_effect = side_effect
+
+        result = await client.get_tokens()
+        assert result.success
+        tokens = result.data
+        assert tokens[0]["chain"] == "Fuji"
+
+    async def test_context_manager(self, client):
+        """Test async context manager methods."""
+        async with client as ctx_client:
+            assert ctx_client == client
+            assert client._session is not None
+
+        mock_session = AsyncMock()
+        mock_session.closed = False
+        mock_session.close = AsyncMock()
+        client._session = mock_session
+
+        async with client:
+            pass
+
+        mock_session.close.assert_called_once()
+
+    async def test_close_with_closed_session(self, client):
+        """Test close() when session is already closed."""
+        mock_session = AsyncMock()
+        mock_session.closed = True
+        client._session = mock_session
+
+        await client.close()
+
+        mock_session.close.assert_not_called()
+
+    async def test_close_with_no_session(self, client):
+        """Test close() when session is None."""
+        client._session = None
+        await client.close()
+
+    async def test_close_web3_providers_w3_mainnet_disconnect_exception(self, client):
+        """Test _close_web3_providers when w3_mainnet.provider.disconnect() raises exception."""
+        # Set up w3_mainnet with a provider that raises exception on disconnect
+        mock_provider = AsyncMock()
+        mock_provider.disconnect = AsyncMock(side_effect=Exception("Disconnect failed"))
+        mock_w3_mainnet = MagicMock()
+        mock_w3_mainnet.provider = mock_provider
+        client.w3_mainnet = mock_w3_mainnet
+
+        # Should not raise exception, should handle gracefully
+        await client._close_web3_providers()
+
+        # Verify disconnect was called
+        mock_provider.disconnect.assert_called_once()
+        # Verify w3_mainnet was set to None
+        assert client.w3_mainnet is None
+
+    async def test_close_web3_providers_mainnet_providers_disconnect_exception(self, client):
+        """Test _close_web3_providers when mainnet_providers disconnect raises exception."""
+        # Set up mainnet_providers with providers that raise exceptions on disconnect
+        mock_provider1 = AsyncMock()
+        mock_provider1.provider.disconnect = AsyncMock(side_effect=Exception("Disconnect failed 1"))
+        mock_provider2 = AsyncMock()
+        mock_provider2.provider.disconnect = AsyncMock(side_effect=Exception("Disconnect failed 2"))
+        client.mainnet_providers = {
+            "Avalanche": mock_provider1,
+            "Fuji": mock_provider2,
+        }
+
+        # Should not raise exception, should handle gracefully
+        await client._close_web3_providers()
+
+        # Verify disconnect was called for both providers
+        mock_provider1.provider.disconnect.assert_called_once()
+        mock_provider2.provider.disconnect.assert_called_once()
+        # Verify mainnet_providers was cleared
+        assert len(client.mainnet_providers) == 0
+
+    async def test_rate_limiter_disabled(self, mock_env):
+        """Test that rate limiters are None when rate_limit_enabled is False."""
+        from dexalot_sdk.core.base import DexalotBaseClient
+        from dexalot_sdk.core.config import DexalotConfig
+
+        with patch("builtins.open", mock_open(read_data='{"E001": "Some Error"}')):
+            config = DexalotConfig(rate_limit_enabled=False)
+            client = DexalotBaseClient(config=config)
+            assert client._http_rate_limiter is None
+            assert client._rpc_rate_limiter is None
+
+    async def test_make_http_request_retry_disabled(self, client):
+        """Test _make_http_request when retry is disabled."""
+        client.config.retry_enabled = False
+        client._http_rate_limiter = None
+
+        mock_response = AsyncMock()
+        mock_response.raise_for_status = MagicMock()
+        mock_cm = AsyncMock()
+        mock_cm.__aenter__.return_value = mock_response
+        mock_cm.__aexit__.return_value = None
+        client._session.get.return_value = mock_cm
+
+        result = await client._make_http_request("get", "https://test.com")
+        assert result == mock_cm
+        client._session.get.assert_called_once_with("https://test.com")
+
+    async def test_rpc_call_retry_disabled(self, client):
+        """Test _rpc_call when retry is disabled."""
+        from web3 import AsyncWeb3
+
+        client.config.retry_enabled = False
+        client._rpc_rate_limiter = None
+
+        mock_w3 = AsyncMock(spec=AsyncWeb3)
+        mock_w3.eth = AsyncMock()
+        mock_w3.eth.get_transaction_count = AsyncMock(return_value=5)
+
+        result = await client._rpc_call(mock_w3, "eth.get_transaction_count", "0x123", "pending")
+        assert result == 5
+        mock_w3.eth.get_transaction_count.assert_called_once_with("0x123", "pending")
+
+    def test_nonce_manager_disabled(self):
+        """Test that nonce manager is None when nonce_manager_enabled is False."""
+        from dexalot_sdk.core.base import DexalotBaseClient
+        from dexalot_sdk.core.config import DexalotConfig
+
+        with patch("builtins.open", mock_open(read_data='{"E001": "Some Error"}')):
+            config = DexalotConfig(nonce_manager_enabled=False)
+            client = DexalotBaseClient(config=config)
+            assert client._nonce_manager is None
+
+    async def test_get_nonce_no_account(self, client):
+        """Test _get_nonce raises ValueError when account is None."""
+        from web3 import AsyncWeb3
+
+        client.account = None
+        mock_w3 = AsyncMock(spec=AsyncWeb3)
+
+        with pytest.raises(ValueError, match="Account is required for nonce management"):
+            await client._get_nonce(mock_w3)
+
+    async def test_get_nonce_with_manager_enabled(self, client):
+        """Test _get_nonce uses nonce manager when enabled."""
+        from web3 import AsyncWeb3
+
+        mock_w3 = MagicMock(spec=AsyncWeb3)
+        mock_w3.eth = MagicMock()
+
+        # Mock the nonce manager
+        client._nonce_manager = AsyncMock()
+        client._nonce_manager.get_nonce = AsyncMock(return_value=5)
+        client.account = MagicMock()
+        client.account.address = "0x1234567890123456789012345678901234567890"
+
+        result = await client._get_nonce(mock_w3)
+        assert result == 5
+        client._nonce_manager.get_nonce.assert_called_once_with(
+            mock_w3, client.account.address, None
+        )
+
+    async def test_get_nonce_with_manager_disabled(self, client):
+        """Test _get_nonce falls back to RPC call when nonce manager is disabled."""
+        from web3 import AsyncWeb3
+
+        client._nonce_manager = None
+        client.account = MagicMock()
+        client.account.address = "0x1234567890123456789012345678901234567890"
+
+        mock_w3 = AsyncMock(spec=AsyncWeb3)
+        mock_w3.eth = AsyncMock()
+        mock_w3.eth.get_transaction_count = AsyncMock(return_value=10)
+
+        result = await client._get_nonce(mock_w3)
+        assert result == 10
+        mock_w3.eth.get_transaction_count.assert_called_once_with(client.account.address, "pending")
+
+    async def test_get_nonce_with_explicit_chain_id(self, client):
+        """Test _get_nonce with explicit chain_id parameter."""
+        from web3 import AsyncWeb3
+
+        mock_w3 = MagicMock(spec=AsyncWeb3)
+        mock_w3.eth = MagicMock()
+
+        # Mock the nonce manager
+        client._nonce_manager = AsyncMock()
+        client._nonce_manager.get_nonce = AsyncMock(return_value=7)
+        client.account = MagicMock()
+        client.account.address = "0x1234567890123456789012345678901234567890"
+
+        result = await client._get_nonce(mock_w3, chain_id=43113)
+        assert result == 7
+        client._nonce_manager.get_nonce.assert_called_once_with(
+            mock_w3, client.account.address, 43113
+        )
+
+    async def test_provider_manager_disabled(self, client):
+        """Test that provider manager is None when failover is disabled."""
+        from dexalot_sdk.core.config import DexalotConfig
+
+        config = DexalotConfig(provider_failover_enabled=False)
+        client_without_failover = DexalotBaseClient(config=config)
+        assert client_without_failover._provider_manager is None
+
+    async def test_find_chain_for_provider_mainnet_providers(self, client):
+        """Test _find_chain_for_provider finding provider in mainnet_providers."""
+
+        mock_provider = MagicMock()
+        client.mainnet_providers["TestChain"] = mock_provider
+
+        chain_name = client._find_chain_for_provider(mock_provider)
+        assert chain_name == "TestChain"
+
+    @patch("dexalot_sdk.utils.provider_manager.AsyncWeb3")
+    @patch("dexalot_sdk.core.base.AsyncWeb3")
+    async def test_rpc_call_with_failover_all_providers_fail(
+        self, mock_web3_base, mock_web3_provider, client
+    ):
+        """Test _rpc_call_with_failover when all providers fail."""
+        from dexalot_sdk.core.config import DexalotConfig
+
+        config = DexalotConfig(provider_failover_enabled=True, provider_failover_max_failures=1)
+        client_with_failover = DexalotBaseClient(config=config)
+        await client_with_failover.connect()
+
+        # Add providers
+        await client_with_failover._provider_manager.add_providers(
+            "TestChain", ["https://rpc1", "https://rpc2"]
+        )
+
+        # Mock providers to fail
+        mock_provider1 = MagicMock()
+        mock_provider2 = MagicMock()
+        client_with_failover._provider_manager._providers["TestChain"] = [
+            mock_provider1,
+            mock_provider2,
+        ]
+        client_with_failover._provider_manager._health["TestChain"] = [
+            MagicMock(failure_count=0, is_healthy=True, can_retry=lambda *args: True),
+            MagicMock(failure_count=0, is_healthy=True, can_retry=lambda *args: True),
+        ]
+
+        # Make get_provider return providers that will fail
+        async def failing_get_provider(chain_name):
+            if chain_name == "TestChain":
+                providers = client_with_failover._provider_manager._providers[chain_name]
+                current = client_with_failover._provider_manager._current_provider_index.get(
+                    chain_name, 0
+                )
+                if current < len(providers):
+                    client_with_failover._provider_manager._current_provider_index[chain_name] = (
+                        current + 1
+                    )
+                    return providers[current]
+            return None
+
+        client_with_failover._provider_manager.get_provider = failing_get_provider
+
+        # Mock execute_single_rpc_call to raise exception
+        async def failing_rpc_call(*args, **kwargs):
+            raise Exception("RPC call failed")
+
+        client_with_failover._execute_single_rpc_call = failing_rpc_call
+
+        # Should raise exception when all providers fail
+        with pytest.raises(Exception, match="All RPC providers failed"):
+            await client_with_failover._rpc_call_with_failover("TestChain", "eth.gas_price")
+
+    @patch("dexalot_sdk.utils.provider_manager.AsyncWeb3")
+    @patch("dexalot_sdk.core.base.AsyncWeb3")
+    async def test_rpc_call_with_failover_get_provider_returns_none_with_error_inside_loop(
+        self, mock_web3_base, mock_web3_provider, client
+    ):
+        """Test _rpc_call_with_failover when get_provider returns None with last_error inside loop."""
+        from dexalot_sdk.core.config import DexalotConfig
+
+        config = DexalotConfig(provider_failover_enabled=True)
+        client_with_failover = DexalotBaseClient(config=config)
+        await client_with_failover.connect()
+
+        # Add multiple providers to ensure we're in the loop
+        await client_with_failover._provider_manager.add_providers(
+            "TestChain", ["https://rpc1", "https://rpc2"]
+        )
+
+        # Get providers
+        mock_provider1 = await client_with_failover._provider_manager.get_provider("TestChain")
+        mock_provider1.eth.gas_price = AsyncMock(side_effect=Exception("RPC call failed"))
+
+        # Make get_provider return provider1 first, then None (simulating exhaustion during loop)
+        call_count = 0
+
+        async def return_none_after_first(chain_name):
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                return mock_provider1  # First call returns provider (will fail)
+            return None  # Second call returns None (inside loop)
+
+        client_with_failover._provider_manager.get_provider = return_none_after_first
+
+        # Should raise exception with last_error (inside loop)
+        with pytest.raises(Exception, match="All RPC providers failed") as exc_info:
+            await client_with_failover._rpc_call_with_failover("TestChain", "eth.gas_price")
+        assert "Last error" in str(exc_info.value)
+        # Verify exception chaining (from last_error)
+        assert exc_info.value.__cause__ is not None
+        assert "RPC call failed" in str(exc_info.value.__cause__)
+
+    @patch("dexalot_sdk.utils.provider_manager.AsyncWeb3")
+    @patch("dexalot_sdk.core.base.AsyncWeb3")
+    async def test_rpc_call_with_failover_get_provider_returns_none_with_error_after_loop(
+        self, mock_web3_base, mock_web3_provider, client
+    ):
+        """Test _rpc_call_with_failover when get_provider returns None with last_error after loop."""
+        from dexalot_sdk.core.config import DexalotConfig
+
+        config = DexalotConfig(provider_failover_enabled=True)
+        client_with_failover = DexalotBaseClient(config=config)
+        await client_with_failover.connect()
+
+        # Add providers
+        await client_with_failover._provider_manager.add_providers("TestChain", ["https://rpc1"])
+
+        # Get the provider first
+        mock_provider = await client_with_failover._provider_manager.get_provider("TestChain")
+        mock_provider.eth.gas_price = AsyncMock(side_effect=Exception("RPC call failed"))
+
+        # Make get_provider return provider first, then None (after loop completes)
+        call_count = 0
+
+        async def return_none_after_first(chain_name):
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                return mock_provider  # First call returns provider (will fail)
+            return None  # Subsequent calls return None (after loop)
+
+        client_with_failover._provider_manager.get_provider = return_none_after_first
+
+        # Should raise exception with last_error (after loop)
+        with pytest.raises(Exception, match="All RPC providers failed") as exc_info:
+            await client_with_failover._rpc_call_with_failover("TestChain", "eth.gas_price")
+        assert "Last error" in str(exc_info.value)
+        # Verify exception chaining (from last_error)
+        assert exc_info.value.__cause__ is not None
+
+    @patch("dexalot_sdk.utils.provider_manager.AsyncWeb3")
+    @patch("dexalot_sdk.core.base.AsyncWeb3")
+    async def test_rpc_call_with_failover_provider_index_none(
+        self, mock_web3_base, mock_web3_provider, client
+    ):
+        """Test _rpc_call_with_failover when get_provider_index returns None."""
+        from dexalot_sdk.core.config import DexalotConfig
+
+        config = DexalotConfig(provider_failover_enabled=True)
+        client_with_failover = DexalotBaseClient(config=config)
+        await client_with_failover.connect()
+
+        # Add provider
+        await client_with_failover._provider_manager.add_providers("TestChain", ["https://rpc1"])
+
+        mock_provider = await client_with_failover._provider_manager.get_provider("TestChain")
+        mock_provider.eth.gas_price = AsyncMock(return_value=1000000000)
+
+        # Make get_provider_index return None
+        client_with_failover._provider_manager.get_provider_index = lambda *args: None
+
+        result = await client_with_failover._rpc_call_with_failover("TestChain", "eth.gas_price")
+        assert result == 1000000000
+
+    @patch("dexalot_sdk.utils.provider_manager.AsyncWeb3")
+    @patch("dexalot_sdk.core.base.AsyncWeb3")
+    async def test_rpc_call_with_failover_all_providers_exhausted_no_error(
+        self, mock_web3_base, mock_web3_provider, client
+    ):
+        """Test _rpc_call_with_failover when all providers exhausted with no last_error."""
+        from dexalot_sdk.core.config import DexalotConfig
+
+        config = DexalotConfig(provider_failover_enabled=True)
+        client_with_failover = DexalotBaseClient(config=config)
+        await client_with_failover.connect()
+
+        # To test the case where loop completes without raising inside the loop,
+        # we need: loop completes AND last_error is None.
+        # This can happen if max_providers is 0 (empty loop), or if get_provider_count
+        # returns 0 after providers were added but before the loop starts.
+        # Let's test with max_providers = 0 by making get_provider_count return 0.
+
+        # Add providers first
+        await client_with_failover._provider_manager.add_providers("TestChain", ["https://rpc1"])
+
+        # Make get_provider_count return 0 to create an empty loop
+        client_with_failover._provider_manager.get_provider_count = lambda x: 0
+
+        # Should raise exception without last_error (after empty loop, no last_error)
+        with pytest.raises(
+            Exception, match="All RPC providers failed for chain 'TestChain'"
+        ) as exc_info:
+            await client_with_failover._rpc_call_with_failover("TestChain", "eth.gas_price")
+        assert "Last error" not in str(exc_info.value)
+        # Verify no exception chaining (no from clause)
+        assert exc_info.value.__cause__ is None
+        # Verify it's the exact exception message
+        assert str(exc_info.value) == "All RPC providers failed for chain 'TestChain'"
+
+    @patch("dexalot_sdk.utils.provider_manager.AsyncWeb3")
+    @patch("dexalot_sdk.core.base.AsyncWeb3")
+    async def test_rpc_call_with_failover_get_provider_returns_none_no_error_inside_loop(
+        self, mock_web3_base, mock_web3_provider, client
+    ):
+        """Test _rpc_call_with_failover when get_provider returns None with no last_error inside loop."""
+        from dexalot_sdk.core.config import DexalotConfig
+
+        config = DexalotConfig(provider_failover_enabled=True)
+        client_with_failover = DexalotBaseClient(config=config)
+        await client_with_failover.connect()
+
+        # Add providers
+        await client_with_failover._provider_manager.add_providers("TestChain", ["https://rpc1"])
+
+        # Make get_provider return None immediately (no providers available, no errors occurred)
+        # This will raise on first iteration (inside loop, no last_error)
+        async def return_none(*args):
+            return None
+
+        client_with_failover._provider_manager.get_provider = return_none
+
+        # Should raise exception without last_error (inside loop, no last_error)
+        with pytest.raises(
+            Exception, match="All RPC providers failed for chain 'TestChain'"
+        ) as exc_info:
+            await client_with_failover._rpc_call_with_failover("TestChain", "eth.gas_price")
+        assert "Last error" not in str(exc_info.value)
+        # Verify no exception chaining (no from clause)
+        assert exc_info.value.__cause__ is None
+        # Verify it's the exact exception message
+        assert str(exc_info.value) == "All RPC providers failed for chain 'TestChain'"
+
+    @patch("dexalot_sdk.utils.provider_manager.AsyncWeb3")
+    @patch("dexalot_sdk.core.base.AsyncWeb3")
+    async def test_process_env_config_provider_init_fails_mainnet(
+        self, mock_web3_base, mock_web3_provider, client
+    ):
+        """Test _process_environment_config when AsyncWeb3 init fails in fallback."""
+        from dexalot_sdk.core.config import DexalotConfig
+
+        config = DexalotConfig(provider_failover_enabled=False)
+        client_without_failover = DexalotBaseClient(config=config)
+        await client_without_failover.connect()
+
+        # Make AsyncWeb3 raise exception
+        mock_web3_base.side_effect = Exception("Failed to create provider")
+
+        env = {
+            "env_type": "mainnet",
+            "chainid": 1,
+            "network": "TestChain",
+            "rpc": "https://test-rpc",
+        }
+
+        # Should not raise, but log warning
+        await client_without_failover._process_environment_config(env)
+        # Provider should not be in mainnet_providers
+        assert "TestChain" not in client_without_failover.mainnet_providers
+
+    @patch("dexalot_sdk.utils.provider_manager.AsyncWeb3")
+    @patch("dexalot_sdk.core.base.AsyncWeb3")
+    async def test_process_env_config_provider_init_fails_subnet(
+        self, mock_web3_base, mock_web3_provider, client
+    ):
+        """Test _process_environment_config when AsyncWeb3 init fails in subnet fallback."""
+        from dexalot_sdk.core.config import DexalotConfig
+
+        config = DexalotConfig(provider_failover_enabled=True)
+        client_with_failover = DexalotBaseClient(config=config)
+        await client_with_failover.connect()
+
+        # Make provider manager fail to create providers
+        async def failing_add_providers(chain_name, rpc_urls):
+            pass  # Don't add any providers
+
+        client_with_failover._provider_manager.add_providers = failing_add_providers
+
+        # Make AsyncWeb3 raise exception in fallback
+        mock_web3_base.side_effect = Exception("Failed to create provider")
+
+        env = {
+            "env_type": "subnet",
+            "rpc": "https://subnet-rpc",
+        }
+
+        # Should not raise, but log warning
+        await client_with_failover._process_environment_config(env)
+        # w3_l1 should be None
+        assert client_with_failover.w3_l1 is None
+
+        # Test also the elif branch (provider manager disabled)
+        config2 = DexalotConfig(provider_failover_enabled=False)
+        client_without_failover = DexalotBaseClient(config=config2)
+        await client_without_failover.connect()
+
+        mock_web3_base.side_effect = Exception("Failed to create provider")
+
+        await client_without_failover._process_environment_config(env)
+        assert client_without_failover.w3_l1 is None
+
+    async def test_setup_mainnet_provider_empty_rpc_urls(self, client):
+        """Test _setup_mainnet_provider when rpc_urls is empty."""
+        await client.connect()
+
+        # Call with empty rpc_urls - should return early without error
+        await client._setup_mainnet_provider("TestChain", [])
+
+        # Should not add anything to mainnet_providers
+        assert "TestChain" not in client.mainnet_providers
+
+    async def test_process_subnet_config_empty_rpc_urls(self, client):
+        """Test _process_subnet_config when rpc_urls is empty."""
+        await client.connect()
+
+        # Call with env that results in empty rpc_urls (no env var, no rpc in env)
+        # This happens when _get_rpc_urls returns empty list
+        env = {"chainid": 432204, "native_token_symbol": "ALOT"}  # No chain_instance/rpc
+        await client._process_subnet_config(env, None)
+
+        # Should not set w3_l1
+        assert client.w3_l1 is None
+
+    @patch("dexalot_sdk.utils.provider_manager.AsyncWeb3")
+    @patch("dexalot_sdk.core.base.AsyncWeb3")
+    async def test_rpc_call_with_failover_retry_disabled(
+        self, mock_web3_base, mock_web3_provider, client
+    ):
+        """Test _rpc_call_with_failover with retry disabled."""
+        from dexalot_sdk.core.config import DexalotConfig
+
+        config = DexalotConfig(
+            provider_failover_enabled=True,
+            retry_enabled=False,
+            provider_failover_max_failures=3,
+        )
+        client_with_failover = DexalotBaseClient(config=config)
+        await client_with_failover.connect()
+
+        # Add provider
+        await client_with_failover._provider_manager.add_providers("TestChain", ["https://rpc1"])
+
+        mock_provider = await client_with_failover._provider_manager.get_provider("TestChain")
+        mock_provider.eth.gas_price = AsyncMock(return_value=1000000000)
+
+        result = await client_with_failover._rpc_call_with_failover("TestChain", "eth.gas_price")
+        assert result == 1000000000
+
+    @patch("dexalot_sdk.utils.provider_manager.AsyncWeb3")
+    @patch("dexalot_sdk.core.base.AsyncWeb3")
+    async def test_rpc_call_uses_failover(self, mock_web3_base, mock_web3_provider, client):
+        """Test _rpc_call using failover when provider manager has providers."""
+        from dexalot_sdk.core.config import DexalotConfig
+
+        config = DexalotConfig(provider_failover_enabled=True)
+        client_with_failover = DexalotBaseClient(config=config)
+        await client_with_failover.connect()
+
+        # Add provider and set up chain
+        await client_with_failover._provider_manager.add_providers("TestChain", ["https://rpc1"])
+        mock_provider = await client_with_failover._provider_manager.get_provider("TestChain")
+        client_with_failover.mainnet_providers["TestChain"] = mock_provider
+        client_with_failover.chain_config["TestChain"] = {"chain_id": 1}
+
+        mock_provider.eth.gas_price = AsyncMock(return_value=1000000000)
+
+        # Mock _rpc_call_with_failover to verify it's called
+        called_failover = False
+
+        async def mock_failover(*args, **kwargs):
+            nonlocal called_failover
+            called_failover = True
+            return 1000000000
+
+        client_with_failover._rpc_call_with_failover = mock_failover
+
+        result = await client_with_failover._rpc_call(mock_provider, "eth.gas_price")
+        assert result == 1000000000
+        assert called_failover is True
+
+    async def test_get_rpc_urls_env_var_override_chain_id(self, client):
+        """Test _get_rpc_urls with chain_id environment variable override."""
+        import os
+
+        os.environ["DEXALOT_RPC_12345"] = "https://rpc1,https://rpc2,https://rpc3"
+        try:
+            urls = client._get_rpc_urls(12345, None, None)
+            assert urls == ["https://rpc1", "https://rpc2", "https://rpc3"]
+        finally:
+            os.environ.pop("DEXALOT_RPC_12345", None)
+
+    async def test_get_rpc_urls_env_var_override_native_symbol(self, client):
+        """Test _get_rpc_urls with native_token_symbol environment variable override."""
+        import os
+
+        os.environ["DEXALOT_RPC_TEST"] = "https://rpc1,https://rpc2"
+        try:
+            urls = client._get_rpc_urls(None, "TEST", None)
+            assert urls == ["https://rpc1", "https://rpc2"]
+        finally:
+            os.environ.pop("DEXALOT_RPC_TEST", None)
+
+    async def test_get_rpc_urls_chain_id_precedence(self, client):
+        """Test that chain_id takes precedence over native_token_symbol."""
+        import os
+
+        os.environ["DEXALOT_RPC_12345"] = "https://rpc1"
+        os.environ["DEXALOT_RPC_TEST"] = "https://rpc2"
+        try:
+            urls = client._get_rpc_urls(12345, "TEST", None)
+            assert urls == ["https://rpc1"]
+        finally:
+            os.environ.pop("DEXALOT_RPC_12345", None)
+            os.environ.pop("DEXALOT_RPC_TEST", None)
+
+    async def test_get_rpc_urls_api_fallback(self, client):
+        """Test _get_rpc_urls falling back to API response."""
+        api_rpc = "https://api.rpc1,https://api.rpc2"
+        urls = client._get_rpc_urls(None, None, api_rpc)
+        assert urls == ["https://api.rpc1", "https://api.rpc2"]
+
+    async def test_get_rpc_urls_empty(self, client):
+        """Test _get_rpc_urls returning empty list."""
+        urls = client._get_rpc_urls(None, None, None)
+        assert urls == []
+
+    @patch("dexalot_sdk.utils.provider_manager.AsyncWeb3")
+    @patch("dexalot_sdk.core.base.AsyncWeb3")
+    async def test_process_env_config_provider_manager_fallback_mainnet(
+        self, mock_web3_base, mock_web3_provider, client
+    ):
+        """Test _process_environment_config fallback when provider manager fails."""
+        from dexalot_sdk.core.config import DexalotConfig
+
+        config = DexalotConfig(provider_failover_enabled=True)
+        client_with_failover = DexalotBaseClient(config=config)
+        await client_with_failover.connect()
+
+        # Make provider manager fail to create providers
+        async def failing_add_providers(chain_name, rpc_urls):
+            # Don't add any providers
+            pass
+
+        client_with_failover._provider_manager.add_providers = failing_add_providers
+
+        env = {
+            "env_type": "mainnet",
+            "chainid": 1,
+            "network": "TestChain",
+            "rpc": "https://test-rpc",
+        }
+
+        mock_web3_instance = MagicMock()
+        mock_web3_base.return_value = mock_web3_instance
+
+        await client_with_failover._process_environment_config(env)
+
+        # Should fallback to direct provider creation
+        assert "TestChain" in client_with_failover.mainnet_providers
+
+    @patch("dexalot_sdk.utils.provider_manager.AsyncWeb3")
+    @patch("dexalot_sdk.core.base.AsyncWeb3")
+    async def test_process_env_config_provider_manager_disabled_mainnet(
+        self, mock_web3_base, mock_web3_provider, client
+    ):
+        """Test _process_environment_config when provider manager is disabled."""
+        from dexalot_sdk.core.config import DexalotConfig
+
+        config = DexalotConfig(provider_failover_enabled=False)
+        client_without_failover = DexalotBaseClient(config=config)
+        await client_without_failover.connect()
+
+        env = {
+            "env_type": "mainnet",
+            "chainid": 43113,
+            "network": "Fuji",
+            "rpc": "https://fuji-rpc",
+        }
+
+        mock_web3_instance = MagicMock()
+        mock_web3_base.return_value = mock_web3_instance
+
+        await client_without_failover._process_environment_config(env)
+
+        # Should set w3_mainnet from mainnet_providers
+        assert client_without_failover.w3_mainnet == client_without_failover.mainnet_providers.get(
+            "Fuji"
+        )
+
+    @patch("dexalot_sdk.utils.provider_manager.AsyncWeb3")
+    @patch("dexalot_sdk.core.base.AsyncWeb3")
+    async def test_process_env_config_provider_manager_fallback_subnet(
+        self, mock_web3_base, mock_web3_provider, client
+    ):
+        """Test _process_environment_config fallback for subnet when provider manager fails."""
+        from dexalot_sdk.core.config import DexalotConfig
+
+        config = DexalotConfig(provider_failover_enabled=True)
+        client_with_failover = DexalotBaseClient(config=config)
+        await client_with_failover.connect()
+
+        # Make provider manager fail to create providers
+        async def failing_add_providers(chain_name, rpc_urls):
+            # Don't add any providers
+            pass
+
+        client_with_failover._provider_manager.add_providers = failing_add_providers
+
+        env = {
+            "env_type": "subnet",
+            "rpc": "https://subnet-rpc",
+        }
+
+        mock_web3_instance = MagicMock()
+        mock_web3_base.return_value = mock_web3_instance
+
+        await client_with_failover._process_environment_config(env)
+
+        # Should fallback to direct provider creation
+        assert client_with_failover.w3_l1 is not None
+
+    async def test_sanitize_error_with_parsed_reason(self, client):
+        """Test _sanitize_error when parsed_reason != error_str."""
+        # Set up error codes so _parse_revert_reason will find a match
+        client.error_codes = {"E001": "Some Error Description"}
+
+        # Create an error that contains the error code
+        error = Exception("Transaction failed with E001: Some Error Description")
+
+        # Mock sanitize_error_message to verify it's called with parsed_reason
+        with patch("dexalot_sdk.core.base.sanitize_error_message") as mock_sanitize:
+            mock_sanitize.return_value = "Sanitized error"
+
+            result = client._sanitize_error(error, "test context")
+
+            # Verify sanitize_error_message was called
+            assert mock_sanitize.called
+            # The parsed reason should be passed (not the original error_str)
+            call_args = mock_sanitize.call_args[0]
+            assert "E001" in call_args[0] or "Some Error Description" in call_args[0]
+            assert result == "Sanitized error"
+
+    @patch("dexalot_sdk.core.base.aiohttp.TCPConnector")
+    @patch("dexalot_sdk.core.base.aiohttp.ClientSession")
+    async def test_make_http_request_python_lt_314(self, mock_session, mock_connector, client):
+        """Test _make_http_request sets enable_cleanup_closed connector kwarg for Python versions < 3.14."""
+
+        # Mock Python version < 3.14
+        # Create a version_info-like object that compares as < (3, 14)
+        class MockVersionInfo:
+            def __init__(self, major, minor):
+                self.major = major
+                self.minor = minor
+
+            def __lt__(self, other):
+                if isinstance(other, tuple):
+                    if self.major < other[0]:
+                        return True
+                    if self.major == other[0] and self.minor < other[1]:
+                        return True
+                return False
+
+        mock_version = MockVersionInfo(3, 13)
+        with patch("dexalot_sdk.core.base.sys.version_info", mock_version):
+            # Call connect which uses _make_http_request
+            await client.connect()
+
+            # Verify TCPConnector was called with enable_cleanup_closed=True
+            assert mock_connector.called
+            call_kwargs = mock_connector.call_args[1]
+            assert "enable_cleanup_closed" in call_kwargs
+            assert call_kwargs["enable_cleanup_closed"] is True
+
+    async def test_fetch_clob_pairs_error_handling(self, client):
+        """Test _fetch_clob_pairs error handling when get_clob_pairs returns a failure Result."""
+
+        # Create a mock client with get_clob_pairs method
+        class MockCLOBClient(DexalotBaseClient):
+            async def get_clob_pairs(self):
+                from dexalot_sdk.utils.result import Result
+
+                return Result.fail("CLOB pairs fetch failed")
+
+        mock_client = MockCLOBClient()
+        mock_client.api_base_url = "https://api.test.com"
+        await mock_client.connect()
+
+        # _fetch_clob_pairs should raise an exception when get_clob_pairs fails
+        with pytest.raises(Exception, match="Failed to fetch CLOB pairs: CLOB pairs fetch failed"):
+            await mock_client._fetch_clob_pairs()
+
+    @patch("dexalot_sdk.utils.provider_manager.AsyncWeb3")
+    @patch("dexalot_sdk.core.base.AsyncWeb3")
+    async def test_reinitialize_success(self, mock_web3_base, mock_web3_provider, client):
+        """Test successful reinitialize."""
+        # Mock API responses
+        mock_env_resp = [
+            {
+                "env": "fuji-multi-subnet",
+                "chainid": 432204,
+                "type": "subnet",
+                "rpc": "https://subnet-rpc",
+            },
+            {
+                "env": "fuji-multi-avax",
+                "chainid": 43113,
+                "type": "mainnet",
+                "network": "Fuji",
+                "rpc": "https://fuji-rpc",
+                "native_token_symbol": "AVAX",
+            },
+        ]
+
+        mock_tokens_resp = [
+            {"symbol": "AVAX", "env": "fuji-multi-subnet", "address": "0x123"},
+        ]
+
+        mock_rfq_resp = {"AVAX/USDC": {}}
+
+        mock_deploy_resp_tp = [{"env": "fuji-multi-subnet", "address": "0xTP", "abi": []}]
+        mock_deploy_resp_port = [{"env": "fuji-multi-subnet", "address": "0xPS", "abi": []}]
+        mock_deploy_resp_rfq = [{"env": "fuji-multi-avax", "address": "0xRFQ", "abi": []}]
+
+        def side_effect(url, params=None, **kwargs):
+            mock_resp = AsyncMock()
+            mock_resp.raise_for_status = MagicMock()
+            if "environments" in url:
+                mock_resp.json.return_value = mock_env_resp
+            elif "tokens" in url:
+                mock_resp.json.return_value = mock_tokens_resp
+            elif "rfq" in url:
+                mock_resp.json.return_value = mock_rfq_resp
+            elif "deployment" in url:
+                if params and params.get("contracttype") == "TradePairs":
+                    mock_resp.json.return_value = mock_deploy_resp_tp
+                elif params and params.get("contracttype") == "PortfolioMain":
+                    mock_resp.json.return_value = mock_deploy_resp_port
+                elif params and params.get("contracttype") == "MainnetRFQ":
+                    mock_resp.json.return_value = mock_deploy_resp_rfq
+                else:
+                    mock_resp.json.return_value = []
+            else:
+                mock_resp.json.return_value = []
+            mock_cm = AsyncMock()
+            mock_cm.__aenter__.return_value = mock_resp
+            return mock_cm
+
+        client._mock_session.get.side_effect = side_effect
+
+        result = await client.reinitialize()
+        assert result.success
+        assert "reinitialized" in result.data.lower()
+
+    @patch("dexalot_sdk.utils.provider_manager.AsyncWeb3")
+    @patch("dexalot_sdk.core.base.AsyncWeb3")
+    async def test_reinitialize_with_force_refresh(
+        self, mock_web3_base, mock_web3_provider, client
+    ):
+        """Test reinitialize with force_refresh=True clears caches."""
+        from dexalot_sdk.core.base import _SEMI_STATIC_CACHE, _STATIC_CACHE
+
+        # Add some data to caches
+        _STATIC_CACHE._store[("test", (), frozenset())] = "test_data"
+        _SEMI_STATIC_CACHE._store[("test", (), frozenset())] = "test_data"
+
+        # Mock API responses
+        mock_env_resp = [
+            {
+                "env": "fuji-multi-avax",
+                "chainid": 43113,
+                "type": "mainnet",
+                "network": "Fuji",
+                "rpc": "https://fuji-rpc",
+                "native_token_symbol": "AVAX",
+            },
+        ]
+
+        mock_tokens_resp = [{"symbol": "AVAX", "env": "fuji-multi-subnet", "address": "0x123"}]
+        mock_rfq_resp = {"AVAX/USDC": {}}
+        mock_deploy_resp_tp = [{"env": "fuji-multi-subnet", "address": "0xTP", "abi": []}]
+        mock_deploy_resp_port = [{"env": "fuji-multi-subnet", "address": "0xPS", "abi": []}]
+        mock_deploy_resp_rfq = [{"env": "fuji-multi-avax", "address": "0xRFQ", "abi": []}]
+
+        def side_effect(url, params=None, **kwargs):
+            mock_resp = AsyncMock()
+            mock_resp.raise_for_status = MagicMock()
+            if "environments" in url:
+                mock_resp.json.return_value = mock_env_resp
+            elif "tokens" in url:
+                mock_resp.json.return_value = mock_tokens_resp
+            elif "rfq" in url:
+                mock_resp.json.return_value = mock_rfq_resp
+            elif "deployment" in url:
+                if params and params.get("contracttype") == "TradePairs":
+                    mock_resp.json.return_value = mock_deploy_resp_tp
+                elif params and params.get("contracttype") == "PortfolioMain":
+                    mock_resp.json.return_value = mock_deploy_resp_port
+                elif params and params.get("contracttype") == "MainnetRFQ":
+                    mock_resp.json.return_value = mock_deploy_resp_rfq
+                else:
+                    mock_resp.json.return_value = []
+            else:
+                mock_resp.json.return_value = []
+            mock_cm = AsyncMock()
+            mock_cm.__aenter__.return_value = mock_resp
+            return mock_cm
+
+        client._mock_session.get.side_effect = side_effect
+
+        result = await client.reinitialize(force_refresh=True)
+        assert result.success
+
+        # Verify caches were cleared
+        assert len(_STATIC_CACHE._store) == 0
+        assert len(_SEMI_STATIC_CACHE._store) == 0
+
+    async def test_reinitialize_error_handling(self, client):
+        """Test reinitialize error handling when an exception occurs during reinitialization."""
+
+        # Mock _fetch_environments to raise an exception
+        async def failing_fetch():
+            raise Exception("Fetch failed")
+
+        client._fetch_environments = failing_fetch
+
+        result = await client.reinitialize()
+        assert not result.success
+        assert "reinitializing client" in result.error.lower()
+
+    async def test_get_mainnets_cache_disabled(self, client):
+        """Test get_mainnets with cache disabled."""
+        from dexalot_sdk.core.base import _STATIC_CACHE
+
+        # Disable cache
+        client._cache_enabled = False
+
+        # Add something to cache
+        key = ("get_mainnets", (client,), frozenset())
+        _STATIC_CACHE._store[key] = "cached_data"
+
+        # Mock environments call
+        mock_env_resp = [
+            {
+                "env": "fuji-multi-avax",
+                "chainid": 43113,
+                "type": "mainnet",
+                "network": "Fuji",
+                "rpc": "https://fuji-rpc",
+                "native_token_symbol": "AVAX",
+            },
+        ]
+
+        mock_resp = AsyncMock()
+        mock_resp.json.return_value = mock_env_resp
+        mock_resp.raise_for_status = MagicMock()
+        mock_cm = AsyncMock()
+        mock_cm.__aenter__.return_value = mock_resp
+        client._mock_session.get.return_value = mock_cm
+
+        result = await client.get_mainnets()
+
+        # Verify cache was cleared
+        assert key not in _STATIC_CACHE._store
+        assert result.success
+
+    async def test_get_tokens_cache_disabled(self, client):
+        """Test get_tokens with cache disabled."""
+        from dexalot_sdk.core.base import _SEMI_STATIC_CACHE
+
+        # Disable cache
+        client._cache_enabled = False
+
+        # Add something to cache
+        key = ("get_tokens", (client,), frozenset())
+        _SEMI_STATIC_CACHE._store[key] = "cached_data"
+
+        # Mock API responses
+        mock_env_resp = [
+            {
+                "env": "fuji-multi-avax",
+                "chainid": 43113,
+                "type": "mainnet",
+                "network": "Fuji",
+                "rpc": "https://fuji-rpc",
+                "native_token_symbol": "AVAX",
+            },
+        ]
+
+        mock_tokens_resp = [
+            {"symbol": "AVAX", "env": "fuji-multi-avax", "address": "0x123", "decimals": 18},
+        ]
+
+        def side_effect(url, params=None, **kwargs):
+            mock_resp = AsyncMock()
+            mock_resp.raise_for_status = MagicMock()
+            if "environments" in url:
+                mock_resp.json.return_value = mock_env_resp
+            elif "tokens" in url:
+                mock_resp.json.return_value = mock_tokens_resp
+            else:
+                mock_resp.json.return_value = []
+            mock_cm = AsyncMock()
+            mock_cm.__aenter__.return_value = mock_resp
+            return mock_cm
+
+        client._mock_session.get.side_effect = side_effect
+
+        result = await client.get_tokens()
+
+        # Verify cache was cleared
+        assert key not in _SEMI_STATIC_CACHE._store
+        assert result.success
+
+    async def test_get_tokens_environments_failure(self, client):
+        """Test get_tokens when get_environments fails and chain_config is empty."""
+        # Set chain_config to empty
+        client.chain_config = {}
+
+        # Mock get_environments to fail
+        async def failing_get_environments():
+            from dexalot_sdk.utils.result import Result
+
+            return Result.fail("Failed to fetch environments")
+
+        client.get_environments = failing_get_environments
+
+        result = await client.get_tokens()
+        assert not result.success
+        assert "failed to fetch environments" in result.error.lower()
+
+    async def test_get_deployment_cache_disabled(self, client):
+        """Test get_deployment with cache disabled."""
+        from dexalot_sdk.core.base import _STATIC_CACHE
+
+        # Disable cache
+        client._cache_enabled = False
+
+        # Add something to cache
+        key = ("get_deployment", (client,), frozenset())
+        _STATIC_CACHE._store[key] = "cached_data"
+
+        # Mock API responses
+        mock_env_resp = [
+            {
+                "env": "fuji-multi-subnet",
+                "chainid": 432204,
+                "rpc": "https://subnet.example.com",
+            }
+        ]
+        mock_deploy_resp_tp = [{"env": "fuji-multi-subnet", "address": "0xTP", "abi": {"abi": []}}]
+        mock_deploy_resp_port = [
+            {"env": "fuji-multi-subnet", "address": "0xPS", "abi": {"abi": []}}
+        ]
+        mock_deploy_resp_rfq = [{"env": "fuji-multi-avax", "address": "0xRFQ", "abi": {"abi": []}}]
+
+        def side_effect(url, params=None, **kwargs):
+            mock_resp = AsyncMock()
+            mock_resp.raise_for_status = MagicMock()
+            if "environments" in url:
+                mock_resp.json.return_value = mock_env_resp
+            elif "deployment" in url:
+                if params and params.get("contracttype") == "TradePairs":
+                    mock_resp.json.return_value = mock_deploy_resp_tp
+                elif params and params.get("contracttype") == "PortfolioMain":
+                    mock_resp.json.return_value = mock_deploy_resp_port
+                elif params and params.get("contracttype") == "MainnetRFQ":
+                    mock_resp.json.return_value = mock_deploy_resp_rfq
+                else:
+                    mock_resp.json.return_value = []
+            else:
+                mock_resp.json.return_value = []
+            mock_cm = AsyncMock()
+            mock_cm.__aenter__.return_value = mock_resp
+            return mock_cm
+
+        client._mock_session.get.side_effect = side_effect
+
+        result = await client.get_deployment()
+
+        # Verify cache was cleared
+        assert key not in _STATIC_CACHE._store
+        assert result.success
+
+    async def test_get_deployment_empty_deployments_init(self, client):
+        """Test get_deployment when self.deployments is empty/None to verify initialization."""
+        # Set deployments to empty
+        client.deployments = None
+
+        # Mock API responses
+        mock_env_resp = [
+            {
+                "env": "fuji-multi-subnet",
+                "chainid": 432204,
+                "rpc": "https://subnet.example.com",
+            }
+        ]
+        mock_deploy_resp_tp = [{"env": "fuji-multi-subnet", "address": "0xTP", "abi": {"abi": []}}]
+        mock_deploy_resp_port = [
+            {"env": "fuji-multi-subnet", "address": "0xPS", "abi": {"abi": []}}
+        ]
+        mock_deploy_resp_rfq = [{"env": "fuji-multi-avax", "address": "0xRFQ", "abi": {"abi": []}}]
+
+        def side_effect(url, params=None, **kwargs):
+            mock_resp = AsyncMock()
+            mock_resp.raise_for_status = MagicMock()
+            if "environments" in url:
+                mock_resp.json.return_value = mock_env_resp
+            elif "deployment" in url:
+                if params and params.get("contracttype") == "TradePairs":
+                    mock_resp.json.return_value = mock_deploy_resp_tp
+                elif params and params.get("contracttype") == "PortfolioMain":
+                    mock_resp.json.return_value = mock_deploy_resp_port
+                elif params and params.get("contracttype") == "MainnetRFQ":
+                    mock_resp.json.return_value = mock_deploy_resp_rfq
+                else:
+                    mock_resp.json.return_value = []
+            else:
+                mock_resp.json.return_value = []
+            mock_cm = AsyncMock()
+            mock_cm.__aenter__.return_value = mock_resp
+            return mock_cm
+
+        client._mock_session.get.side_effect = side_effect
+
+        result = await client.get_deployment()
+
+        # Verify deployments was initialized
+        assert client.deployments is not None
+        assert "TradePairs" in client.deployments
+        assert result.success
