@@ -1291,6 +1291,36 @@ class TestTransferClient:
         assert balances["TOKA"] == "5.0"
         assert balances["TOKB"] == "2.0"
 
+    async def test_fetch_erc20_balances_list_decimal_precision(self, client):
+        """_fetch_erc20_balances_list delegates to Utils.unit_conversion (Decimal-based)."""
+        from unittest.mock import patch
+
+        from dexalot_sdk.utils import Utils
+
+        client.token_data = {
+            "TOKA": {"Avalanche": {"chain_id": 43114, "address": "0xTokenA", "evmdecimals": 6}},
+        }
+
+        mock_provider = MagicMock()
+        mock_contract = MagicMock()
+        mock_balance_of = MagicMock()
+
+        async def _call():
+            return 5_000_000  # 5.0 TOKA with 6 decimals
+
+        mock_balance_of.call = _call
+        mock_contract.functions.balanceOf.return_value = mock_balance_of
+        mock_provider.eth.contract.return_value = mock_contract
+
+        with patch.object(Utils, "unit_conversion", wraps=Utils.unit_conversion) as mock_conv:
+            result = await client._fetch_erc20_balances_list(
+                43114, "Avalanche", mock_provider, VALID_ADDRESS
+            )
+
+        assert len(result) == 1
+        assert result[0]["balance"] == "5.0"
+        mock_conv.assert_called_once_with(5_000_000, 6, to_base=False)
+
     async def test_remove_gas_exception(self, client):
         """Test remove_gas exception handling."""
         client.portfolio_sub_contract.functions.depositNative.side_effect = Exception(

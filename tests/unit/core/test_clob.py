@@ -385,6 +385,43 @@ class TestCLOBClient:
         assert result.data["asks"][0]["price"] == 11.0
         assert result.data["asks"][0]["quantity"] == 5.0
 
+    async def test_get_orderbook_decimal_precision(self, client):
+        """get_orderbook delegates to Utils.unit_conversion (Decimal-based) for price/quantity."""
+        from unittest.mock import patch
+
+        from dexalot_sdk.utils import Utils
+        from dexalot_sdk.utils.result import Result
+
+        client.pairs = {
+            "AVAX/USDC": {
+                "pair": "AVAX/USDC",
+                "base": "AVAX",
+                "quote": "USDC",
+                "base_decimals": 18,
+                "quote_decimals": 6,
+                "tradePairId": b"id",
+            }
+        }
+        client.get_clob_pairs = AsyncMock(return_value=Result.ok("Pairs fetched and cached."))
+
+        mock_bids = ([100_000_000], [2_500_000_000_000_000_000], [0])
+        mock_asks = ([101_000_000], [1_500_000_000_000_000_000], [0])
+
+        client.trade_pairs_contract.functions.getNBook.return_value.call = AsyncMock(
+            side_effect=[mock_bids, mock_asks]
+        )
+
+        with patch.object(Utils, "unit_conversion", wraps=Utils.unit_conversion) as mock_conv:
+            book = await client.get_orderbook("AVAX/USDC")
+
+        assert book.success
+        # Utils.unit_conversion called for each price and quantity in bids + asks (4 calls)
+        assert mock_conv.call_count == 4
+        assert book.data["bids"][0]["price"] == 100.0
+        assert book.data["bids"][0]["quantity"] == 2.5
+        assert book.data["asks"][0]["price"] == 101.0
+        assert book.data["asks"][0]["quantity"] == 1.5
+
     async def test_add_order_success(self, client):
         """Test successful order placement."""
         # Setup pairs

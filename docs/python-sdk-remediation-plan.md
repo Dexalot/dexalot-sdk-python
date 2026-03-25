@@ -690,7 +690,7 @@ using `dict.setdefault`. Both callers (`get_nonce`, `reset_nonce`) updated to ca
 
 ### P-8: Float division used for on-chain price/quantity values
 
-**Status:** Open
+**Status:** ✅ Resolved
 
 **Finding:**
 Orderbook prices and quantities are divided using Python float arithmetic:
@@ -718,6 +718,11 @@ This also centralizes the conversion logic.
 - All price and quantity values returned by `get_orderbook` are `float` produced from `Decimal`
   arithmetic (no precision loss for amounts representable in 18 decimal places).
 - `Utils.unit_conversion` is used at all division sites for token amounts.
+
+**Resolution:** Replaced all four raw float division sites with `Utils.unit_conversion(..., to_base=False)`:
+`clob.py` bids/asks price+quantity, `transfer.py` `_get_erc20_balance`, and `transfer.py`
+`_fetch_erc20_balances_list`. Tests added verifying correct delegation to `Utils.unit_conversion`.
+All 628 unit tests pass. Commit: TBD.
 
 ---
 

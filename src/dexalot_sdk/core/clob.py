@@ -220,8 +220,8 @@ class CLOBClient(DexalotBaseClient):
                     continue
                 bids.append(
                     {
-                        "price": p / (10 ** pair_data["quote_decimals"]),
-                        "quantity": q / (10 ** pair_data["base_decimals"]),
+                        "price": Utils.unit_conversion(p, pair_data["quote_decimals"], to_base=False),
+                        "quantity": Utils.unit_conversion(q, pair_data["base_decimals"], to_base=False),
                     }
                 )
 
@@ -231,8 +231,8 @@ class CLOBClient(DexalotBaseClient):
                     continue
                 asks.append(
                     {
-                        "price": p / (10 ** pair_data["quote_decimals"]),
-                        "quantity": q / (10 ** pair_data["base_decimals"]),
+                        "price": Utils.unit_conversion(p, pair_data["quote_decimals"], to_base=False),
+                        "quantity": Utils.unit_conversion(q, pair_data["base_decimals"], to_base=False),
                     }
                 )
 

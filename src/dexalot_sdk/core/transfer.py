@@ -381,7 +381,7 @@ class TransferClient(DexalotBaseClient):
             contract = w3_provider.eth.contract(address=token_address, abi=erc20_abi)
             balance_wei = await contract.functions.balanceOf(address).call()
             decimals = token_info.get("evmdecimals", 18)
-            balance_fmt = balance_wei / (10**decimals)
+            balance_fmt = Utils.unit_conversion(balance_wei, decimals, to_base=False)
             entry["balance"] = str(balance_fmt)
         except Exception as e:
             entry["balance"] = f"Error: {self._sanitize_error(e, 'fetching ERC20 balance')}"
@@ -440,7 +440,7 @@ class TransferClient(DexalotBaseClient):
             if isinstance(balance_wei, Exception):
                 continue
 
-            balance_fmt = balance_wei / (10**decimals)
+            balance_fmt = Utils.unit_conversion(balance_wei, decimals, to_base=False)
             balances.append(
                 {
                     "chain": chain_name,
