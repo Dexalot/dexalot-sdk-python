@@ -250,3 +250,24 @@ class TestAsyncNonceManager:
 
         # Verify chain_id was not fetched (since we provided it)
         assert not hasattr(w3.eth, "chain_id") or not w3.eth.chain_id.called
+
+    def test_no_dict_lock(self, manager):
+        """_dict_lock must not exist — P-7 removes it."""
+        assert not hasattr(manager, "_dict_lock")
+
+    def test_get_lock_returns_same_instance(self, manager):
+        """_get_lock must return the identical Lock object on repeated calls."""
+        key = "43114:0xabc"
+        lock1 = manager._get_lock(key)
+        lock2 = manager._get_lock(key)
+        assert lock1 is lock2
+
+    async def test_concurrent_lock_creation_same_key(self, manager):
+        """Concurrent _get_lock calls for the same key must return the same Lock."""
+        key = "43114:0xdeadbeef"
+
+        async def get_lock():
+            return manager._get_lock(key)
+
+        results = await asyncio.gather(*[get_lock() for _ in range(50)])
+        assert all(lock is results[0] for lock in results)

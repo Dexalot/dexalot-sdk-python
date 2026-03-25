@@ -17,19 +17,18 @@ class AsyncNonceManager:
         self._locks: dict[str, asyncio.Lock] = {}
         # Track if nonce has been fetched from chain
         self._initialized: dict[str, bool] = {}
-        # Lock for managing the locks dictionary itself
-        self._dict_lock = asyncio.Lock()
 
     def _get_key(self, address: str, chain_id: int) -> str:
         """Generate a cache key for (chain_id, address) combination."""
         return f"{chain_id}:{address.lower()}"
 
-    async def _get_lock(self, key: str) -> asyncio.Lock:
-        """Get or create a lock for the given key."""
-        async with self._dict_lock:
-            if key not in self._locks:
-                self._locks[key] = asyncio.Lock()
-            return self._locks[key]
+    def _get_lock(self, key: str) -> asyncio.Lock:
+        """Get or create a lock for the given key.
+
+        dict.setdefault is atomic within the asyncio event loop (single-threaded),
+        so no outer lock is needed to guard lock creation.
+        """
+        return self._locks.setdefault(key, asyncio.Lock())
 
     async def get_nonce(self, w3: AsyncWeb3, address: str, chain_id: int | None = None) -> int:
         """
@@ -48,7 +47,7 @@ class AsyncNonceManager:
             chain_id = await w3.eth.chain_id
 
         key = self._get_key(address, chain_id)
-        lock = await self._get_lock(key)
+        lock = self._get_lock(key)
 
         async with lock:
             # If not initialized, fetch from chain
@@ -79,7 +78,7 @@ class AsyncNonceManager:
             chain_id = await w3.eth.chain_id
 
         key = self._get_key(address, chain_id)
-        lock = await self._get_lock(key)
+        lock = self._get_lock(key)
 
         async with lock:
             # Convert address to checksum format for type safety

@@ -651,7 +651,7 @@ other coroutine can mutate state in between. Tests added:
 
 ### P-7: `AsyncNonceManager` uses a global `_dict_lock` for all chains at startup
 
-**Status:** Open
+**Status:** ✅ Resolved
 
 **Finding:**
 `_dict_lock` serializes lock creation for all `(chain_id, address)` combinations. During
@@ -680,6 +680,11 @@ atomic and `_dict_lock` is unnecessary.
 - `_dict_lock` is removed.
 - Existing nonce manager tests pass.
 - Under concurrent usage, nonces are still monotonically increasing per key.
+
+**Resolution:** Removed `_dict_lock` and converted `_get_lock` to a synchronous method
+using `dict.setdefault`. Both callers (`get_nonce`, `reset_nonce`) updated to call without
+`await`. Tests added: `test_no_dict_lock`, `test_get_lock_returns_same_instance`,
+`test_concurrent_lock_creation_same_key`. All 626 unit tests pass. Commit: 3c23409.
 
 ---
 
