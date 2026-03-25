@@ -423,7 +423,7 @@ effectively serialized via their calculated sleep times, not via the lock.
 
 ### P-2: `MemoryCache._cleanup` does full dict rebuild on every `set`
 
-**Status:** Open
+**Status:** ✅ Resolved — TTL expiry sweep (`_cleanup`) is now amortized: called only once every `_CLEANUP_INTERVAL` (50) writes via `_write_count`. The max_size cap (`_trim`) remains on every write to keep the size bound immediate. Three unit tests added: `test_memory_cache_cleanup_amortized` (verifies _cleanup call count), `test_memory_cache_max_size_enforced_immediately` (verifies size cap still applies per-write), `test_memory_cache_ttl_cleanup_removes_expired` (verifies expired entries are swept at interval).
 
 **Finding:**
 `_cleanup` is called on every `set()`, rebuilding the entire dict with a dict-comprehension

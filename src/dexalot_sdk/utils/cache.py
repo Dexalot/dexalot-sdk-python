@@ -5,22 +5,24 @@ from typing import Any
 
 
 class MemoryCache:
+    _CLEANUP_INTERVAL = 50  # run cleanup every N writes
+
     def __init__(self, ttl_seconds: float, max_size: int = 256):
         self.ttl = ttl_seconds
         self.max_size = max_size
         self._store: dict[Hashable, tuple[float, Any]] = {}
+        self._write_count: int = 0
 
     def _cleanup(self):
+        """Remove expired entries. Called every _CLEANUP_INTERVAL writes."""
         now = time.time()
-        # remove expired
         self._store = {k: v for k, v in self._store.items() if now - v[0] < self.ttl}
-        # trim to max_size (simple FIFO-ish)
-        # trim to max_size (simple FIFO-ish based on insertion order if dict is ordered)
-        # Python 3.7+ dicts preserve insertion order.
+
+    def _trim(self):
+        """Trim to max_size using FIFO eviction. Called on every write."""
         if len(self._store) > self.max_size:
-            # Calculate how many to remove
             num_to_remove = len(self._store) - self.max_size
-            # Create a list of keys to remove to avoid runtime error during iteration
+            # Python 3.7+ dicts preserve insertion order
             keys_to_remove = list(self._store.keys())[:num_to_remove]
             for k in keys_to_remove:
                 self._store.pop(k, None)
@@ -39,7 +41,11 @@ class MemoryCache:
 
     def set(self, key: Hashable, value: Any):
         self._store[key] = (time.time(), value)
-        self._cleanup()
+        self._trim()
+        self._write_count += 1
+        if self._write_count >= self._CLEANUP_INTERVAL:
+            self._cleanup()
+            self._write_count = 0
 
     def clear(self):
         self._store.clear()

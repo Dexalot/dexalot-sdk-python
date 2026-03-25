@@ -171,6 +171,72 @@ async def test_async_ttl_cached_no_strong_ref():
     assert ref() is None, "Client instance should be garbage-collected after del"
 
 
+def test_memory_cache_cleanup_amortized():
+    """_cleanup is called at most once per _CLEANUP_INTERVAL writes."""
+    cache = MemoryCache(ttl_seconds=60, max_size=1000)
+    cleanup_calls = 0
+    original_cleanup = cache._cleanup
+
+    def counting_cleanup():
+        nonlocal cleanup_calls
+        cleanup_calls += 1
+        original_cleanup()
+
+    cache._cleanup = counting_cleanup
+
+    interval = MemoryCache._CLEANUP_INTERVAL
+    for i in range(interval - 1):
+        cache.set(f"k{i}", i)
+
+    # Not yet triggered
+    assert cleanup_calls == 0
+
+    # The interval-th write triggers cleanup
+    cache.set("trigger", 99)
+    assert cleanup_calls == 1
+
+    # Counter reset — next batch of interval-1 writes should not trigger again
+    for i in range(interval - 1):
+        cache.set(f"k2_{i}", i)
+    assert cleanup_calls == 1
+
+    # One more write triggers second cleanup
+    cache.set("trigger2", 99)
+    assert cleanup_calls == 2
+
+
+def test_memory_cache_max_size_enforced_immediately():
+    """max_size cap is applied on every write, not just at cleanup intervals."""
+    cache = MemoryCache(ttl_seconds=60, max_size=2)
+    cache.set("k1", "v1")
+    cache.set("k2", "v2")
+    cache.set("k3", "v3")
+
+    assert len(cache._store) == 2
+    assert cache.get("k1") is None  # evicted (FIFO)
+    assert cache.get("k2") == "v2"
+    assert cache.get("k3") == "v3"
+
+
+def test_memory_cache_ttl_cleanup_removes_expired():
+    """_cleanup (called at CLEANUP_INTERVAL writes) removes expired entries."""
+    interval = MemoryCache._CLEANUP_INTERVAL
+    cache = MemoryCache(ttl_seconds=0.05, max_size=1000)
+
+    # Fill cache with entries that will expire
+    for i in range(interval - 1):
+        cache.set(f"k{i}", i)
+
+    time.sleep(0.1)  # let all entries expire
+
+    # Trigger cleanup via the interval-th write
+    cache.set("new_key", "new_value")
+
+    # Only the new entry should remain
+    assert cache.get("new_key") == "new_value"
+    assert len(cache._store) == 1
+
+
 @pytest.mark.asyncio
 async def test_async_ttl_cached_disabled_cache():
     """Test async_ttl_cached when cache is disabled."""
