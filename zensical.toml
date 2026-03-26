@@ -1,0 +1,26 @@
+[project]
+site_name = "Dexalot Python SDK"
+site_description = "Python SDK for the Dexalot decentralized exchange"
+repo_url = "https://github.com/Dexalot/dexalot-sdk-python"
+docs_dir = "docs"
+
+[[project.theme.palette]] 
+scheme = "default"
+primary = "indigo"
+accent = "indigo"
+toggle.icon = "lucide/sun"
+toggle.name = "Switch to dark mode"
+
+[[project.theme.palette]]
+scheme = "slate"
+primary = "indigo"
+accent = "indigo"
+toggle.icon = "lucide/moon"
+toggle.name = "Switch to light mode"
+
+[plugins.search]
+
+[plugins.mkdocstrings.python]
+docstring_style = "google"
+show_source = false
+show_root_heading = true

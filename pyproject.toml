@@ -25,9 +25,8 @@ dev = [
     "ruff",
 ]
 docs = [
-    "mkdocs>=1.6",
-    "mkdocs-material>=9.5",
     "mkdocstrings[python]>=0.29",
+    "zensical>=0.0.29",
 ]
 
 [tool.setuptools]

@@ -52,10 +52,10 @@ mypy:
 typecheck: mypy
 
 docs-serve:
-	uv run --group docs mkdocs serve
+	uv run --group docs zensical serve
 
 docs-build:
-	uv run --group docs mkdocs build
+	uv run --group docs zensical build
 
 clean:
 	rm -rf .pytest_cache
