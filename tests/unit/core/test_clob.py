@@ -2837,7 +2837,8 @@ class TestWebSocketManager:
 
     def test_unsubscribe_schedules_send_when_connected(self, manager):
         """unsubscribe() schedules _send_unsubscribe task when connected."""
-        manager.subscribe("Topic", lambda _m: None)
+        with patch.object(manager, "connect"):
+            manager.subscribe("Topic", lambda _m: None)
         manager._state = ConnectionState.CONNECTED
         manager._ws = MagicMock()
 

@@ -60,6 +60,12 @@ Per-(chain_id, address) asyncio locks enforce sequential nonce acquisition. High
 
 Unit tests in `tests/unit/` have no external dependencies. Integration tests in `tests/integration/` require a live API environment.
 
+### Async mocking — avoid "coroutine never awaited"
+
+- **Sync entrypoint** (calls `loop.create_task` / `asyncio.run`): patch the scheduler or the async method with `MagicMock`. Never let a real coroutine be created without being awaited.
+- **Async test** (`@pytest.mark.asyncio`): use `AsyncMock` for async dependencies; await the coroutine under test.
+- Pattern used in this repo: `patch.object(manager, "connect")` to block sync entrypoints that internally schedule `_run()`. Alternatively, patch `loop.create_task` with a side effect that calls `coro.close()` before returning a `MagicMock`.
+
 - `VERSION` file at repo root holds the current version (currently 0.4.0)
 - `.env` files: never commit; use `env.example` as template
 - **`env.example` must be updated** whenever a new `DexalotConfig` field or env var is added — it is the canonical reference for operators
