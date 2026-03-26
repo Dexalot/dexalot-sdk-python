@@ -1,7 +1,3 @@
----
-icon: link
-editLink: true
----
 
 # Simple Swap Integration
 

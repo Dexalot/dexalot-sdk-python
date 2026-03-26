@@ -1,7 +1,3 @@
----
-icon: link
-editLink: true
----
 
 # Web Socket Interface
 
