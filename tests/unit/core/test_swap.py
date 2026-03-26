@@ -308,9 +308,10 @@ class TestSwapClient:
                 self.val = val
 
             def __await__(self):
-                if False:
-                    yield
-                return self.val
+                async def _return_value():
+                    return self.val
+
+                return _return_value().__await__()
 
         mock_w3.eth.gas_price = ConstantAwaitable(100)
         mock_w3.eth.account.sign_transaction.return_value.raw_transaction = b"raw"
@@ -388,9 +389,10 @@ class TestSwapClient:
                 self.val = val
 
             def __await__(self):
-                if False:
-                    yield
-                return self.val
+                async def _return_value():
+                    return self.val
+
+                return _return_value().__await__()
 
         mock_w3.eth.gas_price = ConstantAwaitable(100)
         mock_w3.eth.account.sign_transaction.return_value.raw_transaction = b"raw"
@@ -613,9 +615,10 @@ class TestSwapClient:
                 self.val = val
 
             def __await__(self):
-                if False:
-                    yield
-                return self.val
+                async def _return_value():
+                    return self.val
+
+                return _return_value().__await__()
 
         mock_w3.eth.gas_price = ConstantAwaitable(100)
         mock_w3.to_hex.return_value = "0xHash"
@@ -747,9 +750,10 @@ class TestSwapClient:
                 self.val = val
 
             def __await__(self):
-                if False:
-                    yield
-                return self.val
+                async def _return_value():
+                    return self.val
+
+                return _return_value().__await__()
 
         mock_w3.eth.gas_price = ConstantAwaitable(100)
         mock_w3.to_hex.return_value = "0xHash"
@@ -849,9 +853,10 @@ class TestSwapClient:
                 self.val = val
 
             def __await__(self):
-                if False:
-                    yield
-                return self.val
+                async def _return_value():
+                    return self.val
+
+                return _return_value().__await__()
 
         mock_w3.eth.gas_price = ConstantAwaitable(100)
         mock_w3.to_hex.return_value = "0xHash"
@@ -1078,17 +1083,28 @@ class TestSwapClient:
             "secure_quote": {
                 "signature": "0xabcd",
                 "data": {
-                    "makerAsset": "A", "takerAsset": "B",
-                    "maker": "M", "taker": "T",
-                    "makerAmount": 1, "takerAmount": 1,
-                    "expiry": 9999999999, "nonceAndMeta": 0,
+                    "makerAsset": "A",
+                    "takerAsset": "B",
+                    "maker": "M",
+                    "taker": "T",
+                    "makerAmount": 1,
+                    "takerAmount": 1,
+                    "expiry": 9999999999,
+                    "nonceAndMeta": 0,
                 },
             },
         }
         mock_contract = MagicMock()
-        mock_contract.functions.simpleSwap.return_value.estimate_gas = AsyncMock(return_value=100000)
+        mock_contract.functions.simpleSwap.return_value.estimate_gas = AsyncMock(
+            return_value=100000
+        )
         mock_contract.functions.simpleSwap.return_value.build_transaction = AsyncMock(
-            return_value={"from": client.account.address, "nonce": 0, "gas": 120000, "gasPrice": 100}
+            return_value={
+                "from": client.account.address,
+                "nonce": 0,
+                "gas": 120000,
+                "gasPrice": 100,
+            }
         )
         client._get_rfq_contract = AsyncMock(return_value=(client.w3_l1, mock_contract))
         client.w3_l1.to_hex = lambda x: "0xHash"
@@ -1115,17 +1131,28 @@ class TestSwapClient:
             "secure_quote": {
                 "signature": "0xabcd",
                 "data": {
-                    "makerAsset": "A", "takerAsset": "B",
-                    "maker": "M", "taker": "T",
-                    "makerAmount": 1, "takerAmount": 1,
-                    "expiry": 9999999999, "nonceAndMeta": 0,
+                    "makerAsset": "A",
+                    "takerAsset": "B",
+                    "maker": "M",
+                    "taker": "T",
+                    "makerAmount": 1,
+                    "takerAmount": 1,
+                    "expiry": 9999999999,
+                    "nonceAndMeta": 0,
                 },
             },
         }
         mock_contract = MagicMock()
-        mock_contract.functions.simpleSwap.return_value.estimate_gas = AsyncMock(return_value=100000)
+        mock_contract.functions.simpleSwap.return_value.estimate_gas = AsyncMock(
+            return_value=100000
+        )
         mock_contract.functions.simpleSwap.return_value.build_transaction = AsyncMock(
-            return_value={"from": client.account.address, "nonce": 0, "gas": 120000, "gasPrice": 100}
+            return_value={
+                "from": client.account.address,
+                "nonce": 0,
+                "gas": 120000,
+                "gasPrice": 100,
+            }
         )
         client._get_rfq_contract = AsyncMock(return_value=(client.w3_l1, mock_contract))
         client.w3_l1.to_hex = lambda x: "0xHash"

@@ -260,9 +260,7 @@ async def test_send_subscribe_connection_closed():
     """ConnectionClosed during send is silently swallowed."""
     mgr = make_manager()
     mock_ws = AsyncMock()
-    mock_ws.send = AsyncMock(
-        side_effect=websockets.exceptions.ConnectionClosed(None, None)
-    )
+    mock_ws.send = AsyncMock(side_effect=websockets.exceptions.ConnectionClosed(None, None))
     mgr._ws = mock_ws
     mgr._subscriptions["myTopic"] = (MagicMock(), False, None)
 
@@ -326,9 +324,7 @@ async def test_send_unsubscribe_connection_closed():
     """ConnectionClosed during unsubscribe send is silently swallowed."""
     mgr = make_manager()
     mock_ws = AsyncMock()
-    mock_ws.send = AsyncMock(
-        side_effect=websockets.exceptions.ConnectionClosed(None, None)
-    )
+    mock_ws.send = AsyncMock(side_effect=websockets.exceptions.ConnectionClosed(None, None))
     mgr._ws = mock_ws
 
     spec = (MagicMock(), False, None)

@@ -269,7 +269,9 @@ async def test_async_ttl_cached_stampede_exception_propagates():
 
     results = await asyncio.gather(*[failing_func(7) for _ in range(4)], return_exceptions=True)
 
-    assert all(isinstance(r, ValueError) for r in results), f"Expected all ValueError, got: {results}"
+    assert all(isinstance(r, ValueError) for r in results), (
+        f"Expected all ValueError, got: {results}"
+    )
     assert all(str(r) == "boom" for r in results)
 
 

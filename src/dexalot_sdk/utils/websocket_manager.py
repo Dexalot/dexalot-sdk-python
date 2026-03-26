@@ -361,7 +361,7 @@ def _build_meta(
     pair = orderbook_pair
     dec = orderbook_decimal
     if not is_private and pair is None and subscription_key.startswith("OrderBook/"):
-        pair = subscription_key[len("OrderBook/"):]
+        pair = subscription_key[len("OrderBook/") :]
     if pair is not None and dec is None:
         dec = 8
 

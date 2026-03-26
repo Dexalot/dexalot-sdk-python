@@ -32,12 +32,14 @@ from ..utils.retry import async_retry
 from .config import DexalotConfig
 
 _ALLOWED_HTTP_METHODS = frozenset({"get", "post", "put", "patch", "delete", "head", "options"})
-_ALLOWED_RPC_METHODS = frozenset({
-    "eth.gas_price",
-    "eth.send_raw_transaction",
-    "eth.wait_for_transaction_receipt",
-    "eth.get_transaction_count",
-})
+_ALLOWED_RPC_METHODS = frozenset(
+    {
+        "eth.gas_price",
+        "eth.send_raw_transaction",
+        "eth.wait_for_transaction_receipt",
+        "eth.get_transaction_count",
+    }
+)
 
 # Module-level caches (shared across all client instances)
 # These can be reconfigured via DexalotClient constructor parameters

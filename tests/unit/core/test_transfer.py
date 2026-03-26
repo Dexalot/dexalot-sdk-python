@@ -39,9 +39,10 @@ class TestTransferClient:
                 self.val = val
 
             def __await__(self):
-                if False:
-                    yield
-                return self.val
+                async def _return_value():
+                    return self.val
+
+                return _return_value().__await__()
 
         w3 = MagicMock()
         w3.eth.get_balance = AsyncMock(return_value=0)
@@ -398,14 +399,18 @@ class TestTransferClient:
         def side_effect(addr, page):
             mock_call = MagicMock()
             if page < 3:
+
                 async def _call(p=page):
                     call_order.append(p)
                     return ([Utils.to_bytes32(f"TOK{p}")], [10**18], [10**18])
+
                 mock_call.call = _call
             else:
+
                 async def _empty():
                     call_order.append(page)
                     return ([], [], [])
+
                 mock_call.call = _empty
             return mock_call
 
@@ -691,9 +696,7 @@ class TestTransferClient:
 
         client._ensure_allowance = fake_ensure_allowance
         client._build_and_send_tx = AsyncMock(side_effect=Exception("deposit reverted"))
-        client._get_l1_token_info = AsyncMock(
-            return_value={"address": "0xUSDC", "evmdecimals": 6}
-        )
+        client._get_l1_token_info = AsyncMock(return_value={"address": "0xUSDC", "evmdecimals": 6})
 
         from dexalot_sdk.utils.result import Result
 
@@ -728,7 +731,11 @@ class TestTransferClient:
         subnet_chain_id = client.subnet_chain_id
         client.token_data = {
             "USDC": {
-                "Dexalot": {"chain_id": subnet_chain_id, "evmdecimals": 6, "address": "0xSUBNET_USDC"}
+                "Dexalot": {
+                    "chain_id": subnet_chain_id,
+                    "evmdecimals": 6,
+                    "address": "0xSUBNET_USDC",
+                }
             }
         }
         client.chain_config = {
@@ -1701,9 +1708,7 @@ class TestTransferClient:
     async def test_get_l1_native_balance_sanitizes_error(self, client):
         """H-5: _get_l1_native_balance must not leak raw exception text (e.g. URLs) to callers."""
         secret_url = "https://rpc.example.com/secret-key"
-        client.w3_l1.eth.get_balance = AsyncMock(
-            side_effect=Exception(f"failed: {secret_url}")
-        )
+        client.w3_l1.eth.get_balance = AsyncMock(side_effect=Exception(f"failed: {secret_url}"))
 
         entry = await client._get_l1_native_balance(VALID_ADDRESS)
 
@@ -1765,14 +1770,18 @@ class TestTransferClient:
         """transfer_portfolio returns a fail Result with 'Invalid balance response format' when balance_result.data is None."""
         from dexalot_sdk.utils.result import Result
 
-        with patch.object(client, "get_portfolio_balance", new=AsyncMock(return_value=Result.ok(None))):
+        with patch.object(
+            client, "get_portfolio_balance", new=AsyncMock(return_value=Result.ok(None))
+        ):
             result = await client.withdraw("AVAX", 1.0, "Avalanche")
             # The None-data check is in transfer_portfolio_asset; deposit goes a different path.
             # We use transfer_portfolio_asset which has the same guard.
             pass
 
         # Direct test: transfer_portfolio with balance_result.data = None
-        with patch.object(client, "get_portfolio_balance", new=AsyncMock(return_value=Result.ok(None))):
+        with patch.object(
+            client, "get_portfolio_balance", new=AsyncMock(return_value=Result.ok(None))
+        ):
             result = await client.transfer_portfolio(
                 "AVAX", 1.0, VALID_RECIPIENT, wait_for_receipt=True
             )

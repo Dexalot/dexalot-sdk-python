@@ -21,9 +21,10 @@ def client():
                     self.val = val
 
                 def __await__(self):
-                    if False:
-                        yield
-                    return self.val
+                    async def _return_value():
+                        return self.val
+
+                    return _return_value().__await__()
 
             w3_l1 = MagicMock()
             w3_l1.eth.get_transaction_count = AsyncMock(return_value=1)
@@ -36,8 +37,8 @@ def client():
             w3_mainnet.eth.get_transaction_count = AsyncMock(return_value=1)
             w3_mainnet.eth.send_raw_transaction = AsyncMock(return_value=b"tx_hash")
             w3_mainnet.eth.gas_price = ConstantAwaitable(1000000000)
-            w3_mainnet.to_hex.side_effect = (
-                lambda x: f"0x{x.hex()}" if isinstance(x, bytes) else str(x)
+            w3_mainnet.to_hex.side_effect = lambda x: (
+                f"0x{x.hex()}" if isinstance(x, bytes) else str(x)
             )
 
             client.w3_l1 = w3_l1

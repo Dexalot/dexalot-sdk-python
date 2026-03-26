@@ -29,31 +29,31 @@ class TestValidatePositiveFloat:
         """Test that zero fails."""
         result = validate_positive_float(0, "amount")
         assert not result.success
-        assert_contains(result.error, 'must be positive')
+        assert_contains(result.error, "must be positive")
 
     def test_negative_fails(self):
         """Test that negative values fail."""
         result = validate_positive_float(-1.0, "amount")
         assert not result.success
-        assert_contains(result.error, 'must be positive')
+        assert_contains(result.error, "must be positive")
 
     def test_nan_fails(self):
         """Test that NaN fails."""
         result = validate_positive_float(float("nan"), "amount")
         assert not result.success
-        assert_contains(result.error, 'cannot be NaN')
+        assert_contains(result.error, "cannot be NaN")
 
     def test_inf_fails(self):
         """Test that infinity fails."""
         result = validate_positive_float(float("inf"), "amount")
         assert not result.success
-        assert_contains(result.error, 'cannot be infinite')
+        assert_contains(result.error, "cannot be infinite")
 
     def test_non_numeric_fails(self):
         """Test that non-numeric types fail."""
         result = validate_positive_float("1.0", "amount")
         assert not result.success
-        assert_contains(result.error, 'must be numeric')
+        assert_contains(result.error, "must be numeric")
 
 
 class TestValidatePositiveInt:
@@ -68,19 +68,19 @@ class TestValidatePositiveInt:
         """Test that zero fails."""
         result = validate_positive_int(0, "chain_id")
         assert not result.success
-        assert_contains(result.error, 'must be positive')
+        assert_contains(result.error, "must be positive")
 
     def test_negative_fails(self):
         """Test that negative values fail."""
         result = validate_positive_int(-1, "chain_id")
         assert not result.success
-        assert_contains(result.error, 'must be positive')
+        assert_contains(result.error, "must be positive")
 
     def test_float_fails(self):
         """Test that floats fail."""
         result = validate_positive_int(1.0, "chain_id")
         assert not result.success
-        assert_contains(result.error, 'must be integer')
+        assert_contains(result.error, "must be integer")
 
 
 class TestValidateAddress:
@@ -95,7 +95,7 @@ class TestValidateAddress:
         """Test that empty strings fail."""
         result = validate_address("", "address")
         assert not result.success
-        assert_contains(result.error, 'cannot be empty')
+        assert_contains(result.error, "cannot be empty")
 
     def test_no_0x_prefix_fails(self):
         """Test that addresses without 0x prefix fail."""
@@ -107,19 +107,19 @@ class TestValidateAddress:
         """Test that addresses with wrong length fail."""
         result = validate_address("0x123", "address")
         assert not result.success
-        assert_contains(result.error, 'must be 42 characters')
+        assert_contains(result.error, "must be 42 characters")
 
     def test_invalid_hex_fails(self):
         """Test that addresses with invalid hex characters fail."""
         result = validate_address("0x123456789012345678901234567890123456789g", "address")
         assert not result.success
-        assert_contains(result.error, 'invalid hex characters')
+        assert_contains(result.error, "invalid hex characters")
 
     def test_non_string_fails(self):
         """Test that non-string types fail."""
         result = validate_address(123, "address")
         assert not result.success
-        assert_contains(result.error, 'must be string')
+        assert_contains(result.error, "must be string")
 
 
 class TestValidatePairFormat:
@@ -135,7 +135,7 @@ class TestValidatePairFormat:
         """Test that empty strings fail."""
         result = validate_pair_format("", "pair")
         assert not result.success
-        assert_contains(result.error, 'cannot be empty')
+        assert_contains(result.error, "cannot be empty")
 
     def test_no_slash_fails(self):
         """Test that pairs without slash fail."""
@@ -153,20 +153,20 @@ class TestValidatePairFormat:
         """Test that pairs with empty tokens fail."""
         result = validate_pair_format("/USDC", "pair")
         assert not result.success
-        assert_contains(result.error, 'both tokens must be non-empty')
+        assert_contains(result.error, "both tokens must be non-empty")
 
     def test_non_string_fails(self):
         """Test that non-string types fail."""
         result = validate_pair_format(123, "pair")
         assert not result.success
-        assert_contains(result.error, 'must be string')
+        assert_contains(result.error, "must be string")
 
     def test_pair_invalid_regex_pattern(self):
         """Test pair that doesn't match regex pattern."""
         # Pair with special characters that don't match the pattern
         result = validate_pair_format("TOKEN@123/TOKEN#456", "pair")
         assert not result.success
-        assert_contains(result.error, 'must match format TOKEN/TOKEN')
+        assert_contains(result.error, "must match format TOKEN/TOKEN")
 
 
 class TestValidateOrderIdFormat:
@@ -186,25 +186,25 @@ class TestValidateOrderIdFormat:
         """Test that empty strings fail."""
         result = validate_order_id_format("", "order_id")
         assert not result.success
-        assert_contains(result.error, 'cannot be empty')
+        assert_contains(result.error, "cannot be empty")
 
     def test_invalid_hex_fails(self):
         """Test that invalid hex strings fail."""
         result = validate_order_id_format("0x123g", "order_id")
         assert not result.success
-        assert_contains(result.error, 'must be valid hex string')
+        assert_contains(result.error, "must be valid hex string")
 
     def test_wrong_bytes_length_fails(self):
         """Test that bytes with wrong length fail."""
         result = validate_order_id_format(b"\x00" * 31, "order_id")
         assert not result.success
-        assert_contains(result.error, 'must be exactly 32 bytes')
+        assert_contains(result.error, "must be exactly 32 bytes")
 
     def test_non_string_or_bytes_fails(self):
         """Test that non-string/non-bytes types fail."""
         result = validate_order_id_format(123, "order_id")
         assert not result.success
-        assert_contains(result.error, 'must be string or bytes')
+        assert_contains(result.error, "must be string or bytes")
 
     def test_order_id_hex_string_too_long(self):
         """Test order_id hex string that is too long."""
@@ -212,7 +212,7 @@ class TestValidateOrderIdFormat:
         long_hex = "0x" + "a" * 130  # 130 hex chars
         result = validate_order_id_format(long_hex, "order_id")
         assert not result.success
-        assert_contains(result.error, 'hex string too long')
+        assert_contains(result.error, "hex string too long")
 
 
 class TestValidateTokenSymbol:
@@ -229,19 +229,19 @@ class TestValidateTokenSymbol:
         """Test that empty strings fail."""
         result = validate_token_symbol("", "token")
         assert not result.success
-        assert_contains(result.error, 'cannot be empty')
+        assert_contains(result.error, "cannot be empty")
 
     def test_invalid_characters_fail(self):
         """Test that tokens with invalid characters fail."""
         result = validate_token_symbol("TOKEN@123", "token")
         assert not result.success
-        assert_contains(result.error, 'only alphanumeric')
+        assert_contains(result.error, "only alphanumeric")
 
     def test_non_string_fails(self):
         """Test that non-string types fail."""
         result = validate_token_symbol(123, "token")
         assert not result.success
-        assert_contains(result.error, 'must be string')
+        assert_contains(result.error, "must be string")
 
 
 class TestValidateChainIdentifier:
@@ -261,25 +261,25 @@ class TestValidateChainIdentifier:
         """Test that zero chain ID fails."""
         result = validate_chain_identifier(0, "chain_identifier")
         assert not result.success
-        assert_contains(result.error, 'must be positive integer')
+        assert_contains(result.error, "must be positive integer")
 
     def test_negative_chain_id_fails(self):
         """Test that negative chain ID fails."""
         result = validate_chain_identifier(-1, "chain_identifier")
         assert not result.success
-        assert_contains(result.error, 'must be positive integer')
+        assert_contains(result.error, "must be positive integer")
 
     def test_empty_chain_name_fails(self):
         """Test that empty chain name fails."""
         result = validate_chain_identifier("", "chain_identifier")
         assert not result.success
-        assert_contains(result.error, 'cannot be empty')
+        assert_contains(result.error, "cannot be empty")
 
     def test_invalid_type_fails(self):
         """Test that invalid types fail."""
         result = validate_chain_identifier(1.5, "chain_identifier")
         assert not result.success
-        assert_contains(result.error, 'must be int')
+        assert_contains(result.error, "must be int")
 
 
 class TestValidateOrderParams:
@@ -309,7 +309,7 @@ class TestValidateOrderParams:
         """Test that missing price for LIMIT order fails."""
         result = validate_order_params("AVAX/USDC", 1.0, None, "LIMIT")
         assert not result.success
-        assert_contains(result.error, 'required for LIMIT orders')
+        assert_contains(result.error, "required for LIMIT orders")
 
     def test_invalid_price_for_limit_fails(self):
         """Test that invalid price for LIMIT order fails."""

@@ -2537,22 +2537,35 @@ class TestDexalotBaseClient:
         client.w3_l1 = MagicMock()
         mock_contract = MagicMock()
         client.w3_l1.eth.contract = MagicMock(return_value=mock_contract)
-        client.deployments = {"TradePairs": {}, "PortfolioSub": {}, "PortfolioMain": {}, "MainnetRFQ": {}}
+        client.deployments = {
+            "TradePairs": {},
+            "PortfolioSub": {},
+            "PortfolioMain": {},
+            "MainnetRFQ": {},
+        }
 
         item = {
             "env": client.ENV_FUJI_MULTI_SUBNET,
             "address": "0xABCD",
-            "abi": [{"name": "someFunc"}],  # plain list — exercises the branch where abi_data is used directly (not wrapped in a dict with an "abi" key)
+            "abi": [
+                {"name": "someFunc"}
+            ],  # plain list — exercises the branch where abi_data is used directly (not wrapped in a dict with an "abi" key)
         }
         client._process_deployment_item(item, "TradePairs")
 
         assert client.deployments["TradePairs"]["address"] == "0xABCD"
-        client.w3_l1.eth.contract.assert_called_once_with(address="0xABCD", abi=[{"name": "someFunc"}])
+        client.w3_l1.eth.contract.assert_called_once_with(
+            address="0xABCD", abi=[{"name": "someFunc"}]
+        )
         assert client.trade_pairs_contract is mock_contract
 
     async def test_get_mainnets_env_fail_propagates(self, client):
         """get_mainnets returns Result.fail when get_environments fails."""
-        with patch.object(client, "get_environments", new=AsyncMock(return_value=MagicMock(success=False, error="env error"))):
+        with patch.object(
+            client,
+            "get_environments",
+            new=AsyncMock(return_value=MagicMock(success=False, error="env error")),
+        ):
             result = await client.get_mainnets()
         assert not result.success
         assert "env error" in result.error
@@ -2560,7 +2573,11 @@ class TestDexalotBaseClient:
     async def test_get_deployments_env_fail_propagates(self, client):
         """get_deployment returns Result.fail when get_environments fails (chain_config empty)."""
         client.chain_config = {}  # ensure get_environments is called
-        with patch.object(client, "get_environments", new=AsyncMock(return_value=MagicMock(success=False, error="env down"))):
+        with patch.object(
+            client,
+            "get_environments",
+            new=AsyncMock(return_value=MagicMock(success=False, error="env down")),
+        ):
             result = await client.get_deployment()
         assert not result.success
         assert "env down" in result.error

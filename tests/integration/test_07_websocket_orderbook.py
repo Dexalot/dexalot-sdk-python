@@ -32,14 +32,12 @@ TOPIC_AVAX_USDC = "OrderBook/AVAX/USDC"
 PAIR_AVAX_USDC = "AVAX/USDC"
 
 CONNECT_WAIT_S = 30.0
-STREAM_DURATION_S = 30.0   # Stay subscribed for this long (or until Ctrl+C)
+STREAM_DURATION_S = 30.0  # Stay subscribed for this long (or until Ctrl+C)
 FIRST_UPDATE_WAIT_S = 30.0  # Fail if no update arrives within this window
 POLL_S = 0.25
 
 # Protocol control / non-data types (docs/websocket.md)
-_WS_CONTROL_TYPES = frozenset(
-    {"subscribe", "unsubscribe", "pong", "subscribed", "ping"}
-)
+_WS_CONTROL_TYPES = frozenset({"subscribe", "unsubscribe", "pong", "subscribed", "ping"})
 
 
 def _clear_suppressed_cancellation() -> None:
@@ -58,7 +56,7 @@ def _clear_suppressed_cancellation() -> None:
         pass
 
 
-def _is_orderbook_stream_message(msg: dict) -> bool:
+def _is_orderbook_stream_message(msg: object) -> bool:
     """True for WsRawOrderbookData-style payloads for AVAX/USDC (docs/websocket.md)."""
     if not isinstance(msg, dict):
         return False
@@ -124,9 +122,7 @@ class TestWebSocketOrderbook:
 
         outcome = "error"
         try:
-            await client.subscribe_to_events(
-                TOPIC_AVAX_USDC, on_message, is_private=False
-            )
+            await client.subscribe_to_events(TOPIC_AVAX_USDC, on_message, is_private=False)
 
             manager = getattr(client, "_ws_manager", None)
             assert manager is not None
@@ -176,9 +172,7 @@ class TestWebSocketOrderbook:
             # After CancelledError, do not await a multi-second grace wait: disconnect() can
             # block inside the WS stack; polling only delays pytest teardown and a second
             # Ctrl+C becomes KeyboardInterrupt. Daemon thread still runs disconnect().
-            await client.close_websocket(
-                grace_s=0.0 if outcome == "interrupt" else 3.0
-            )
+            await client.close_websocket(grace_s=0.0 if outcome == "interrupt" else 3.0)
 
         if outcome == "interrupt":
             print("[test_07] Teardown complete; exiting test.", flush=True)

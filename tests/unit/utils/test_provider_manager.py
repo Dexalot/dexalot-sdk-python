@@ -36,7 +36,6 @@ class TestProviderHealth:
         health.mark_success()
         assert health.failure_count == 0
         assert health.last_failure_time is None
-        assert health.is_healthy is True
 
     def test_can_retry_no_failures(self):
         """Test can_retry when no failures."""

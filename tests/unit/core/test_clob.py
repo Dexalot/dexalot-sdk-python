@@ -57,8 +57,8 @@ class TestCLOBClient:
             )
             # Mock _get_nonce for nonce manager
             client._get_nonce = AsyncMock(return_value=10)
-            client.w3_l1.to_hex.side_effect = (
-                lambda x: f"0x{x.hex() if isinstance(x, bytes) else x}"
+            client.w3_l1.to_hex.side_effect = lambda x: (
+                f"0x{x.hex() if isinstance(x, bytes) else x}"
             )
             client.w3_l1.to_checksum_address = lambda x: x
 
@@ -2224,9 +2224,10 @@ class TestCLOBClient:
                 self.val = val
 
             def __await__(self):
-                if False:
-                    yield
-                return self.val
+                async def _return_value():
+                    return self.val
+
+                return _return_value().__await__()
 
         client.w3_l1.eth.chain_id = AsyncMock(return_value=43114)
         client.w3_l1.eth.get_transaction_count = AsyncMock(return_value=1)
@@ -2235,8 +2236,8 @@ class TestCLOBClient:
         client.w3_l1.eth.wait_for_transaction_receipt = AsyncMock(return_value=MagicMock(status=1))
         client._get_nonce = AsyncMock(return_value=1)
         # to_hex converts bytes to hex string
-        client.w3_l1.to_hex.side_effect = (
-            lambda x: f"0x{x.hex()}" if isinstance(x, bytes) else f"0x{hex(x)}"
+        client.w3_l1.to_hex.side_effect = lambda x: (
+            f"0x{x.hex()}" if isinstance(x, bytes) else f"0x{hex(x)}"
         )
         client.w3_l1.eth.account.sign_transaction.return_value.raw_transaction = b"raw_tx"
 
@@ -2274,9 +2275,10 @@ class TestCLOBClient:
                 self.val = val
 
             def __await__(self):
-                if False:
-                    yield
-                return self.val
+                async def _return_value():
+                    return self.val
+
+                return _return_value().__await__()
 
         client.w3_l1.eth.chain_id = AsyncMock(return_value=43114)
         client.w3_l1.eth.get_transaction_count = AsyncMock(return_value=1)
@@ -2285,8 +2287,8 @@ class TestCLOBClient:
         client.w3_l1.eth.wait_for_transaction_receipt = AsyncMock(return_value=MagicMock(status=0))
         client._get_nonce = AsyncMock(return_value=1)  # Reverted
         # to_hex converts bytes to hex string
-        client.w3_l1.to_hex.side_effect = (
-            lambda x: f"0x{x.hex()}" if isinstance(x, bytes) else f"0x{hex(x)}"
+        client.w3_l1.to_hex.side_effect = lambda x: (
+            f"0x{x.hex()}" if isinstance(x, bytes) else f"0x{hex(x)}"
         )
         client.w3_l1.eth.account.sign_transaction.return_value.raw_transaction = b"raw_tx"
 
@@ -2684,7 +2686,9 @@ class TestCLOBClient:
         # Return a plain dict receipt (exercises receipt.get("status", 1) branch)
         client._send_trade_tx = AsyncMock(return_value=("0xTxHash", {"status": 0}))
 
-        res = await client.cancel_order("0x0000000000000000000000000000000000000000000000000000000000000001")
+        res = await client.cancel_order(
+            "0x0000000000000000000000000000000000000000000000000000000000000001"
+        )
         assert not res.success
         assert "Transaction reverted" in res.error
 
@@ -2796,11 +2800,14 @@ class TestWebSocketManager:
 
     def test_connect_creates_background_task(self, manager):
         """connect() creates an asyncio Task for the background run loop."""
+
         def _consume_coro(coro):
             coro.close()
             return MagicMock()
 
-        with patch.object(manager._loop, "create_task", side_effect=_consume_coro) as mock_create_task:
+        with patch.object(
+            manager._loop, "create_task", side_effect=_consume_coro
+        ) as mock_create_task:
             manager.connect()
             mock_create_task.assert_called_once()
             assert manager.state == ConnectionState.CONNECTING
@@ -2873,7 +2880,9 @@ class TestWebSocketManager:
             coro.close()
             return MagicMock()
 
-        with patch.object(manager._loop, "create_task", side_effect=_consume_coro) as mock_create_task:
+        with patch.object(
+            manager._loop, "create_task", side_effect=_consume_coro
+        ) as mock_create_task:
             manager.subscribe("Topic", lambda _m: None)
             mock_create_task.assert_called_once()
 
@@ -2908,7 +2917,9 @@ class TestWebSocketManager:
             coro.close()
             return MagicMock()
 
-        with patch.object(manager._loop, "create_task", side_effect=_consume_coro) as mock_create_task:
+        with patch.object(
+            manager._loop, "create_task", side_effect=_consume_coro
+        ) as mock_create_task:
             manager.unsubscribe("Topic")
             mock_create_task.assert_called_once()
 
@@ -2919,6 +2930,7 @@ class TestWebSocketManager:
     @pytest.mark.asyncio
     async def test_disconnect_cleans_up(self, manager):
         """disconnect() sets DISCONNECTED state and clears subscriptions."""
+
         # Patch create_task so connect() doesn't actually schedule _run on the test loop.
         def _consume_coro(coro):
             coro.close()
@@ -3076,9 +3088,7 @@ class TestWebSocketManager:
         assert "timestamp" in payload
 
     @pytest.mark.asyncio
-    async def test_send_subscribe_private_topic_applies_time_offset(
-        self, manager, mock_account
-    ):
+    async def test_send_subscribe_private_topic_applies_time_offset(self, manager, mock_account):
         """_send_subscribe applies ws_time_offset_ms to the timestamp."""
         manager.account = mock_account
         manager.config.ws_time_offset_ms = 5000

@@ -932,8 +932,12 @@ class TransferClient(DexalotBaseClient):
 
     @track_method("transfer")
     async def deposit(
-        self, token: str, amount: float, source_chain: str,
-        use_layerzero: bool = False, wait_for_receipt: bool = True
+        self,
+        token: str,
+        amount: float,
+        source_chain: str,
+        use_layerzero: bool = False,
+        wait_for_receipt: bool = True,
     ) -> Result[str]:
         """Deposit a token from a mainnet chain into the Dexalot portfolio.
 
@@ -1017,8 +1021,12 @@ class TransferClient(DexalotBaseClient):
 
     @track_method("transfer")
     async def withdraw(
-        self, token: str, amount: float, destination_chain: str,
-        use_layerzero: bool = False, wait_for_receipt: bool = True
+        self,
+        token: str,
+        amount: float,
+        destination_chain: str,
+        use_layerzero: bool = False,
+        wait_for_receipt: bool = True,
     ) -> Result[str]:
         """Withdraw a token from the Dexalot portfolio to a mainnet chain wallet.
 
@@ -1110,7 +1118,9 @@ class TransferClient(DexalotBaseClient):
             return Result.fail(error_msg)
 
     @track_method("transfer")
-    async def get_deposit_bridge_fee(self, token: str, amount: float, source_chain: str) -> Result[float]:
+    async def get_deposit_bridge_fee(
+        self, token: str, amount: float, source_chain: str
+    ) -> Result[float]:
         """Estimate the bridge fee for a deposit transaction.
 
         Queries the ``PortfolioMain`` contract's ``getBridgeFee`` function.
@@ -1198,9 +1208,7 @@ class TransferClient(DexalotBaseClient):
 
             tx_hash = await self._build_and_send_tx(
                 w3,
-                contract.functions.transferToken(
-                    from_addr, to_address, symbol_bytes32, amount_wei
-                ),
+                contract.functions.transferToken(from_addr, to_address, symbol_bytes32, amount_wei),
             )
             return Result.ok(f"Transfer Token transaction sent: {tx_hash}")
         except Exception as e:
@@ -1352,9 +1360,7 @@ class TransferClient(DexalotBaseClient):
             },
         ]
         token_contract = w3.eth.contract(address=token_address, abi=erc20_abi)
-        allowance = await token_contract.functions.allowance(
-            owner_addr, spender_address
-        ).call()
+        allowance = await token_contract.functions.allowance(owner_addr, spender_address).call()
 
         if allowance < amount_wei:
             await self._build_and_send_tx(

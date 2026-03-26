@@ -202,7 +202,12 @@ class SwapClient(DexalotBaseClient):
         return transformed
 
     async def _get_swap_quote_base(
-        self, from_token: str, to_token: str, amount: float, chain_id: int | None = 43114, firm: bool = False
+        self,
+        from_token: str,
+        to_token: str,
+        amount: float,
+        chain_id: int | None = 43114,
+        firm: bool = False,
     ) -> Result[dict]:
         """Internal helper to request a quote from the RFQ API.
 

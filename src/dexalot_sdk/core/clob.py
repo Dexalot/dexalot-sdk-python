@@ -26,6 +26,7 @@ from .base import _ORDERBOOK_CACHE, _SEMI_STATIC_CACHE, DexalotBaseClient
 
 class CLOBClient(DexalotBaseClient):
     _ws_manager: WebSocketManager | None
+
     async def _get_w3_l1(self):
         """
         Get w3_l1 provider, using provider manager if enabled.
@@ -225,8 +226,12 @@ class CLOBClient(DexalotBaseClient):
                     continue
                 bids.append(
                     {
-                        "price": Utils.unit_conversion(p, pair_data["quote_decimals"], to_base=False),
-                        "quantity": Utils.unit_conversion(q, pair_data["base_decimals"], to_base=False),
+                        "price": Utils.unit_conversion(
+                            p, pair_data["quote_decimals"], to_base=False
+                        ),
+                        "quantity": Utils.unit_conversion(
+                            q, pair_data["base_decimals"], to_base=False
+                        ),
                     }
                 )
 
@@ -236,8 +241,12 @@ class CLOBClient(DexalotBaseClient):
                     continue
                 asks.append(
                     {
-                        "price": Utils.unit_conversion(p, pair_data["quote_decimals"], to_base=False),
-                        "quantity": Utils.unit_conversion(q, pair_data["base_decimals"], to_base=False),
+                        "price": Utils.unit_conversion(
+                            p, pair_data["quote_decimals"], to_base=False
+                        ),
+                        "quantity": Utils.unit_conversion(
+                            q, pair_data["base_decimals"], to_base=False
+                        ),
                     }
                 )
 
@@ -248,8 +257,13 @@ class CLOBClient(DexalotBaseClient):
 
     @track_method("clob")
     async def add_order(
-        self, pair: str, side: str, amount: float, price,
-        order_type: str = "LIMIT", wait_for_receipt: bool = True
+        self,
+        pair: str,
+        side: str,
+        amount: float,
+        price,
+        order_type: str = "LIMIT",
+        wait_for_receipt: bool = True,
     ) -> Result[dict]:
         """Place a single limit or market order on the CLOB.
 
@@ -371,7 +385,9 @@ class CLOBClient(DexalotBaseClient):
             return Result.fail(error_msg)
 
     @track_method("clob")
-    async def cancel_order(self, order_id: str | bytes, wait_for_receipt: bool = True) -> Result[str]:
+    async def cancel_order(
+        self, order_id: str | bytes, wait_for_receipt: bool = True
+    ) -> Result[str]:
         """Cancel a single open order by its Internal ID or Client Order ID.
 
         Automatically detects whether ``order_id`` is an internal order ID
@@ -717,9 +733,7 @@ class CLOBClient(DexalotBaseClient):
                     w3_l1 = await self._get_w3_l1()
                     if not w3_l1:
                         return Result.fail("L1 provider not available.")
-                    trader = w3_l1.to_checksum_address(
-                        cast(str, cast(Any, self.account).address)
-                    )
+                    trader = w3_l1.to_checksum_address(cast(str, cast(Any, self.account).address))
                     order_data = await contract.functions.getOrderByClientId(
                         trader, order_id_bytes
                     ).call()
@@ -997,7 +1011,9 @@ class CLOBClient(DexalotBaseClient):
         return order_tuples, client_order_ids, required_balances, None
 
     @track_method("clob")
-    async def add_limit_order_list(self, orders: list[dict], wait_for_receipt: bool = True) -> Result[dict]:
+    async def add_limit_order_list(
+        self, orders: list[dict], wait_for_receipt: bool = True
+    ) -> Result[dict]:
         """Place multiple limit orders in a single on-chain transaction.
 
         Checks aggregated portfolio balances across all orders before submitting.
@@ -1064,7 +1080,9 @@ class CLOBClient(DexalotBaseClient):
             return Result.fail(error_msg)
 
     @track_method("clob")
-    async def cancel_list_orders(self, order_ids: list, wait_for_receipt: bool = True) -> Result[str]:
+    async def cancel_list_orders(
+        self, order_ids: list, wait_for_receipt: bool = True
+    ) -> Result[str]:
         """Cancel multiple orders by Internal ID in a single on-chain transaction.
 
         Args:
@@ -1121,8 +1139,11 @@ class CLOBClient(DexalotBaseClient):
 
     @track_method("clob")
     async def replace_order(
-        self, order_id: str | bytes, new_price: float, new_amount: float,
-        wait_for_receipt: bool = True
+        self,
+        order_id: str | bytes,
+        new_price: float,
+        new_amount: float,
+        wait_for_receipt: bool = True,
     ) -> Result[str]:
         """Cancel an existing order and replace it atomically with new price and quantity.
 
