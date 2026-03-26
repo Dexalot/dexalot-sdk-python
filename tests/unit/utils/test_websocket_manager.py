@@ -36,7 +36,7 @@ def make_manager(**config_overrides):
 
 @pytest.mark.asyncio
 async def test_run_connect_and_text_message():
-    """Lines 184-205: _run connects, routes a text JSON message to a callback."""
+    """Method _run connects, routes a text JSON message to a callback."""
     mgr = make_manager()
 
     received = []
@@ -88,7 +88,7 @@ async def test_run_connect_and_text_message():
 
 @pytest.mark.asyncio
 async def test_run_bytes_message():
-    """Lines 203-205: bytes messages are decoded to str then handled."""
+    """Bytes messages are decoded to str then handled."""
     mgr = make_manager()
 
     received = []
@@ -137,7 +137,7 @@ async def test_run_bytes_message():
 
 @pytest.mark.asyncio
 async def test_run_cancelled_error():
-    """Lines 207-216: CancelledError inside connect sets state DISCONNECTED and breaks."""
+    """Method cancelledError inside connect sets state DISCONNECTED and breaks."""
     mgr = make_manager()
 
     class _FakeConnect:
@@ -165,7 +165,7 @@ async def test_run_cancelled_error():
 
 @pytest.mark.asyncio
 async def test_run_exception_triggers_reconnect():
-    """Lines 209-219: non-cancel exception sets RECONNECTING, calls _backoff."""
+    """Non-cancel exception sets RECONNECTING, calls _backoff."""
     mgr = make_manager()
 
     call_count = 0
@@ -198,7 +198,7 @@ async def test_run_exception_triggers_reconnect():
 
 @pytest.mark.asyncio
 async def test_run_max_reconnect_reached():
-    """Lines 218-219: _backoff returning False stops the loop."""
+    """Method _backoff returning False stops the loop."""
     mgr = make_manager(ws_reconnect_max_attempts=1)
 
     class _FakeConnect:
@@ -221,13 +221,13 @@ async def test_run_max_reconnect_reached():
 
 
 # ---------------------------------------------------------------------------
-# _send_subscribe — ws is None guard (line 252)
+# _send_subscribe — ws is None guard
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.asyncio
 async def test_send_subscribe_ws_none():
-    """Line 252: _send_subscribe with _ws=None returns immediately without error."""
+    """Method _send_subscribe with _ws=None returns immediately without error."""
     mgr = make_manager()
     mgr._ws = None
     mgr._subscriptions["topic1"] = (MagicMock(), False, None)
@@ -236,13 +236,13 @@ async def test_send_subscribe_ws_none():
 
 
 # ---------------------------------------------------------------------------
-# _send_subscribe — spec not found guard (line 255)
+# _send_subscribe — spec not found guard
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.asyncio
 async def test_send_subscribe_spec_not_found():
-    """Line 255: _send_subscribe for unknown key returns immediately without error."""
+    """Method _send_subscribe for unknown key returns immediately without error."""
     mgr = make_manager()
     mgr._ws = AsyncMock()
     # No entry in _subscriptions for this key
@@ -251,13 +251,13 @@ async def test_send_subscribe_spec_not_found():
 
 
 # ---------------------------------------------------------------------------
-# _send_subscribe — ConnectionClosed is swallowed (line 268)
+# _send_subscribe — ConnectionClosed is swallowed
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.asyncio
 async def test_send_subscribe_connection_closed():
-    """Line 268: ConnectionClosed during send is silently swallowed."""
+    """ConnectionClosed during send is silently swallowed."""
     mgr = make_manager()
     mock_ws = AsyncMock()
     mock_ws.send = AsyncMock(
@@ -271,13 +271,13 @@ async def test_send_subscribe_connection_closed():
 
 
 # ---------------------------------------------------------------------------
-# _send_subscribe — generic exception logged (line 277)
+# _send_subscribe — generic exception logged
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.asyncio
 async def test_send_subscribe_generic_exception():
-    """Line 277: generic exception during send is logged, not raised."""
+    """Generic exception during send is logged, not raised."""
     mgr = make_manager()
     mock_ws = AsyncMock()
     mock_ws.send = AsyncMock(side_effect=OSError("network error"))
@@ -292,13 +292,13 @@ async def test_send_subscribe_generic_exception():
 
 
 # ---------------------------------------------------------------------------
-# _send_unsubscribe — orderbook payload (lines 295-298)
+# _send_unsubscribe — orderbook payload
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.asyncio
 async def test_send_unsubscribe_orderbook_payload():
-    """Lines 295-298: orderbook unsubscribe sends correct payload with pair/decimal."""
+    """Orderbook unsubscribe sends correct payload with pair/decimal."""
     mgr = make_manager()
     mock_ws = AsyncMock()
     mgr._ws = mock_ws
@@ -317,13 +317,13 @@ async def test_send_unsubscribe_orderbook_payload():
 
 
 # ---------------------------------------------------------------------------
-# _send_unsubscribe — ConnectionClosed swallowed (lines 317-318)
+# _send_unsubscribe — ConnectionClosed swallowed
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.asyncio
 async def test_send_unsubscribe_connection_closed():
-    """Lines 317-318: ConnectionClosed during unsubscribe send is silently swallowed."""
+    """ConnectionClosed during unsubscribe send is silently swallowed."""
     mgr = make_manager()
     mock_ws = AsyncMock()
     mock_ws.send = AsyncMock(
@@ -337,13 +337,13 @@ async def test_send_unsubscribe_connection_closed():
 
 
 # ---------------------------------------------------------------------------
-# _send_unsubscribe — ws is None guard (line 277)
+# _send_unsubscribe — ws is None guard
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.asyncio
 async def test_send_unsubscribe_ws_none():
-    """Line 277: _send_unsubscribe with _ws=None returns immediately without error."""
+    """Method _send_unsubscribe with _ws=None returns immediately without error."""
     mgr = make_manager()
     mgr._ws = None
     spec = (MagicMock(), False, None)
@@ -351,13 +351,13 @@ async def test_send_unsubscribe_ws_none():
 
 
 # ---------------------------------------------------------------------------
-# _send_unsubscribe — generic exception logged (lines 297-298)
+# _send_unsubscribe — generic exception logged
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.asyncio
 async def test_send_unsubscribe_generic_exception():
-    """Lines 297-298: generic exception during unsubscribe send is logged, not raised."""
+    """Generic exception during unsubscribe send is logged, not raised."""
     mgr = make_manager()
     mock_ws = AsyncMock()
     mock_ws.send = AsyncMock(side_effect=OSError("net error"))
@@ -372,13 +372,13 @@ async def test_send_unsubscribe_generic_exception():
 
 
 # ---------------------------------------------------------------------------
-# _handle_message — outer exception handler (lines 340-341)
+# _handle_message — outer exception handler
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.asyncio
 async def test_handle_message_outer_exception():
-    """Lines 340-341: unexpected exception inside message handling is logged, not raised."""
+    """Unexpected exception inside message handling is logged, not raised."""
     mgr = make_manager()
 
     # After JSON parse, make data.get raise to fall into the outer except.
@@ -395,13 +395,13 @@ async def test_handle_message_outer_exception():
 
 
 # ---------------------------------------------------------------------------
-# _handle_message — orderbook callback error (lines 335-336)
+# _handle_message — orderbook callback error
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.asyncio
 async def test_handle_message_orderbook_callback_error():
-    """Lines 335-336: exception inside orderbook callback is logged, not propagated."""
+    """Exception inside orderbook callback is logged, not propagated."""
     mgr = make_manager()
 
     def bad_callback(data):
@@ -423,13 +423,13 @@ async def test_handle_message_orderbook_callback_error():
 
 
 # ---------------------------------------------------------------------------
-# _handle_message — broadcast callback error (lines 340-341)
+# _handle_message — broadcast callback error
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.asyncio
 async def test_handle_message_broadcast_callback_error():
-    """Lines 340-341: exception inside broadcast callback (no topic) is logged, not propagated."""
+    """Exception inside broadcast callback (no topic) is logged, not propagated."""
     mgr = make_manager()
 
     def bad_callback(data):
@@ -445,3 +445,71 @@ async def test_handle_message_broadcast_callback_error():
 
     mock_log.assert_called_once()
     assert "broadcast boom" in mock_log.call_args[0][0] or mock_log.called
+
+
+# ---------------------------------------------------------------------------
+# _handle_message — topic callback success path
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_handle_message_topic_callback_success():
+    """Matching topic callback is invoked with the message data."""
+    mgr = make_manager()
+
+    received = []
+    mgr._subscriptions["ordersUpdate"] = (lambda d: received.append(d), False, None)
+
+    raw = json.dumps({"topic": "ordersUpdate", "data": "ok"})
+    mgr._handle_message(raw)
+    await asyncio.sleep(0)  # yield to event loop; keeps function async
+
+    assert received == [{"topic": "ordersUpdate", "data": "ok"}]
+
+
+# ---------------------------------------------------------------------------
+# _handle_message — broadcast skips orderbook subscriptions
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_handle_message_broadcast_skips_orderbook():
+    """Orderbook subscriptions are skipped in the no-topic broadcast path."""
+    mgr = make_manager()
+
+    orderbook_calls = []
+    regular_calls = []
+
+    mgr._subscriptions["OrderBook/ETH/USDC"] = (
+        lambda d: orderbook_calls.append(d),
+        False,
+        {"kind": "orderbook", "pair": "ETH/USDC", "decimal": 8},
+    )
+    mgr._subscriptions["generalFeed"] = (lambda d: regular_calls.append(d), False, None)
+
+    # No "topic" field → broadcast path
+    raw = json.dumps({"event": "heartbeat"})
+    mgr._handle_message(raw)
+    await asyncio.sleep(0)  # yield to event loop; keeps function async
+
+    assert orderbook_calls == []
+    assert regular_calls == [{"event": "heartbeat"}]
+
+
+# ---------------------------------------------------------------------------
+# _handle_message — non-dict JSON is silently ignored
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_handle_message_non_dict_ignored():
+    """Non-dict JSON (e.g. a list) is silently discarded without calling callbacks."""
+    mgr = make_manager()
+
+    callback = MagicMock()
+    mgr._subscriptions["ordersUpdate"] = (callback, False, None)
+
+    mgr._handle_message("[1, 2, 3]")
+    await asyncio.sleep(0)
+
+    callback.assert_not_called()
