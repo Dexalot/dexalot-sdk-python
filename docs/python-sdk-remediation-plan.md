@@ -783,7 +783,7 @@ correctness, and external elapsed-time measurement. All 631 unit tests pass.
 
 ### D-1: Unpinned runtime dependencies
 
-**Status:** Open
+**Status:** ✅ Resolved
 
 **Finding:**
 `aiohttp`, `python-dotenv`, `eth-account`, and `websocket-client` have no upper-bound version
@@ -810,6 +810,10 @@ pins. A major-version bump in any of them can silently break the SDK.
 **Acceptance criteria:**
 - `pyproject.toml` has upper-bound pins for all runtime dependencies.
 - A lock file exists for reproducible installs in CI.
+
+**Resolution:** Added upper-bound pins to all four unbound runtime dependencies in `pyproject.toml`
+(`web3<8`, `aiohttp<4`, `python-dotenv<2`, `eth-account<1`). `websockets` already had `<15`.
+`uv.lock` was already present. All 631 unit tests pass; lint and mypy clean.
 
 ---
 

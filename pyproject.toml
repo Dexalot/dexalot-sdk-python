@@ -9,10 +9,10 @@ description = "Dexalot Python SDK - Core library for Dexalot interaction"
 readme = "README.md"
 requires-python = ">=3.12,<3.14"
 dependencies = [
-    "web3>=6.0.0",
-    "aiohttp",
-    "python-dotenv",
-    "eth-account",
+    "web3>=6.0.0,<8",
+    "aiohttp>=3.9,<4",
+    "python-dotenv>=1.0,<2",
+    "eth-account>=0.11,<1",
     "websockets>=13.0,<15",
 ]
 
