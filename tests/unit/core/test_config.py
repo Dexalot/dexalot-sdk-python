@@ -327,3 +327,21 @@ class TestDexalotConfig:
             with patch("dexalot_sdk.core.config.load_dotenv"):
                 cfg = DexalotConfig.from_env()
                 assert cfg.allow_insecure_rpc is False
+
+    def test_from_env_dotenv_file_found_and_loaded(self):
+        """When a .env file is found, load_dotenv is called with that path and break is taken."""
+        with patch.dict(os.environ, {}, clear=True):
+            # Return True only for the first os.path.exists call (the project-root .env check).
+            call_count = {"n": 0}
+
+            def exists_first_only(path: str) -> bool:
+                call_count["n"] += 1
+                return call_count["n"] == 1
+
+            with patch("dexalot_sdk.core.config.os.path.exists", side_effect=exists_first_only):
+                with patch("dexalot_sdk.core.config.load_dotenv") as mock_load:
+                    DexalotConfig.from_env()
+                    call_kwargs = mock_load.call_args
+                    assert call_kwargs is not None
+                    assert call_kwargs.kwargs.get("override") is False
+                    assert "dotenv_path" in call_kwargs.kwargs
