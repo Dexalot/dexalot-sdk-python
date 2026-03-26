@@ -377,7 +377,7 @@ The cache has a maximum size of 256 entries per level. If you're concerned about
 
 - **Cache Implementation**: In-memory TTL-based cache using `MemoryCache` class
 - **Cache Scope**: Module-level (shared across all client instances)
-- **Thread Safety**: Not thread-safe (use separate clients per thread/process)
+- **Thread Safety**: Not thread-safe across OS threads. Safe for concurrent asyncio tasks — `async_ttl_cached` coalesces concurrent callers for the same key via `asyncio.Future` (stampede protection).
 - **Persistence**: Cache is lost when the process terminates
 - **Maximum Size**: 256 entries per cache level (FIFO eviction)
 

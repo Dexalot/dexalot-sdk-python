@@ -29,7 +29,7 @@
 - **`utils/result.py`**: Standardized `Result[T]` type for consistent error handling
 - **`utils/retry.py`**: Async retry decorator with exponential backoff
 - **`utils/rate_limit.py`**: Token bucket rate limiter for API and RPC calls
-- **`utils/nonce_manager.py`**: Thread-safe nonce management to prevent transaction race conditions
+- **`utils/nonce_manager.py`**: Async-safe nonce management to prevent transaction race conditions
 - **`utils/provider_manager.py`**: RPC provider failover with health tracking
 - **`utils/error_sanitizer.py`**: Error message sanitization to prevent information leakage
 - **`utils/websocket_manager.py`**: Persistent WebSocket connection manager with reconnection and heartbeat
@@ -158,7 +158,7 @@ See `examples/error_handling.py` for comprehensive error handling patterns.
 - `aiohttp`: Async HTTP client for Dexalot API communication
 - `python-dotenv`: Environment variable management
 - `eth-account`: Ethereum account management and transaction signing
-- `websocket-client`: WebSocket client for real-time event subscriptions
+- `websockets`: Async WebSocket client for real-time event subscriptions
 
 ## Scripts
 
@@ -193,18 +193,24 @@ The SDK includes a built-in 4-level caching system to optimize performance by re
 ### Basic Usage
 
 ```python
+import asyncio
 from dexalot_sdk import DexalotClient
 from pprint import pprint
 
-# Caching is enabled by default
-client = DexalotClient()
-client.initialize_client()
+async def main():
+    async with DexalotClient() as client:
+        await client.initialize_client()
 
-# First call fetches from API
-tokens = pprint(client.get_all_portfolio_balances())
-# {'ALOT': {'available': 95.5, 'locked': 4.5, 'total': 100.0}, 'AVAX': ...}
-# Second call within 10 seconds returns cached result
-tokens = client.get_all_portfolio_balances()  # Cached!
+        # First call fetches from API
+        result = await client.get_all_portfolio_balances()
+        if result.success:
+            pprint(result.data)
+            # {'ALOT': {'available': 95.5, 'locked': 4.5, 'total': 100.0}, 'AVAX': ...}
+
+        # Second call within 10 seconds returns cached result
+        result = await client.get_all_portfolio_balances()  # Cached!
+
+asyncio.run(main())
 ```
 
 ### Configuration
@@ -336,6 +342,7 @@ The SDK uses a centralized configuration system (`DexalotConfig`) that supports 
 | `ws_reconnect_max_delay` | `float` | `60.0` | Maximum reconnect delay in seconds |
 | `ws_reconnect_exponential_base` | `float` | `2.0` | Exponential backoff multiplier |
 | `ws_reconnect_max_attempts` | `int` | `10` | Maximum reconnection attempts (0 = infinite) |
+| `ws_time_offset_ms` | `int` | `0` | Clock skew compensation added to timestamps in WebSocket auth messages |
 
 ### Precedence
 
@@ -385,7 +392,7 @@ The SDK includes automatic RPC provider failover to improve reliability when a s
 - **Fail-Fast Strategy**: Automatically switches to the next provider when the current one fails
 - **Health Tracking**: Tracks provider health (failure counts, last failure time)
 - **Automatic Recovery**: Failed providers are retried after a cooldown period
-- **Thread-Safe**: Concurrent operations are handled safely with async locks
+- **Async-Safe**: Concurrent operations are handled safely with asyncio locks; lock-free fast path when the primary provider is healthy
 
 ### Configuration
 

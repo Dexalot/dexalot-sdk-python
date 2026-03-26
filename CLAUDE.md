@@ -27,11 +27,11 @@ All SDK methods return `Result(success, data, error)` and never raise. Callers m
 
 ### Config loading and validation
 
-Precedence: constructor kwargs → env vars → `.env` file → defaults. `PARENTENV` selects environment: `fuji-multi` (testnet, default) or `production-multi` (mainnet). **`config.validate()` is not called automatically** — call it explicitly after construction or invalid configs won't surface until the first method call.
+Precedence: constructor kwargs → env vars → `.env` file → defaults. `PARENTENV` selects environment: `fuji-multi` (testnet, default) or `production-multi` (mainnet). **`config.validate()` is called automatically** in `DexalotBaseClient.__init__` — invalid configs raise immediately on construction.
 
-### WebSocket uses threading, not asyncio
+### WebSocket uses asyncio, not threading
 
-`websocket-client` doesn't support async; threading avoids event loop blocking. WebSocket is opt-in (`ws_manager_enabled=False` by default). WebSocket callbacks cannot be directly `await`-ed in async code — bridges are required.
+`WebSocketManager` uses the `websockets` async library; all I/O runs on the asyncio event loop. No threading is used. `connect()` and `subscribe()`/`unsubscribe()` are synchronous entry points that schedule work on the running loop via `loop.create_task()`. `disconnect()` is `async def` and can be awaited. WebSocket is opt-in (`ws_manager_enabled=False` by default). Callbacks run on the event loop and can `await` normally.
 
 ### Rate limiters are per-instance
 
@@ -77,11 +77,17 @@ Unit tests in `tests/unit/` have no external dependencies. Integration tests in 
 
 - **Private key handling**: After `Account` creation, `config.private_key` is zeroed out. Prefer passing a pre-built signer object so the raw key never touches the config at all.
 - **Cache key generation**: Uses `(func_name, api_base_url, args[1:], frozenset(kwargs.items()))` — `self` is excluded; keys are namespaced by `api_base_url`. Kwarg ordering affects cache hits; deep objects may produce false misses.
-- **Config validation timing**: `config.validate()` must be called explicitly after construction; see above.
+- **Config validation timing**: `config.validate()` is called automatically inside `DexalotBaseClient.__init__`. Invalid configs raise at construction time.
 - **Error sanitization is lossy**: Regex stripping makes production debugging harder. Use DEBUG logging in development.
 - **Python 3.12+ is required**: CI must enforce this. Match statements and PEP 695 generics are used throughout.
 - **Cache key for multi-env**: Cache keys are namespaced by `api_base_url`, so simultaneous testnet/mainnet clients do not share cached data. Test suites that use module-level caches must clear them between tests (e.g. `_SEMI_STATIC_CACHE.clear()`) since the key is env-based, not instance-based.
 - **`timestamped_auth` flag**: `_get_auth_headers` supports timestamped signing (`f"dexalot{ts}"` + `x-timestamp` header) via `config.timestamped_auth = True` (env: `DEXALOT_TIMESTAMPED_AUTH=true`). Defaults to `False` — the backend currently only accepts the static `"dexalot"` message. Enable only after backend confirms timestamp window validation. See remediation plan C-2.
+- **Cache stampede protection**: `async_ttl_cached` coalesces concurrent callers for the same uncached key using `asyncio.Future`. Only the first caller fetches; the rest await the same future. Prevents thundering herd on cache misses.
+- **Cache cleanup is amortized**: `MemoryCache._cleanup()` runs every 50 writes (`_CLEANUP_INTERVAL`), not on every `set`. Size enforcement (`_trim()`) runs on every write. Separate concerns.
+- **Rate limiter concurrent sleeps**: `AsyncRateLimiter` acquires the lock only to reserve the slot, then releases before sleeping. Multiple waiters sleep independently — no serialization of the wait itself.
+- **Nonce manager lock is now lock-free on lookup**: The global `_dict_lock` was removed. `_get_lock()` uses `dict.setdefault()`, which is safe in asyncio's single-threaded model. Per-(chain_id, address) `asyncio.Lock` objects are still used for sequential nonce acquisition.
+- **ERC20 balance concurrency**: `_fetch_erc20_balances_list` uses `asyncio.Semaphore(config.erc20_balance_concurrency)` (default 10) to cap simultaneous `balanceOf` RPC calls. Prevents RPC overload during bulk balance fetches.
+- **RPC security enforcement**: `_reject_insecure_rpc_urls()` in `base.py` rejects plain `http://` RPC endpoints at provider setup time unless `config.allow_insecure_rpc=True`. Fail-fast before any traffic is sent over plaintext.
 
 ---
 
