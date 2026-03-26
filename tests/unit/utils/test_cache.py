@@ -274,6 +274,43 @@ async def test_async_ttl_cached_stampede_exception_propagates():
 
 
 @pytest.mark.asyncio
+async def test_async_ttl_cached_double_check_hit():
+    """Line 121: double-check cache hit inside _pending_lock.
+
+    Patch cache.get so the outer check returns None (cache miss) but the
+    second call inside the lock returns a pre-populated value, exercising the
+    early-return at line 121 without any timing-sensitive concurrency.
+    """
+    cache = MemoryCache(ttl_seconds=60)
+    call_count = 0
+
+    @async_ttl_cached(cache)
+    async def compute(x):
+        nonlocal call_count
+        call_count += 1
+        return x * 7
+
+    get_call_count = 0
+
+    def patched_get(key):
+        nonlocal get_call_count
+        get_call_count += 1
+        if get_call_count == 1:
+            # Outer check: simulate a miss
+            return None
+        # Double-check inside the lock: return a pre-populated value
+        return 42
+
+    cache.get = patched_get
+
+    result = await compute(5)
+
+    # The double-check hit short-circuited, so the underlying function was never called
+    assert call_count == 0
+    assert result == 42
+
+
+@pytest.mark.asyncio
 async def test_async_ttl_cached_disabled_cache():
     """Test async_ttl_cached when cache is disabled."""
 
