@@ -117,10 +117,6 @@ class SwapClient(DexalotBaseClient):
                 transformed["secure_quote"] = self._transform_secure_quote_from_api(
                     quote["secureQuote"]
                 )
-            elif "secure_quote" in quote:
-                transformed["secure_quote"] = self._transform_secure_quote_from_api(
-                    quote["secure_quote"]
-                )
         else:
             # Already exists, but ensure nested fields are transformed
             transformed["secure_quote"] = self._transform_secure_quote_from_api(

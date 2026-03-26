@@ -1038,3 +1038,113 @@ class TestSwapClient:
         result = await client.get_swap_pairs(43114)
         assert not result.success
         assert "No swap pairs found" in result.error
+
+    # ------------------------------------------------------------------
+    # secure_quote snake_case transform, nonceAndMeta, execute_swap edge paths
+    # ------------------------------------------------------------------
+
+    def test_transform_order_data_nonce_and_meta_camelcase(self, client):
+        """_transform_order_data_from_api maps nonceAndMeta to nonce_and_meta."""
+        order_data = {"nonceAndMeta": 99, "makerAsset": "A"}
+        result = client._transform_order_data_from_api(order_data)
+        assert result["nonce_and_meta"] == 99
+
+    def test_transform_order_data_empty_returns_early(self, client):
+        """_transform_order_data_from_api returns the input unchanged when falsy."""
+        assert client._transform_order_data_from_api({}) == {}
+        assert client._transform_order_data_from_api(None) is None
+
+    async def test_execute_rfq_swap_failed_result_input(self, client):
+        """execute_rfq_swap returns fail immediately when given a failed Result as quote."""
+        from dexalot_sdk.utils.result import Result
+
+        failed_quote = Result.fail("quote fetch failed")
+        res = await client.execute_rfq_swap(failed_quote)
+        assert not res.success
+        assert "quote fetch failed" in res.error
+
+    async def test_execute_rfq_swap_result_ok_none_data(self, client):
+        """execute_rfq_swap returns fail when given Result.ok(None) as quote."""
+        from dexalot_sdk.utils.result import Result
+
+        res = await client.execute_rfq_swap(Result.ok(None))
+        assert not res.success
+        assert "empty data" in res.error
+
+    async def test_execute_rfq_swap_tx_reverted(self, client):
+        """execute_rfq_swap returns fail when the swap transaction receipt has status=0."""
+        quote = {
+            "success": True,
+            "secure_quote": {
+                "signature": "0xabcd",
+                "data": {
+                    "makerAsset": "A", "takerAsset": "B",
+                    "maker": "M", "taker": "T",
+                    "makerAmount": 1, "takerAmount": 1,
+                    "expiry": 9999999999, "nonceAndMeta": 0,
+                },
+            },
+        }
+        mock_contract = MagicMock()
+        mock_contract.functions.simpleSwap.return_value.estimate_gas = AsyncMock(return_value=100000)
+        mock_contract.functions.simpleSwap.return_value.build_transaction = AsyncMock(
+            return_value={"from": client.account.address, "nonce": 0, "gas": 120000, "gasPrice": 100}
+        )
+        client._get_rfq_contract = AsyncMock(return_value=(client.w3_l1, mock_contract))
+        client.w3_l1.to_hex = lambda x: "0xHash"
+
+        async def mock_rpc_call(w3, method, *args):
+            if method == "eth.wait_for_transaction_receipt":
+                return {"status": 0}  # reverted
+            elif method == "eth.send_raw_transaction":
+                return b"tx_hash"
+            elif method == "eth.gas_price":
+                return 100
+            return None
+
+        client._rpc_call = AsyncMock(side_effect=mock_rpc_call)
+
+        res = await client.execute_rfq_swap(quote)
+        assert not res.success
+        assert "Transaction reverted" in res.error
+
+    async def test_execute_rfq_swap_no_wait_for_receipt(self, client):
+        """execute_rfq_swap returns 'sent' message when wait_for_receipt=False."""
+        quote = {
+            "success": True,
+            "secure_quote": {
+                "signature": "0xabcd",
+                "data": {
+                    "makerAsset": "A", "takerAsset": "B",
+                    "maker": "M", "taker": "T",
+                    "makerAmount": 1, "takerAmount": 1,
+                    "expiry": 9999999999, "nonceAndMeta": 0,
+                },
+            },
+        }
+        mock_contract = MagicMock()
+        mock_contract.functions.simpleSwap.return_value.estimate_gas = AsyncMock(return_value=100000)
+        mock_contract.functions.simpleSwap.return_value.build_transaction = AsyncMock(
+            return_value={"from": client.account.address, "nonce": 0, "gas": 120000, "gasPrice": 100}
+        )
+        client._get_rfq_contract = AsyncMock(return_value=(client.w3_l1, mock_contract))
+        client.w3_l1.to_hex = lambda x: "0xHash"
+
+        async def mock_rpc_call(w3, method, *args):
+            if method == "eth.send_raw_transaction":
+                return b"tx_hash"
+            elif method == "eth.gas_price":
+                return 100
+            return None
+
+        client._rpc_call = AsyncMock(side_effect=mock_rpc_call)
+
+        res = await client.execute_rfq_swap(quote, wait_for_receipt=False)
+        assert res.success
+        assert "Swap transaction sent" in res.data
+
+    async def test_estimate_swap_gas_no_account_raises(self, client):
+        """_estimate_swap_gas raises ValueError when account is None."""
+        client.account = None
+        with pytest.raises(ValueError, match="Account is required for gas estimation"):
+            await client._estimate_swap_gas(MagicMock(), (), b"")
