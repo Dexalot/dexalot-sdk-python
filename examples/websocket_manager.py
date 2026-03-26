@@ -28,9 +28,10 @@ async def example_basic_subscription(client: DexalotClient):
     def on_orderbook_update(message):
         """Callback for orderbook updates."""
         messages_received.append(message)
-        print(
-            f"  📊 Orderbook update received: {len(message.get('bids', []))} bids, {len(message.get('asks', []))} asks"
-        )
+        data = message.get("data", {})
+        buys = len(data.get("buyBook", []))
+        sells = len(data.get("sellBook", []))
+        print(f"  📊 Orderbook update received: {buys} bids, {sells} asks")
 
     # Subscribe to orderbook
     try:
@@ -69,7 +70,8 @@ async def example_multiple_subscriptions(client: DexalotClient):
 
     def on_orderbook(message):
         orderbook_updates.append(message)
-        print(f"  📊 Orderbook: {len(message.get('bids', []))} bids")
+        buys = len(message.get("data", {}).get("buyBook", []))
+        print(f"  📊 Orderbook: {buys} bids")
 
     def on_execution(message):
         execution_updates.append(message)
@@ -242,32 +244,34 @@ async def example_heartbeat_monitoring(base_client: DexalotClient):
         await client.close()
 
 
-async def example_one_off_connection(client: DexalotClient):
-    """Demonstrate one-off WebSocket connection (doesn't use manager)."""
+async def example_timed_subscription(client: DexalotClient):
+    """Demonstrate a timed subscribe/sleep/unsubscribe pattern."""
     print("\n" + "=" * 60)
-    print("Example 6: One-Off Connection (No Manager)")
+    print("Example 6: Timed Subscription")
     print("=" * 60)
 
-    print("\nUsing listen_to_events() for one-time subscription:")
-    print("(This doesn't use the WebSocket manager)")
+    print("\nSubscribing, listening for 10 seconds, then unsubscribing:")
 
+    client.config.ws_manager_enabled = True
     messages_received = []
 
     def on_message(message):
         messages_received.append(message)
-        print(f"  📊 Received: {len(message.get('bids', []))} bids")
+        buys = len(message.get("data", {}).get("buyBook", []))
+        print(f"  📊 Received: {buys} bids")
 
     try:
-        # One-off connection - closes after duration
+        await client.subscribe_to_events("OrderBook/AVAX/USDC", on_message, is_private=False)
+        print("✓ Subscribed to OrderBook/AVAX/USDC")
+
         print("\nListening for 10 seconds...")
-        await client.listen_to_events(
-            topic="OrderBook/AVAX/USDC", duration_seconds=10, callback=on_message
-        )
+        await asyncio.sleep(10)
 
+        client.unsubscribe_from_events("OrderBook/AVAX/USDC")
         print(f"\n✓ Received {len(messages_received)} messages")
-        print("✓ Connection closed automatically")
+        print("✓ Unsubscribed cleanly")
 
-    except Exception as e:
+    except RuntimeError as e:
         print(f"✗ Error: {e}")
 
 
@@ -322,7 +326,7 @@ async def main():
         await example_private_subscription(client)
         await example_reconnection_handling(client)
         await example_heartbeat_monitoring(client)
-        await example_one_off_connection(client)
+        await example_timed_subscription(client)
         await example_cleanup(client)
 
         print("\n" + "=" * 60)
@@ -331,7 +335,7 @@ async def main():
         print("\nKey Takeaways:")
         print("  1. Enable WebSocket manager via config.ws_manager_enabled = True")
         print("  2. Use subscribe_to_events() for persistent connections")
-        print("  3. Use listen_to_events() for one-off connections")
+        print("  3. Use subscribe/sleep/unsubscribe for timed connections")
         print("  4. Manager handles reconnection and heartbeat automatically")
         print("  5. Always cleanup with close_websocket() when done")
         print()

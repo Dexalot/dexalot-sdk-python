@@ -307,6 +307,9 @@ class WebSocketManager:
             data = json.loads(raw)
             self.logger.debug(f"WebSocket message received: {data}")
 
+            if not isinstance(data, dict):
+                return
+
             # Dexalot order book stream: type "orderBooks", pair "BASE/QUOTE"
             if data.get("type") == "orderBooks" and data.get("pair"):
                 pair = data["pair"]
@@ -319,7 +322,7 @@ class WebSocketManager:
                 return
 
             # Legacy: messages with a "topic" field
-            topic = data.get("topic") if isinstance(data, dict) else None
+            topic = data.get("topic")
             if topic:
                 if topic in self._subscriptions:
                     callback, _, _meta = self._subscriptions[topic]
@@ -328,8 +331,10 @@ class WebSocketManager:
                     except Exception as e:
                         self.logger.error(f"Error in callback for topic {topic}: {e}")
             else:
-                # Broadcast to all callbacks if no topic specified
+                # Broadcast to non-orderbook callbacks only
                 for callback, _, _meta in list(self._subscriptions.values()):
+                    if _meta and _meta.get("kind") == "orderbook":
+                        continue
                     try:
                         callback(data)
                     except Exception as e:

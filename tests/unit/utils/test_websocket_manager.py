@@ -381,11 +381,13 @@ async def test_handle_message_outer_exception():
     """Lines 340-341: unexpected exception inside message handling is logged, not raised."""
     mgr = make_manager()
 
-    # After JSON parse, make data.get raise to fall into the outer except
-    bad_data = MagicMock()
-    bad_data.get = MagicMock(side_effect=RuntimeError("unexpected dict error"))
+    # After JSON parse, make data.get raise to fall into the outer except.
+    # Must pass isinstance(data, dict) first, so use a real dict subclass that raises on .get().
+    class BadDict(dict):
+        def get(self, key, default=None):
+            raise RuntimeError("unexpected dict error")
 
-    with patch("json.loads", return_value=bad_data):
+    with patch("json.loads", return_value=BadDict()):
         with patch.object(mgr.logger, "error") as mock_log:
             mgr._handle_message("{}")
 
