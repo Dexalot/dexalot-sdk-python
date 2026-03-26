@@ -7,7 +7,7 @@ class TestSanitizeErrorMessage:
     """Test sanitize_error_message function."""
 
     def test_sanitize_string_error(self):
-        """Test sanitizing a string error (line 26-27)."""
+        """A plain string input is treated as the error message directly and context is prepended."""
         error_str = "Some error message"
         result = sanitize_error_message(error_str, "test context")
         assert result == "test context: Some error message"
@@ -52,7 +52,7 @@ class TestSanitizeErrorMessage:
         assert "[url]" in result or "WS error" in result
 
     def test_remove_traceback_lines(self):
-        """Test that traceback lines are removed (lines 45-46, 51, 56)."""
+        """Traceback header and File/frame lines are stripped; the final exception message line is preserved."""
         error_str = """Traceback (most recent call last):
   File "/path/to/file.py", line 10, in function
     raise ValueError("Error")
@@ -63,7 +63,7 @@ ValueError: Error"""
         assert "ValueError" in result or "Error" in result
 
     def test_traceback_with_quotes(self):
-        """Test traceback removal with quoted file paths (line 48-50)."""
+        """File lines with both single- and double-quoted paths are stripped during traceback removal."""
         error_str = """Traceback:
   File "/path/to/file.py", line 10
     code()
@@ -76,7 +76,7 @@ ValueError: Error"""
         assert "Traceback" not in result or len(result) > 0
 
     def test_traceback_reset_flag(self):
-        """Test that traceback flag resets correctly (line 53-56)."""
+        """The in_traceback flag resets on the first non-frame line, so the actual error message after the traceback is kept."""
         error_str = """Traceback:
   File "file.py", line 10
 Some actual error message here"""
@@ -127,33 +127,33 @@ class TestExtractUserMessage:
     """Test extract_user_message function."""
 
     def test_connection_error(self):
-        """Test ConnectionError extraction (line 103-108)."""
+        """ConnectionError is mapped to the hard-coded user-friendly string 'Network connection failed'."""
         error = ConnectionError("Connection refused")
         result = extract_user_message(error)
         assert result == "Network connection failed"
 
     def test_timeout_error(self):
-        """Test TimeoutError extraction (line 109-110)."""
+        """TimeoutError maps to the user-friendly 'Request timed out' message."""
         error = TimeoutError("Request timed out")
         result = extract_user_message(error)
         assert result == "Request timed out"
 
     def test_value_error(self):
-        """Test ValueError extraction (line 111-112)."""
+        """ValueError maps to 'Invalid value: {msg}' with the exception message appended."""
         error = ValueError("Invalid input: 123")
         result = extract_user_message(error)
         assert "Invalid value" in result
         assert "Invalid input: 123" in result
 
     def test_key_error(self):
-        """Test KeyError extraction (line 113-114)."""
+        """KeyError maps to 'Missing required key: {key}' with the key name appended."""
         error = KeyError("missing_key")
         result = extract_user_message(error)
         assert "Missing required key" in result
         assert "missing_key" in result
 
     def test_generic_error_first_line(self):
-        """Test generic error first line extraction (line 116-117)."""
+        """Unknown exception types return only the first line of their string representation."""
         error = Exception("First line\nSecond line\nThird line")
         result = extract_user_message(error)
         assert result == "First line"

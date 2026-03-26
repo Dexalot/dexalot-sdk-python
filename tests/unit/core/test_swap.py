@@ -913,7 +913,7 @@ class TestSwapClient:
                 assert result == mock_provider
 
     async def test_get_swap_pairs_invalid_chain_identifier(self, client):
-        """Test get_swap_pairs with invalid chain_identifier (coverage for line 45)."""
+        """get_swap_pairs rejects empty chain_identifier via validate_chain_identifier before any API call."""
         result = await client.get_swap_pairs("")  # Empty string
         assert not result.success
         assert "Invalid chain_identifier" in result.error

@@ -1274,7 +1274,7 @@ class TestCLOBClient:
         assert "Error checking balance" in result.error
 
     async def test_check_balance_for_token_string_error(self, client):
-        """Test _check_balance_for_token when balance_info is string (line 605-606)."""
+        """_check_balance_for_token treats a string balance_info as an error response and returns failure."""
         # Mock get_portfolio_balance to return a string error
         client.get_portfolio_balance = AsyncMock(return_value="Error string")
 
@@ -2629,20 +2629,20 @@ class TestCLOBClient:
             await client._send_trade_tx(func_call)
 
     async def test_get_orderbook_invalid_pair_format(self, client):
-        """Test get_orderbook with invalid pair format (coverage for line 99)."""
+        """get_orderbook rejects pairs that fail validate_pair_format before making any API call."""
         result = await client.get_orderbook("INVALID")  # No slash
         assert not result.success
         assert "Invalid pair" in result.error
 
     async def test_get_open_orders_invalid_pair_format(self, client):
-        """Test get_open_orders with invalid pair format (coverage for line 376)."""
+        """get_open_orders rejects pairs that fail validate_pair_format before making any API call."""
         client.account = MagicMock()
         result = await client.get_open_orders(pair="INVALID")  # No slash
         assert not result.success
         assert "Invalid pair" in result.error
 
     async def test_get_order_invalid_order_id_format(self, client):
-        """Test get_order with invalid order_id format (coverage for line 418)."""
+        """get_order rejects order_ids that fail validate_order_id_format before any lookup."""
         client.account = MagicMock()
         client.account.address = VALID_ADDRESS
         result = await client.get_order(12345)  # Invalid: int instead of hex string
@@ -2650,7 +2650,7 @@ class TestCLOBClient:
         assert "Invalid order_id" in result.error
 
     async def test_get_order_by_client_id_invalid_format(self, client):
-        """Test get_order_by_client_id with invalid format (coverage for line 477)."""
+        """get_order_by_client_id rejects client_order_ids that fail validate_order_id_format before any lookup."""
         client.account = MagicMock()
         client.account.address = VALID_ADDRESS
         result = await client.get_order_by_client_id(12345)  # Invalid: int instead of hex string
@@ -2658,7 +2658,7 @@ class TestCLOBClient:
         assert "Invalid client_order_id" in result.error
 
     async def test_validate_order_params_price_none_for_limit(self, client):
-        """Test _validate_order_params with price None for LIMIT (coverage for line 599)."""
+        """_validate_order_params requires price for LIMIT orders; returns fail Result when price is None."""
         side_enum, type_enum, error = client._validate_order_params("BUY", "LIMIT", None, None)
         assert side_enum is None
         assert type_enum is None
@@ -2666,7 +2666,7 @@ class TestCLOBClient:
         assert "Price is required for LIMIT orders" in error.error
 
     async def test_get_order_id_bytes_int(self, client):
-        """Test _get_order_id_bytes with int order_id (coverage for line 1163)."""
+        """_get_order_id_bytes converts an integer order_id to a 32-byte big-endian representation."""
         order_id_int = 12345
         result = client._get_order_id_bytes(order_id_int)
         assert isinstance(result, bytes)

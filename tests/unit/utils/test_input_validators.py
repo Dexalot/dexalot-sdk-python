@@ -162,7 +162,7 @@ class TestValidatePairFormat:
         assert_contains(result.error, 'must be string')
 
     def test_pair_invalid_regex_pattern(self):
-        """Test pair that doesn't match regex pattern (coverage for line 125)."""
+        """Test pair that doesn't match regex pattern."""
         # Pair with special characters that don't match the pattern
         result = validate_pair_format("TOKEN@123/TOKEN#456", "pair")
         assert not result.success
@@ -207,7 +207,7 @@ class TestValidateOrderIdFormat:
         assert_contains(result.error, 'must be string or bytes')
 
     def test_order_id_hex_string_too_long(self):
-        """Test order_id hex string that is too long (coverage for line 166)."""
+        """Test order_id hex string that is too long."""
         # Create a hex string longer than 128 chars (64 bytes)
         long_hex = "0x" + "a" * 130  # 130 hex chars
         result = validate_order_id_format(long_hex, "order_id")

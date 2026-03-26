@@ -2542,7 +2542,7 @@ class TestDexalotBaseClient:
         item = {
             "env": client.ENV_FUJI_MULTI_SUBNET,
             "address": "0xABCD",
-            "abi": [{"name": "someFunc"}],  # plain list — exercises abi = abi_data branch (line 975)
+            "abi": [{"name": "someFunc"}],  # plain list — exercises the branch where abi_data is used directly (not wrapped in a dict with an "abi" key)
         }
         client._process_deployment_item(item, "TradePairs")
 

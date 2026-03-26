@@ -1576,7 +1576,7 @@ class TestTransferClient:
         assert len(info.data["chain_balances"]) >= 0
 
     async def test_get_chain_wallet_balance_invalid_address(self, client):
-        """Test get_chain_wallet_balance with invalid address (coverage for line 92)."""
+        """get_chain_wallet_balance rejects addresses that fail validate_address before any RPC call."""
         client.account = MagicMock()
         client.account.address = "0xInvalid"  # Too short
         result = await client.get_chain_wallet_balance("Avalanche", "AVAX")
@@ -1584,7 +1584,7 @@ class TestTransferClient:
         assert "Invalid address" in result.error
 
     async def test_get_chain_wallet_balance_invalid_token(self, client):
-        """Test get_chain_wallet_balance with invalid token (coverage for line 97)."""
+        """get_chain_wallet_balance rejects empty token via validate_token_symbol before any RPC call."""
         client.account = MagicMock()
         client.account.address = VALID_ADDRESS
         result = await client.get_chain_wallet_balance("Avalanche", "")  # Empty token
@@ -1592,7 +1592,7 @@ class TestTransferClient:
         assert "Invalid token" in result.error
 
     async def test_get_chain_wallet_balance_invalid_chain(self, client):
-        """Test get_chain_wallet_balance with invalid chain (coverage for line 101)."""
+        """get_chain_wallet_balance rejects empty chain string before any RPC call."""
         client.account = MagicMock()
         client.account.address = VALID_ADDRESS
         result = await client.get_chain_wallet_balance("", "AVAX")  # Empty chain
@@ -1600,7 +1600,7 @@ class TestTransferClient:
         assert "Invalid chain" in result.error
 
     async def test_transfer_portfolio_invalid_params(self, client):
-        """Test transfer_portfolio with invalid params (coverage for line 561)."""
+        """transfer_portfolio rejects invalid token via validate_transfer_params before any on-chain call."""
         client.account = MagicMock()
         client.account.address = VALID_ADDRESS
         # Invalid token
@@ -1609,7 +1609,7 @@ class TestTransferClient:
         assert "Invalid token" in result.error
 
     async def test_deposit_invalid_token(self, client):
-        """Test deposit with invalid token (coverage for line 609)."""
+        """deposit rejects empty token via validate_token_symbol before any on-chain call."""
         client.account = MagicMock()
         client.account.address = VALID_ADDRESS
         result = await client.deposit("", 1.0, "Avalanche")
@@ -1617,7 +1617,7 @@ class TestTransferClient:
         assert "Invalid token" in result.error
 
     async def test_deposit_invalid_amount(self, client):
-        """Test deposit with invalid amount (coverage for line 613)."""
+        """deposit rejects negative amount via validate_positive_float before any on-chain call."""
         client.account = MagicMock()
         client.account.address = VALID_ADDRESS
         result = await client.deposit("USDC", -1.0, "Avalanche")
@@ -1625,7 +1625,7 @@ class TestTransferClient:
         assert "Invalid amount" in result.error
 
     async def test_deposit_invalid_source_chain(self, client):
-        """Test deposit with invalid source_chain (coverage for line 616)."""
+        """deposit rejects empty source_chain string before any on-chain call."""
         client.account = MagicMock()
         client.account.address = VALID_ADDRESS
         result = await client.deposit("USDC", 1.0, "")  # Empty chain
@@ -1633,14 +1633,14 @@ class TestTransferClient:
         assert "Invalid source_chain" in result.error
 
     async def test_get_l1_token_info_not_found(self, client):
-        """Test _get_l1_token_info when token not in token_data (coverage for line 653)."""
+        """_get_l1_token_info returns None when the token is absent from token_data."""
         client.token_data = {}
         client.chain_id = 43114
         result = await client._get_l1_token_info("UNKNOWN")
         assert result is None
 
     async def test_withdraw_invalid_token(self, client):
-        """Test withdraw with invalid token (coverage for line 762)."""
+        """withdraw rejects empty token via validate_token_symbol before any on-chain call."""
         client.account = MagicMock()
         client.account.address = VALID_ADDRESS
         result = await client.withdraw("", 1.0, "Avalanche")
@@ -1648,7 +1648,7 @@ class TestTransferClient:
         assert "Invalid token" in result.error
 
     async def test_withdraw_invalid_amount(self, client):
-        """Test withdraw with invalid amount (coverage for line 767)."""
+        """withdraw rejects negative amount via validate_positive_float before any on-chain call."""
         client.account = MagicMock()
         client.account.address = VALID_ADDRESS
         result = await client.withdraw("USDC", -1.0, "Avalanche")
@@ -1656,7 +1656,7 @@ class TestTransferClient:
         assert "Invalid amount" in result.error
 
     async def test_withdraw_invalid_destination_chain(self, client):
-        """Test withdraw with invalid destination_chain (coverage for line 771)."""
+        """withdraw rejects empty destination_chain string before any on-chain call."""
         client.account = MagicMock()
         client.account.address = VALID_ADDRESS
         result = await client.withdraw("USDC", 1.0, "")  # Empty chain
@@ -1664,7 +1664,7 @@ class TestTransferClient:
         assert "Invalid destination_chain" in result.error
 
     async def test_transfer_token_invalid_params(self, client):
-        """Test transfer_token with invalid params (coverage for line 874)."""
+        """transfer_token rejects invalid token via validate_transfer_params before any on-chain call."""
         client.account = MagicMock()
         client.account.address = VALID_ADDRESS
         # Invalid token
@@ -1726,7 +1726,7 @@ class TestTransferClient:
         assert entry["balance"].startswith("Error:")
 
     async def test_get_all_portfolio_balances_rpc_exception(self, client):
-        """Line 556: exception returned by asyncio.gather is re-raised."""
+        """When asyncio.gather returns a BaseException in its results, the method re-raises it immediately."""
 
         def make_get_balances_raise(query_address, page):
             result_obj = MagicMock()
@@ -1740,7 +1740,7 @@ class TestTransferClient:
         assert "rpc error" in result.error or result.error  # sanitized but fails
 
     async def test_get_all_portfolio_balances_empty_symbols(self, client):
-        """Line 556: got_empty=True path when getBalances returns empty symbols list."""
+        """Pagination stops early when a page returns an empty symbols list (got_empty sentinel)."""
         pages_called = []
 
         def make_get_balances(query_address, page):
@@ -1762,7 +1762,7 @@ class TestTransferClient:
         assert all(p < 5 for p in pages_called)
 
     async def test_deposit_balance_data_none(self, client):
-        """Line 678: balance_result.data is None returns fail."""
+        """transfer_portfolio returns a fail Result with 'Invalid balance response format' when balance_result.data is None."""
         from dexalot_sdk.utils.result import Result
 
         with patch.object(client, "get_portfolio_balance", new=AsyncMock(return_value=Result.ok(None))):
@@ -1780,7 +1780,7 @@ class TestTransferClient:
         assert "Invalid balance response format" in result.error
 
     async def test_deposit_native_no_account(self, client):
-        """Line 778: _execute_avax_deposit raises ValueError when account is None."""
+        """_execute_avax_deposit raises ValueError immediately when account is None, before any transaction is built."""
         client.account = None
         w3 = self.create_w3()
         contract = w3.eth.contract()
@@ -1788,7 +1788,7 @@ class TestTransferClient:
             await client._execute_avax_deposit(w3, contract, 1000, 0, 0)
 
     async def test_deposit_erc20_no_account(self, client):
-        """Line 807: _execute_erc20_deposit raises ValueError when account is None."""
+        """_execute_erc20_deposit raises ValueError immediately when account is None, before any transaction is built."""
         client.account = None
         w3 = self.create_w3()
         contract = w3.eth.contract()
@@ -1796,7 +1796,7 @@ class TestTransferClient:
             await client._execute_erc20_deposit(w3, contract, "USDC", 1000, 0, 0)
 
     async def test_deposit_erc20_allowance_exception_swallowed(self, client):
-        """Lines 844-845: exception in the allowance revoke finally is swallowed and re-raises original."""
+        """On tx failure, _execute_erc20_deposit attempts to revoke allowance; if that revoke also raises, the original exception is still re-raised."""
         w3 = self.create_w3()
         contract = w3.eth.contract()
         contract.address = "0xPortfolio"
@@ -1831,7 +1831,7 @@ class TestTransferClient:
         assert call_count == 2
 
     async def test_deposit_decimals_data_none(self, client):
-        """Line 874: decimals_result.data is None returns fail."""
+        """deposit returns fail with 'decimals' in the error when decimals_result.data is None, preventing invalid token scaling."""
         from dexalot_sdk.utils.result import Result
 
         with patch.object(
@@ -1844,7 +1844,7 @@ class TestTransferClient:
         assert "decimals" in result.error.lower()
 
     async def test_get_bridge_fee_no_account(self, client):
-        """Line 1094: _get_bridge_fee_internal raises ValueError when account is None."""
+        """_get_bridge_fee_internal raises ValueError immediately when account is None, before any fee lookup."""
         client.account = None
         w3 = self.create_w3()
         contract = w3.eth.contract()
@@ -1852,7 +1852,7 @@ class TestTransferClient:
             await client._get_bridge_fee_internal(w3, contract, 0, b"\x00" * 32, 0)
 
     async def test_withdraw_allowance_exception_swallowed(self, client):
-        """Lines 1182-1183: exception in withdrawal allowance revoke finally is swallowed."""
+        """On tx failure, _execute_erc20_withdrawal attempts to revoke allowance; if that revoke also raises, the original exception is still re-raised."""
         w3 = self.create_w3()
         contract = w3.eth.contract()
         contract.address = "0xSubPortfolio"
@@ -1881,7 +1881,7 @@ class TestTransferClient:
         assert call_count == 2
 
     async def test_ensure_allowance_no_account(self, client):
-        """Line 1191: _ensure_allowance raises ValueError when account is None."""
+        """_ensure_allowance raises ValueError immediately when account is None, before any allowance check or approval."""
         client.account = None
         w3 = self.create_w3()
         with pytest.raises(ValueError, match="Account is required"):
