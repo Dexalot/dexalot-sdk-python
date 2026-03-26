@@ -2673,6 +2673,68 @@ class TestCLOBClient:
         assert len(result) == 32
         assert result == order_id_int.to_bytes(32, "big")
 
+    # ------------------------------------------------------------------
+    # cancel_order dict-receipt revert, balance error dict, subscribe slash-pair paths
+    # ------------------------------------------------------------------
+
+    async def test_cancel_order_internal_id_dict_receipt_reverted(self, client):
+        """cancel_order: Internal ID path with dict receipt whose status == 0 returns fail."""
+        # Order ID bytes starting with \x00 → is_likely_internal = True
+        client._get_order_id_bytes = MagicMock(return_value=b"\x00" * 32)
+        # Return a plain dict receipt (exercises receipt.get("status", 1) branch)
+        client._send_trade_tx = AsyncMock(return_value=("0xTxHash", {"status": 0}))
+
+        res = await client.cancel_order("0x0000000000000000000000000000000000000000000000000000000000000001")
+        assert not res.success
+        assert "Transaction reverted" in res.error
+
+    async def test_check_order_balance_error_in_dict_response(self, client):
+        """_check_order_balance returns fail when get_portfolio_balance returns a dict with 'error'."""
+        client.get_portfolio_balance = AsyncMock(return_value={"error": "balance unavailable"})
+        result = await client._check_order_balance("AVAX", 1.0)
+        assert result is not None
+        assert not result.success
+        assert "balance unavailable" in result.error
+
+    async def test_check_order_balance_result_ok_none_data(self, client):
+        """_check_order_balance returns fail when get_portfolio_balance returns Result.ok(None)."""
+        from dexalot_sdk.utils.result import Result
+
+        client.get_portfolio_balance = AsyncMock(return_value=Result.ok(None))
+        result = await client._check_order_balance("AVAX", 1.0)
+        assert result is not None
+        assert not result.success
+        assert "empty response" in result.error
+
+    async def test_subscribe_to_events_slash_pair_format(self, client):
+        """subscribe_to_events accepts 'BASE/QUOTE' topic without 'OrderBook/' prefix."""
+        client.config.ws_manager_enabled = True
+        client.pairs = {
+            "AVAX/USDC": {"quote_display_decimals": 6, "base_display_decimals": 18},
+        }
+        client._ensure_pair_exists = AsyncMock(return_value=True)
+
+        def callback(msg):
+            pass
+
+        with patch("dexalot_sdk.core.clob.WebSocketManager") as mock_manager_class:
+            mock_manager = MagicMock()
+            mock_manager_class.return_value = mock_manager
+            await client.subscribe_to_events("AVAX/USDC", callback)
+
+        mock_manager.subscribe.assert_called_once()
+        _, ckwargs = mock_manager.subscribe.call_args
+        assert ckwargs["orderbook_pair"] == "AVAX/USDC"
+
+    async def test_subscribe_to_events_slash_pair_not_found_raises(self, client):
+        """subscribe_to_events raises ValueError when pair doesn't exist in slash-pair format."""
+        client.config.ws_manager_enabled = True
+        client._ensure_pair_exists = AsyncMock(return_value=False)
+
+        with patch("dexalot_sdk.core.clob.WebSocketManager"):
+            with pytest.raises(ValueError, match="Trading pair not found"):
+                await client.subscribe_to_events("AVAX/USDC", lambda msg: None)
+
 
 class TestWebSocketManager:
     """Tests for WebSocketManager (async websockets-based implementation)."""
