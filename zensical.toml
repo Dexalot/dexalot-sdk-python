@@ -3,6 +3,23 @@ site_name = "Dexalot Python SDK"
 site_description = "Python SDK for the Dexalot decentralized exchange"
 repo_url = "https://github.com/Dexalot/dexalot-sdk-python"
 docs_dir = "docs"
+nav = [
+  { "Home" = "index.md" },
+  { "User Guide" = "python-sdk-user-guide.md" },
+  { "Architecture" = "python-sdk-architecture.md" },
+  { "Reference" = "python-sdk-reference.md" },
+  { "Error Handling" = "python-sdk-error-handling.md" },
+  { "Caching Guide" = "sdk-caching.md" },
+  { "REST API" = "rest-api.md" },
+  { "Simple Swap" = "simple-swap.md" },
+  { "WebSocket Protocol" = "websocket.md" }
+]
+
+[project.theme]
+features = [
+    "navigation.instant",
+    "navigation.instant.progress"
+]
 
 [[project.theme.palette]] 
 scheme = "default"
