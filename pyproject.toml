@@ -34,7 +34,7 @@ packages = ["dexalot_sdk", "dexalot_sdk.core", "dexalot_sdk.utils", "dexalot_sdk
 package-dir = {"dexalot_sdk" = "src/dexalot_sdk", "dexalot_sdk.scripts" = "scripts"}
 
 [tool.setuptools.package-data]
-"*" = ["*.json"]
+"*" = ["*.json", "py.typed"]
 
 [tool.ruff]
 line-length = 100
