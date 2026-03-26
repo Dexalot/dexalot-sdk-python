@@ -394,6 +394,68 @@ config = DexalotConfig(
 
 ---
 
+## Secrets vault
+
+The secrets vault stores sensitive values (private keys, tokens) in a Fernet-encrypted SQLite database at `~/.dexalot/secrets_vault.db`. The file is created with owner-only permissions (0o600). Values are encrypted at rest; only key names are stored in plaintext. The vault is shared between the SDK and the MCP server.
+
+### One-time setup
+
+```bash
+# 1. Generate an encryption key and save it in a password manager
+secrets-vault keygen
+
+# 2. Store your private key
+secrets-vault add PRIVATE_KEY 0xabc123...
+
+# 3. Verify
+secrets-vault list
+secrets-vault get PRIVATE_KEY
+```
+
+### Providing the vault key at runtime
+
+| Method | How |
+|---|---|
+| Environment variable | `DEXALOT_SECRETS_VAULT_KEY=<key>` — for containers and CI |
+| Interactive prompt | Leave the env var unset; the server prompts at startup |
+| Neither | Server / SDK starts in read-only mode (no signing) |
+
+### Custom vault path
+
+```bash
+DEXALOT_SECRETS_VAULT_PATH=/secure/path/vault.db
+```
+
+### Using the vault in code
+
+The vault functions are exported from the top-level package:
+
+```python
+from dexalot_sdk import (
+    generate_secrets_vault_key,
+    secrets_vault_set,
+    secrets_vault_get,
+    secrets_vault_list,
+    secrets_vault_remove,
+)
+
+key = generate_secrets_vault_key()   # generate once, save safely
+secrets_vault_set("~/.dexalot/secrets_vault.db", "PRIVATE_KEY", "0x...", key)
+
+result = secrets_vault_get("~/.dexalot/secrets_vault.db", "PRIVATE_KEY", key)
+if result.success:
+    private_key = result.data
+```
+
+### Safe practices
+
+- Never commit the vault key or your `.env` file to version control.
+- Store the vault key in a password manager or secrets manager (1Password, AWS Secrets Manager, HashiCorp Vault, etc.).
+- The vault database file itself is safe to back up — it is encrypted and useless without the key.
+- Prefer `secrets-vault add PRIVATE_KEY ...` over `PRIVATE_KEY=...` in `.env` for anything beyond a local throwaway key.
+
+---
+
 ## Error handling best practices
 
 1. **Always check `.success`** before accessing `.data`.

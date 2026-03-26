@@ -32,7 +32,7 @@ pip install dexalot-sdk
 
 | Section | Description |
 |---|---|
-| [User Guide](python-sdk-user-guide.md) | Installation, concepts, and end-to-end usage walkthrough |
+| [User Guide](python-sdk-user-guide.md) | Installation, concepts, end-to-end usage, and secrets vault setup |
 | [API Reference](python-sdk-reference.md) | Auto-generated reference for all public classes and methods |
 | [Error Handling](python-sdk-error-handling.md) | `Result[T]` pattern, revert reasons, and debugging |
 | [Architecture](python-sdk-architecture.md) | Internals: caching, async model, rate limiting, nonce management |
