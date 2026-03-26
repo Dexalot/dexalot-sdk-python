@@ -61,7 +61,7 @@ class TestCacheConfiguration:
 
 
 class TestStaticDataCaching:
-    """Test caching of static data (environments, deployments, mainnets)."""
+    """Test caching of static data (environments, deployments, chains)."""
 
     async def test_get_environments_uses_cache(self, mock_env_setup):
         """Verify get_environments() uses cache on subsequent calls."""
@@ -99,8 +99,8 @@ class TestStaticDataCaching:
             # API should only be called once (cached on second call)
             assert call_count_2 == call_count_1
 
-    async def test_get_mainnets_uses_cache(self, mock_env_setup):
-        """Verify get_mainnets() uses cache."""
+    async def test_get_chains_uses_cache(self, mock_env_setup):
+        """Verify get_chains() uses cache."""
         with patch("dexalot_sdk.core.base.aiohttp.ClientSession"):
             with patch.dict(os.environ, {"PRIVATE_KEY": "0x" + "a" * 64}, clear=False):
                 with patch("dexalot_sdk.core.config.load_dotenv"):
@@ -108,11 +108,11 @@ class TestStaticDataCaching:
             client.chain_config = {"Fuji": {"chain_id": 43113}}
 
             # First call
-            result1 = await client.get_mainnets()
+            result1 = await client.get_chains()
 
             # Second call - should be cached
             start = time.time()
-            result2 = await client.get_mainnets()
+            result2 = await client.get_chains()
             elapsed = time.time() - start
 
             assert result1 == result2

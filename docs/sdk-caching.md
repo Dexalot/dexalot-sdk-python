@@ -14,7 +14,7 @@ The Dexalot SDK uses a 4-level caching architecture to optimize performance by r
 
 **Cached Methods:**
 - `get_environments()` / `getEnvironments()` - Trading environments configuration
-- `get_mainnets()` / `getMainnets()` - Connected mainnet networks
+- `get_chains()` / `getChains()` - Connected networks
 - `get_deployment()` / `getDeployment()` - Deployment configuration
 
 **When to customize:**

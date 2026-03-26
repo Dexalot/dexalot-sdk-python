@@ -420,9 +420,9 @@ class TestDexalotBaseClient:
         assert token["chain_id"] == 43114  # Prefer existing snake_case
         assert token["chain"] == "Avalanche"  # Prefer existing network
 
-    async def test_get_mainnets(self, client):
-        """Test get_mainnets."""
-        # Mock environments call (needed since get_mainnets calls get_environments)
+    async def test_get_chains(self, client):
+        """Test get_chains."""
+        # Mock environments call (needed since get_chains calls get_environments)
         mock_env_resp = [
             {
                 "env": "fuji-multi-avax",
@@ -444,13 +444,13 @@ class TestDexalotBaseClient:
             "Other": {},  # Missing chain_id
         }
 
-        res = await client.get_mainnets()
+        res = await client.get_chains()
         assert res.success
         assert res.data == {43114: "Avalanche", 43113: "Fuji"}
         assert "Other" not in res.data.values()
 
-    async def test_get_mainnets_error(self, client):
-        """Test get_mainnets error handling."""
+    async def test_get_chains_error(self, client):
+        """Test get_chains error handling."""
         # Mock environments call to succeed first
         mock_env_resp = [
             {
@@ -473,9 +473,9 @@ class TestDexalotBaseClient:
                 raise Exception("Test error")
 
         client.chain_config = ErrorDict()
-        result = await client.get_mainnets()
+        result = await client.get_chains()
         assert not result.success
-        assert "getting mainnets" in result.error.lower() or "test error" in result.error.lower()
+        assert "getting chains" in result.error.lower() or "test error" in result.error.lower()
 
     async def test_get_deployment(self, client):
         """Test get_deployment."""
@@ -2312,15 +2312,15 @@ class TestDexalotBaseClient:
         assert not result.success
         assert "reinitializing client" in result.error.lower()
 
-    async def test_get_mainnets_cache_disabled(self, client):
-        """Test get_mainnets with cache disabled."""
+    async def test_get_chains_cache_disabled(self, client):
+        """Test get_chains with cache disabled."""
         from dexalot_sdk.core.base import _STATIC_CACHE
 
         # Disable cache
         client._cache_enabled = False
 
         # Add something to cache
-        key = ("get_mainnets", (client,), frozenset())
+        key = ("get_chains", (client,), frozenset())
         _STATIC_CACHE._store[key] = "cached_data"
 
         # Mock environments call
@@ -2342,7 +2342,7 @@ class TestDexalotBaseClient:
         mock_cm.__aenter__.return_value = mock_resp
         client._mock_session.get.return_value = mock_cm
 
-        result = await client.get_mainnets()
+        result = await client.get_chains()
 
         # Verify cache was cleared
         assert key not in _STATIC_CACHE._store
@@ -2515,7 +2515,7 @@ class TestDexalotBaseClient:
         assert result.success
 
     # ------------------------------------------------------------------
-    # camelCase transform fallbacks + get_mainnets / get_deployments env-fail
+    # camelCase transform fallbacks + get_chains / get_deployments env-fail
     # ------------------------------------------------------------------
 
     def test_transform_environment_camelcase_chain_id_and_env_type(self, client):
@@ -2559,14 +2559,14 @@ class TestDexalotBaseClient:
         )
         assert client.trade_pairs_contract is mock_contract
 
-    async def test_get_mainnets_env_fail_propagates(self, client):
-        """get_mainnets returns Result.fail when get_environments fails."""
+    async def test_get_chains_env_fail_propagates(self, client):
+        """get_chains returns Result.fail when get_environments fails."""
         with patch.object(
             client,
             "get_environments",
             new=AsyncMock(return_value=MagicMock(success=False, error="env error")),
         ):
-            result = await client.get_mainnets()
+            result = await client.get_chains()
         assert not result.success
         assert "env error" in result.error
 

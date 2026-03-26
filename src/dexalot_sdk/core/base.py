@@ -1137,8 +1137,8 @@ class DexalotBaseClient:
             return Result.fail(error_msg)
 
     @async_ttl_cached(_STATIC_CACHE)
-    async def get_mainnets(self) -> Result[dict]:
-        """Return a mapping of connected mainnet chain IDs to their display names.
+    async def get_chains(self) -> Result[dict]:
+        """Return a mapping of connected chain IDs to their display names.
 
         Note:
             Cached for 1 hour (static cache tier).
@@ -1148,12 +1148,12 @@ class DexalotBaseClient:
             message on failure.
 
         Example:
-            >>> result = await client.get_mainnets()
+            >>> result = await client.get_chains()
             >>> # {43114: "Avalanche", 1: "Ethereum", ...}
         """
         if not self._cache_enabled:
             # Bypass cache by clearing it for this call
-            key: tuple[Any, ...] = ("get_mainnets", (self,), frozenset())
+            key: tuple[Any, ...] = ("get_chains", (self,), frozenset())
             _STATIC_CACHE._store.pop(key, None)
 
         try:
@@ -1162,14 +1162,14 @@ class DexalotBaseClient:
             if not envs_result.success:
                 return Result.fail(f"Failed to fetch environments: {envs_result.error}")
 
-            mainnets = {}
+            chains = {}
             for name, config in self.chain_config.items():
                 cid = config.get("chain_id")
                 if cid:
-                    mainnets[cid] = name
-            return Result.ok(mainnets)
+                    chains[cid] = name
+            return Result.ok(chains)
         except Exception as e:
-            error_msg = self._sanitize_error(e, "getting mainnets")
+            error_msg = self._sanitize_error(e, "getting chains")
             return Result.fail(error_msg)
 
     def _transform_token_from_api(self, token: dict) -> dict:

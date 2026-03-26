@@ -227,7 +227,7 @@ async def example_cache_levels():
 
         print("1. STATIC (1 hour TTL)")
         print("   - get_environments()")
-        print("   - get_mainnets()")
+        print("   - get_chains()")
         print("   - get_deployment()")
         envs_result = await client.get_environments()
         if envs_result.success:

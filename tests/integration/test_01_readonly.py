@@ -18,16 +18,16 @@ class TestIntegrationMCPTools:
         assert len(envs) > 0
         print("✅ get_environments passed")
 
-        # 2. get_mainnets
-        mainnets_result = await client.get_mainnets()
-        assert mainnets_result.success
-        mainnets = mainnets_result.data
-        assert isinstance(mainnets, dict)
-        assert "43113" in mainnets or 43113 in mainnets  # Fuji ID
-        print("✅ get_mainnets passed")
+        # 2. get_chains
+        chains_result = await client.get_chains()
+        assert chains_result.success
+        chains = chains_result.data
+        assert isinstance(chains, dict)
+        assert "43113" in chains or 43113 in chains  # Fuji ID
+        print("✅ get_chains passed")
 
         # 3. get_swap_pairs
-        chain_name = list(mainnets.values())[0]
+        chain_name = list(chains.values())[0]
         pairs_result = await client.get_swap_pairs(chain_name)
         # The return type is now a Result object
         assert hasattr(pairs_result, "success")

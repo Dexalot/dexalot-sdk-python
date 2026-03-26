@@ -247,7 +247,7 @@ client.invalidate_cache(level="balance")  # Options: static, semi_static, balanc
 
 **Static Data (1 hour):**
 - `get_environments()`
-- `get_mainnets()`
+- `get_chains()`
 - `get_deployment()`
 
 **Semi-Static Data (15 minutes):**
