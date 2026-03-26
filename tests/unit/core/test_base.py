@@ -2513,3 +2513,23 @@ class TestDexalotBaseClient:
         assert client.deployments is not None
         assert "TradePairs" in client.deployments
         assert result.success
+
+    async def test_connect_python314_connector_has_no_enable_cleanup_closed(self, client, mock_env):
+        """On Python >= 3.14 the TCPConnector is created without enable_cleanup_closed."""
+        client._session = None  # force a new session to be created
+
+        with patch("dexalot_sdk.core.base.sys") as mock_sys:
+            mock_sys.version_info = (3, 14, 0)
+            with patch("dexalot_sdk.core.base.aiohttp.TCPConnector") as mock_connector:
+                with patch("dexalot_sdk.core.base.aiohttp.ClientSession"):
+                    await client.connect()
+
+        # enable_cleanup_closed must NOT appear in the kwargs for the 3.14+ branch
+        call_kwargs = mock_connector.call_args.kwargs
+        assert "enable_cleanup_closed" not in call_kwargs
+
+    async def test_rpc_call_with_failover_no_provider_manager_raises(self, client):
+        """_rpc_call_with_failover raises RuntimeError when _provider_manager is None."""
+        client._provider_manager = None
+        with pytest.raises(RuntimeError, match="Provider manager is required"):
+            await client._rpc_call_with_failover("Avalanche", "eth.get_block", "latest")
