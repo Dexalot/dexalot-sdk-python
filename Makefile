@@ -8,7 +8,7 @@ RUFF := .venv/bin/ruff
 MYPY := .venv/bin/mypy
 MYPY_CONFIG := --config-file mypy.ini
 
-.PHONY: setup test cov cov-file int int-file lint lint-fix format mypy mypy-all typecheck clean
+.PHONY: setup test cov cov-file int int-file lint lint-fix format mypy mypy-all typecheck clean docs-serve docs-build
 
 setup:
 	uv venv && uv sync --group dev
@@ -50,6 +50,12 @@ mypy:
 	$(MYPY) $(MYPY_CONFIG) --follow-imports=silent
 
 typecheck: mypy
+
+docs-serve:
+	uv run --group docs mkdocs serve
+
+docs-build:
+	uv run --group docs mkdocs build
 
 clean:
 	rm -rf .pytest_cache

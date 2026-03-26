@@ -24,6 +24,11 @@ dev = [
     "pytest-cov",
     "ruff",
 ]
+docs = [
+    "mkdocs>=1.6",
+    "mkdocs-material>=9.5",
+    "mkdocstrings[python]>=0.29",
+]
 
 [tool.setuptools]
 packages = ["dexalot_sdk", "dexalot_sdk.core", "dexalot_sdk.utils", "dexalot_sdk.scripts"]
