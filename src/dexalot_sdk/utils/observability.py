@@ -6,6 +6,7 @@ Supports JSON and console output formats, request ID tracking, and performance t
 """
 
 import functools
+import inspect
 import json
 import logging
 import os
@@ -310,14 +311,26 @@ def track_method(operation: str, **extra_context):
     """
 
     def decorator(func):
-        @functools.wraps(func)
-        def wrapper(self, *args, **kwargs):
-            logger = getattr(self, "logger", logging.getLogger(func.__module__))
-            # Auto-inject function name into context
-            context = {"function": func.__name__, **extra_context}
-            with track_operation(logger, operation, **context):
-                return func(self, *args, **kwargs)
+        if inspect.iscoroutinefunction(func):
 
-        return wrapper
+            @functools.wraps(func)
+            async def async_wrapper(self, *args, **kwargs):
+                logger = getattr(self, "logger", logging.getLogger(func.__module__))
+                context = {"function": func.__name__, **extra_context}
+                with track_operation(logger, operation, **context):
+                    return await func(self, *args, **kwargs)
+
+            return async_wrapper
+        else:
+
+            @functools.wraps(func)
+            def sync_wrapper(self, *args, **kwargs):
+                logger = getattr(self, "logger", logging.getLogger(func.__module__))
+                # Auto-inject function name into context
+                context = {"function": func.__name__, **extra_context}
+                with track_operation(logger, operation, **context):
+                    return func(self, *args, **kwargs)
+
+            return sync_wrapper
 
     return decorator

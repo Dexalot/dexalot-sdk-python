@@ -1,7 +1,9 @@
 """Unit tests for observability module."""
 
+import asyncio
 import json
 import logging
+import time
 from io import StringIO
 
 from dexalot_sdk.utils.observability import (
@@ -10,6 +12,7 @@ from dexalot_sdk.utils.observability import (
     get_logger,
     get_request_id,
     log_event,
+    track_method,
     track_operation,
     with_request_id,
 )
@@ -220,3 +223,67 @@ def test_console_formatter_truncation():
     assert "long_value=" in formatted
     assert "a" * 47 + "..." in formatted
     assert "short_value=short" in formatted
+
+
+def test_track_method_sync(caplog):
+    """Test track_method works for synchronous methods."""
+
+    class Obj:
+        logger = get_logger("test_track_method_sync")
+
+        @track_method("sync_op")
+        def do_work(self):
+            return 42
+
+    obj = Obj()
+    with caplog.at_level(logging.INFO, logger="test_track_method_sync"):
+        result = obj.do_work()
+
+    assert result == 42
+    assert "op=sync_op" in caplog.text
+    assert "completed in" in caplog.text
+
+
+def test_track_method_async(caplog):
+    """Test track_method measures actual async execution time."""
+
+    class Obj:
+        logger = get_logger("test_track_method_async")
+
+        @track_method("async_op")
+        async def do_async_work(self):
+            await asyncio.sleep(0.1)
+            return "done"
+
+    obj = Obj()
+    with caplog.at_level(logging.INFO, logger="test_track_method_async"):
+        result = asyncio.run(obj.do_async_work())
+
+    assert result == "done"
+    assert "op=async_op" in caplog.text
+    assert "completed in" in caplog.text
+
+    # Verify the measured duration is >= 100ms
+    for record in caplog.records:
+        if "op=async_op" in record.message and "completed in" in record.message:
+            duration_str = record.message.split("completed in")[1].strip().split("s")[0]
+            assert float(duration_str) >= 0.1
+            break
+
+
+def test_track_method_async_timing_is_real():
+    """Confirm that without await the timing would be near-zero; with our fix it's >= 100ms."""
+
+    class Obj:
+        logger = get_logger("test_track_method_async_timing")
+
+        @track_method("timed_op")
+        async def slow_method(self):
+            await asyncio.sleep(0.1)
+
+    obj = Obj()
+    start = time.perf_counter()
+    asyncio.run(obj.slow_method())
+    elapsed = time.perf_counter() - start
+
+    assert elapsed >= 0.1

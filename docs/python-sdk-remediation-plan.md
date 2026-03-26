@@ -728,7 +728,7 @@ All 628 unit tests pass. Commit: TBD.
 
 ### P-9: `track_method` decorator wraps async methods with a synchronous context manager
 
-**Status:** Open
+**Status:** ✅ Resolved
 
 **Finding:**
 `track_method` returns a **synchronous** `wrapper` that calls `func(self, *args, **kwargs)`.
@@ -771,6 +771,11 @@ This is the highest-value observability fix — without it, all timing data in l
   `time.perf_counter` measurement from outside the call).
 - Existing tests for `track_method` pass.
 - New test: `track_method` on an `async def` that `asyncio.sleep(0.1)`s logs duration ≥ 100 ms.
+
+**Resolution:** Added `inspect.iscoroutinefunction` check in `track_method`; async methods now
+get an `async_wrapper` that `await`s the function inside the `with track_operation` block.
+Three new tests added in `tests/unit/test_observability.py` covering sync behavior, async timing
+correctness, and external elapsed-time measurement. All 631 unit tests pass.
 
 ---
 
