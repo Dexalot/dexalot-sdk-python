@@ -59,13 +59,19 @@ class TransferClient(DexalotBaseClient):
 
     @async_ttl_cached(_SEMI_STATIC_CACHE)
     @track_method("transfer")
-    async def get_token_details(self, token) -> Result[dict]:
-        """Gets token details that could be used in depositing tokens.
+    async def get_token_details(self, token: str) -> Result[dict]:
+        """Fetch metadata for a specific token across all supported environments.
+
+        Note:
+            Cached for 15 minutes (semi-static cache tier).
+
+        Args:
+            token: Token symbol (e.g. ``"USDC"`` or ``"AVAX"``).
 
         Returns:
-            Result with token details (dict) on success, or error message on failure
-
-        Note: Cached for 15 minutes (semi-static data). Always fetches from API (respecting cache TTL).
+            Result containing a dict keyed by environment name, where each value
+            is a token info dict with ``address``, ``decimals``, ``chain_id``,
+            etc.  Returns an error message if the token is not found.
         """
         if not self._cache_enabled:
             # Bypass cache by clearing it for this call
@@ -105,10 +111,22 @@ class TransferClient(DexalotBaseClient):
     async def get_chain_wallet_balance(
         self, chain: str, token: str, address: str | None = None
     ) -> Result[dict]:
-        """Get balance of a SPECIFIC token on a SPECIFIC chain wallet.
+        """Get the balance of a specific token on a specific chain wallet.
+
+        Note:
+            Cached for 10 seconds (balance cache tier).
+
+        Args:
+            chain: Chain display name, e.g. ``"Avalanche"``, ``"Fuji"``, or
+                ``"Dexalot L1"`` (for native ALOT balance).
+            token: Token symbol, e.g. ``"AVAX"`` or ``"USDC"``.
+            address: Wallet address to query.  Defaults to the current account
+                address if a signer is configured.
 
         Returns:
-            Result[dict]: Balance information on success, error message on failure.
+            Result containing a balance dict with ``chain``, ``symbol``,
+            ``balance``, and ``type`` fields on success, or an error message
+            on failure.
         """
         resolved_address = address or (
             cast(str, cast(Any, self.account).address) if self.account else None
@@ -181,10 +199,21 @@ class TransferClient(DexalotBaseClient):
     async def get_chain_wallet_balances(
         self, chain: str, address: str | None = None
     ) -> Result[dict]:
-        """Get ALL token balances on a SPECIFIC chain wallet.
+        """Get all token balances on a specific chain wallet.
+
+        Fetches native token balance plus all ERC20 token balances in parallel.
+
+        Note:
+            Cached for 10 seconds (balance cache tier).
+
+        Args:
+            chain: Chain display name, e.g. ``"Avalanche"`` or ``"Dexalot L1"``.
+            address: Wallet address to query.  Defaults to the current account.
 
         Returns:
-            Result[dict]: Dictionary of token balances on success, error message on failure.
+            Result containing a dict with ``address``, ``chain``, and
+            ``chain_balances`` (list of token balance entries) on success, or an
+            error message on failure.
         """
         resolved_address = address or (
             cast(str, cast(Any, self.account).address) if self.account else None
@@ -242,10 +271,21 @@ class TransferClient(DexalotBaseClient):
 
     @track_method("transfer")
     async def get_all_chain_wallet_balances(self, address: str | None = None) -> Result[dict]:
-        """Get ALL token balances across ALL connected chain wallets.
+        """Get all token balances across all connected chain wallets.
+
+        Queries Dexalot L1 (native ALOT) and all connected mainnet chains
+        concurrently, including native and ERC20 token balances.
+
+        Note:
+            Cached for 10 seconds (balance cache tier).
+
+        Args:
+            address: Wallet address to query.  Defaults to the current account.
 
         Returns:
-            Result[dict]: Dictionary of balances by chain on success, error message on failure.
+            Result containing a dict with ``address`` and ``chain_balances``
+            (list of token balance entries from all chains) on success, or an
+            error message on failure.
         """
         resolved_address = address or (
             cast(str, cast(Any, self.account).address) if self.account else None
@@ -454,10 +494,18 @@ class TransferClient(DexalotBaseClient):
 
     @track_method("transfer")
     async def get_portfolio_balance(self, token: str, address: str | None = None) -> Result[dict]:
-        """Gets the portfolio balance for a token on Dexalot L1.
+        """Get the portfolio balance for a token on the Dexalot L1 subnet.
+
+        Note:
+            Cached for 10 seconds (balance cache tier).
+
+        Args:
+            token: Token symbol (e.g. ``"USDC"``).
+            address: Portfolio address to query.  Defaults to the current account.
 
         Returns:
-            Result[dict]: Balance information (total, available, locked) on success, error message on failure.
+            Result containing ``{"total": float, "available": float, "locked": float}``
+            on success, or an error message on failure.
         """
         resolved_address = address or (
             cast(str, cast(Any, self.account).address) if self.account else None
@@ -514,10 +562,20 @@ class TransferClient(DexalotBaseClient):
 
     @track_method("transfer")
     async def get_all_portfolio_balances(self, address: str | None = None) -> Result[dict]:
-        """Gets all portfolio balances on Dexalot L1.
+        """Get all portfolio token balances on the Dexalot L1 subnet.
+
+        Paginates through the contract's ``getBalances`` function in batches
+        of 5 pages, up to a hard cap of 50 pages.
+
+        Note:
+            Cached for 10 seconds (balance cache tier).
+
+        Args:
+            address: Portfolio address to query.  Defaults to the current account.
 
         Returns:
-            Result[dict]: Dictionary of all token balances on success, error message on failure.
+            Result containing a dict of ``{symbol: {"total": float, "available": float, "locked": float}}``
+            on success, or an error message on failure.
         """
         resolved_address = address or (
             cast(str, cast(Any, self.account).address) if self.account else None
@@ -584,11 +642,21 @@ class TransferClient(DexalotBaseClient):
             return Result.fail(error_msg)
 
     @track_method("transfer")
-    async def add_gas(self, amount, wait_for_receipt: bool = True) -> Result[str]:
-        """Move ALOT from Portfolio to Wallet (Add Gas).
+    async def add_gas(self, amount: float, wait_for_receipt: bool = True) -> Result[str]:
+        """Withdraw ALOT from the Dexalot portfolio to the L1 wallet (add gas).
+
+        Calls ``withdrawNative`` on the ``PortfolioSub`` contract, moving
+        ALOT from the trading portfolio balance into the wallet so it can
+        be used to pay transaction fees on Dexalot L1.
+
+        Args:
+            amount: Amount of ALOT to withdraw, in human-readable units.
+            wait_for_receipt: If ``True``, block until the transaction is
+                confirmed on-chain.
 
         Returns:
-            Result with transaction hash message on success, or error message on failure
+            Result containing a confirmation message with the transaction hash on
+            success, or an error message on failure.
         """
         if not self.account:
             return Result.fail("Private key not configured.")
@@ -613,11 +681,20 @@ class TransferClient(DexalotBaseClient):
             return Result.fail(error_msg)
 
     @track_method("transfer")
-    async def remove_gas(self, amount, wait_for_receipt: bool = True) -> Result[str]:
-        """Move ALOT from Wallet to Portfolio (Remove Gas).
+    async def remove_gas(self, amount: float, wait_for_receipt: bool = True) -> Result[str]:
+        """Deposit ALOT from the L1 wallet into the Dexalot portfolio (remove gas).
+
+        Calls ``depositNative`` on the ``PortfolioSub`` contract, converting
+        native ALOT in the wallet into portfolio balance available for trading.
+
+        Args:
+            amount: Amount of ALOT to deposit, in human-readable units.
+            wait_for_receipt: If ``True``, block until the transaction is
+                confirmed on-chain.
 
         Returns:
-            Result with transaction hash message on success, or error message on failure
+            Result containing a confirmation message with the transaction hash on
+            success, or an error message on failure.
         """
         if not self.account:
             return Result.fail("Private key not configured.")
@@ -646,10 +723,18 @@ class TransferClient(DexalotBaseClient):
     async def transfer_portfolio(
         self, token: str, amount: float, to_address: str, wait_for_receipt: bool = True
     ) -> Result[str]:
-        """Transfer tokens between portfolios on Dexalot L1.
+        """Transfer a token from the current portfolio to another address's portfolio on Dexalot L1.
+
+        Args:
+            token: Token symbol (e.g. ``"USDC"``).
+            amount: Amount to transfer in human-readable units.
+            to_address: Destination wallet address (checksummed or lowercase hex).
+            wait_for_receipt: If ``True``, block until the transaction is
+                confirmed on-chain.
 
         Returns:
-            Result with transaction hash message on success, or error message on failure
+            Result containing a confirmation message with the transaction hash on
+            success, or an error message on failure.
         """
         if not self.account:
             return Result.fail("Private key not configured.")
@@ -847,12 +932,29 @@ class TransferClient(DexalotBaseClient):
 
     @track_method("transfer")
     async def deposit(
-        self, token, amount, source_chain, use_layerzero=False, wait_for_receipt: bool = True
+        self, token: str, amount: float, source_chain: str,
+        use_layerzero: bool = False, wait_for_receipt: bool = True
     ) -> Result[str]:
-        """Deposits a token from the Source Chain (L1) to the Dexalot Subnet (L2).
+        """Deposit a token from a mainnet chain into the Dexalot portfolio.
+
+        For AVAX, calls ``depositNative``; for ERC20 tokens, approves the
+        ``PortfolioMain`` contract and calls ``depositToken``.  A bridge fee
+        (returned by ``get_deposit_bridge_fee``) is added to the transaction
+        value automatically.
+
+        Args:
+            token: Token symbol (e.g. ``"AVAX"`` or ``"USDC"``).
+            amount: Amount to deposit in human-readable units.
+            source_chain: Chain display name of the source network
+                (e.g. ``"Avalanche"``).  Must be in ``self.chain_config``.
+            use_layerzero: If ``True``, force LayerZero bridge instead of the
+                default ICM bridge for supported chains.
+            wait_for_receipt: If ``True``, block until the deposit transaction
+                is confirmed on-chain.
 
         Returns:
-            Result with transaction hash message on success, or error message on failure
+            Result containing a confirmation message with the transaction hash on
+            success, or an error message on failure.
         """
         # Validate parameters
         validation_result = self._validate_deposit_params(token, amount, source_chain)
@@ -915,12 +1017,28 @@ class TransferClient(DexalotBaseClient):
 
     @track_method("transfer")
     async def withdraw(
-        self, token, amount, destination_chain, use_layerzero=False, wait_for_receipt: bool = True
+        self, token: str, amount: float, destination_chain: str,
+        use_layerzero: bool = False, wait_for_receipt: bool = True
     ) -> Result[str]:
-        """Withdraws a token from the Dexalot Subnet (L2) to the Destination Chain (L1).
+        """Withdraw a token from the Dexalot portfolio to a mainnet chain wallet.
+
+        Calls the ``PortfolioSub`` contract's withdraw function on Dexalot L1.
+        The token arrives in the wallet on ``destination_chain`` after the
+        bridge completes (a separate on-chain confirmation on the destination).
+
+        Args:
+            token: Token symbol (e.g. ``"USDC"`` or ``"AVAX"``).
+            amount: Amount to withdraw in human-readable units.
+            destination_chain: Chain display name of the target network
+                (e.g. ``"Avalanche"``).  Must be in ``self.chain_config``.
+            use_layerzero: If ``True``, force LayerZero bridge instead of the
+                default ICM bridge for supported chains.
+            wait_for_receipt: If ``True``, block until the withdrawal transaction
+                is confirmed on Dexalot L1.
 
         Returns:
-            Result with transaction hash message on success, or error message on failure
+            Result containing a confirmation message with the transaction hash on
+            success, or an error message on failure.
         """
         if not self.account:
             return Result.fail("Private key not configured.")
@@ -992,11 +1110,22 @@ class TransferClient(DexalotBaseClient):
             return Result.fail(error_msg)
 
     @track_method("transfer")
-    async def get_deposit_bridge_fee(self, token, amount, source_chain) -> Result[float]:
-        """Gets the native fee needed to pay the bridge provider when initiating a deposit transaction.
+    async def get_deposit_bridge_fee(self, token: str, amount: float, source_chain: str) -> Result[float]:
+        """Estimate the bridge fee for a deposit transaction.
+
+        Queries the ``PortfolioMain`` contract's ``getBridgeFee`` function.
+        The ``deposit()`` method fetches this automatically, but you can call
+        this directly for display or pre-flight checks.
+
+        Args:
+            token: Token symbol (e.g. ``"USDC"``).
+            amount: Deposit amount in human-readable units (used to estimate fee).
+            source_chain: Chain display name of the source network
+                (e.g. ``"Avalanche"``).
 
         Returns:
-            Result with bridge fee (float) on success, or error message on failure
+            Result containing the bridge fee in native token units (``float``,
+            denominated in ETH/AVAX) on success, or an error message on failure.
         """
         if source_chain not in self.chain_config:
             return Result.fail(f"Source chain '{source_chain}' not known.")
@@ -1029,11 +1158,20 @@ class TransferClient(DexalotBaseClient):
             return Result.fail(error_msg)
 
     @track_method("transfer")
-    async def transfer_token(self, token, to_address, amount) -> Result[str]:
-        """Send assets to another account's portfolio on Dexalot L1.
+    async def transfer_token(self, token: str, to_address: str, amount: float) -> Result[str]:
+        """Transfer a token from the current account's portfolio to another account on Dexalot L1.
+
+        Calls ``transferToken`` on the ``PortfolioSub`` contract.  Both source
+        and destination addresses must have active portfolios on Dexalot L1.
+
+        Args:
+            token: Token symbol (e.g. ``"USDC"``).
+            to_address: Destination wallet address on Dexalot L1.
+            amount: Amount to transfer in human-readable units.
 
         Returns:
-            Result with transaction hash message on success, or error message on failure
+            Result containing a confirmation message with the transaction hash on
+            success, or an error message on failure.
         """
         if not self.account:
             return Result.fail("Private key not configured.")

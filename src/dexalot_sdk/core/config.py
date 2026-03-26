@@ -14,9 +14,101 @@ from ..constants import (
 
 @dataclass
 class DexalotConfig:
-    """
-    Configuration for DexalotClient.
-    Centralizes all configuration parameters and handles loading from environment variables.
+    """Configuration for ``DexalotClient``.
+
+    All fields can be set via constructor kwargs, environment variables, or a
+    ``.env`` file.  Precedence: constructor kwargs > env vars > ``.env`` file >
+    defaults.  See ``from_env()`` for the full loading logic.
+
+    Attributes:
+        parent_env: Selects the Dexalot environment.  ``"fuji-multi"`` (testnet,
+            default) or ``"production-multi"`` (mainnet).
+            Env var: ``PARENTENV``.
+        api_base_url: Override the REST API base URL.  Auto-selected from
+            ``parent_env`` when ``None``.
+            Env var: ``API_BASE_URL_TESTNET`` / ``API_BASE_URL_MAINNET``.
+        private_key: Hex-encoded private key (``0x`` prefix, 66 chars).  Zeroed
+            after ``Account`` creation.  Prefer passing a pre-built ``signer``
+            object to the constructor.
+            Env var: ``PRIVATE_KEY``.
+        timestamped_auth: When ``True``, sign ``"dexalot{ts}"`` and include
+            ``x-timestamp`` header.  Prevents replay attacks but requires backend
+            support — leave ``False`` until confirmed.
+            Env var: ``DEXALOT_TIMESTAMPED_AUTH``.
+        connection_pool_limit: Total aiohttp connection pool size.
+            Env var: ``DEXALOT_CONNECTION_POOL_LIMIT``.
+        connection_pool_limit_per_host: Max connections to a single host.
+            Env var: ``DEXALOT_CONNECTION_POOL_LIMIT_PER_HOST``.
+        enable_cache: Enable module-level TTL caches.
+            Env var: ``DEXALOT_ENABLE_CACHE``.
+        cache_ttl_static: TTL (seconds) for static data (environments, deployments).
+            Env var: ``DEXALOT_CACHE_TTL_STATIC``.
+        cache_ttl_semi_static: TTL (seconds) for semi-static data (tokens, pairs).
+            Env var: ``DEXALOT_CACHE_TTL_SEMI_STATIC``.
+        cache_ttl_balance: TTL (seconds) for balance data.
+            Env var: ``DEXALOT_CACHE_TTL_BALANCE``.
+        cache_ttl_orderbook: TTL (seconds) for orderbook snapshots.
+            Env var: ``DEXALOT_CACHE_TTL_ORDERBOOK``.
+        timeouts: ``(connect_timeout, read_timeout)`` in seconds.
+        log_level: Log level string: ``DEBUG``, ``INFO``, ``WARNING``, ``ERROR``,
+            or ``CRITICAL``.
+            Env var: ``DEXALOT_LOG_LEVEL``.
+        log_format: Log output format: ``"console"`` (default) or ``"json"``.
+            Env var: ``DEXALOT_LOG_FORMAT``.
+        retry_enabled: Enable automatic retry with exponential backoff.
+            Env var: ``DEXALOT_RETRY_ENABLED``.
+        retry_max_attempts: Maximum number of retry attempts (≥1).
+            Env var: ``DEXALOT_RETRY_MAX_ATTEMPTS``.
+        retry_initial_delay: Initial retry delay in seconds (≥0).
+            Env var: ``DEXALOT_RETRY_INITIAL_DELAY``.
+        retry_max_delay: Maximum delay between retries in seconds.
+            Env var: ``DEXALOT_RETRY_MAX_DELAY``.
+        retry_exponential_base: Exponential backoff multiplier (≥1.0).
+            Env var: ``DEXALOT_RETRY_EXPONENTIAL_BASE`` (via code, not currently
+            loaded from env — use constructor kwargs).
+        retry_on_status: HTTP status codes that trigger a retry.
+        retry_on_exceptions: Exception types that trigger a retry.
+        rate_limit_enabled: Enable per-instance API and RPC rate limiters.
+            Env var: ``DEXALOT_RATE_LIMIT_ENABLED``.
+        rate_limit_requests_per_second: Max API HTTP calls per second (>0).
+            Env var: ``DEXALOT_RATE_LIMIT_REQUESTS_PER_SECOND``.
+        rate_limit_rpc_per_second: Max RPC calls per second (>0).
+            Env var: ``DEXALOT_RATE_LIMIT_RPC_PER_SECOND``.
+        nonce_manager_enabled: Serialise nonce acquisition per (chain_id, address)
+            to prevent double-nonce errors.
+            Env var: ``DEXALOT_NONCE_MANAGER_ENABLED``.
+        ws_manager_enabled: Enable the persistent WebSocket connection manager.
+            Env var: ``DEXALOT_WS_MANAGER_ENABLED``.
+        ws_ping_interval: Seconds between WebSocket ping messages (≥1).
+            Env var: ``DEXALOT_WS_PING_INTERVAL``.
+        ws_ping_timeout: Seconds to wait for a pong before reconnecting (≥1).
+            Env var: ``DEXALOT_WS_PING_TIMEOUT``.
+        ws_reconnect_initial_delay: Initial WebSocket reconnect delay in seconds.
+            Env var: ``DEXALOT_WS_RECONNECT_INITIAL_DELAY``.
+        ws_reconnect_max_delay: Maximum WebSocket reconnect delay in seconds.
+            Env var: ``DEXALOT_WS_RECONNECT_MAX_DELAY``.
+        ws_reconnect_exponential_base: Reconnect backoff multiplier (≥1.0).
+            Env var: ``DEXALOT_WS_RECONNECT_EXPONENTIAL_BASE``.
+        ws_reconnect_max_attempts: Max reconnection attempts; ``0`` = infinite.
+            Env var: ``DEXALOT_WS_RECONNECT_MAX_ATTEMPTS``.
+        ws_time_offset_ms: Clock skew offset in milliseconds added to the
+            system timestamp when signing WebSocket auth messages.  Use a
+            negative value if the local clock is ahead of the server.
+            The backend accepts timestamps within ±30 000 ms of server time.
+            Env var: ``DEXALOT_WS_TIME_OFFSET_MS``.
+        provider_failover_enabled: Enable automatic RPC provider failover.
+            Env var: ``DEXALOT_PROVIDER_FAILOVER_ENABLED``.
+        provider_failover_cooldown: Seconds before a failed provider is retried (≥0).
+            Env var: ``DEXALOT_PROVIDER_FAILOVER_COOLDOWN``.
+        provider_failover_max_failures: Consecutive failures before a provider is
+            marked unhealthy (≥1).
+            Env var: ``DEXALOT_PROVIDER_FAILOVER_MAX_FAILURES``.
+        erc20_balance_concurrency: Max concurrent ``balanceOf`` RPC calls during
+            bulk ERC20 balance fetches.
+            Env var: ``DEXALOT_ERC20_BALANCE_CONCURRENCY``.
+        allow_insecure_rpc: Allow ``http://`` RPC URLs.  Defaults to ``False``
+            (plaintext URLs raise ``ValueError`` at provider setup time).
+            Env var: ``DEXALOT_ALLOW_INSECURE_RPC``.
     """
 
     # connection settings
@@ -216,9 +308,17 @@ class DexalotConfig:
 
         return cls(**cast(Any, config_data))
 
-    def validate(self):  # noqa: C901
-        """
-        Validate the configuration.
+    def validate(self) -> None:  # noqa: C901
+        """Validate all configuration values and normalise where possible.
+
+        Called automatically by ``DexalotBaseClient.__init__``.  Raises
+        ``ValueError`` immediately on any invalid setting so misconfiguration
+        is caught at construction time rather than at runtime.
+
+        Raises:
+            ValueError: If any field fails validation (e.g. invalid
+                ``private_key`` format, negative delays, contradictory pool
+                limits, or invalid range/bound constraints).
         """
         if not self.parent_env:
             raise ValueError("parent_env cannot be empty")

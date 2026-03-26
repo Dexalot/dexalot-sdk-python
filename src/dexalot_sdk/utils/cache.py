@@ -29,6 +29,14 @@ class MemoryCache:
                 self._store.pop(k, None)
 
     def get(self, key: Hashable) -> Any | None:
+        """Return the cached value for *key*, or ``None`` if absent or expired.
+
+        Args:
+            key: Hashable cache key.
+
+        Returns:
+            Cached payload if present and not yet expired, otherwise ``None``.
+        """
         now = time.time()
         value = self._store.get(key)
         if not value:
@@ -40,7 +48,18 @@ class MemoryCache:
             return None
         return payload
 
-    def set(self, key: Hashable, value: Any):
+    def set(self, key: Hashable, value: Any) -> None:
+        """Store *value* under *key* with the current timestamp.
+
+        After each write:
+        - ``_trim()`` is called to enforce ``max_size`` (FIFO eviction).
+        - ``_cleanup()`` runs every ``_CLEANUP_INTERVAL`` writes to purge
+          expired entries.
+
+        Args:
+            key: Hashable cache key.
+            value: Value to cache.
+        """
         self._store[key] = (time.time(), value)
         self._trim()
         self._write_count += 1
@@ -48,7 +67,8 @@ class MemoryCache:
             self._cleanup()
             self._write_count = 0
 
-    def clear(self):
+    def clear(self) -> None:
+        """Remove all entries from the cache."""
         self._store.clear()
 
 

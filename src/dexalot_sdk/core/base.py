@@ -244,7 +244,16 @@ class DexalotBaseClient:
             self._provider_manager = None
 
     async def connect(self):
-        """Initialize aiohttp session."""
+        """Initialize the aiohttp HTTP session if it is not already open.
+
+        This is called automatically by ``initialize_client()`` and by the
+        async context manager (``async with client``). You only need to call
+        it directly if you construct the client outside a context manager and
+        before calling ``initialize_client()``.
+
+        Returns:
+            Self, to allow method chaining (e.g. ``await client.connect()``).
+        """
         if self._session is None or self._session.closed:
             # Configure timeout from config
             timeout = aiohttp.ClientTimeout(
@@ -654,10 +663,21 @@ class DexalotBaseClient:
             )
 
     async def initialize_client(self) -> Result[str]:
-        """Fetch all necessary configuration from Dexalot API.
+        """Fetch all configuration from the Dexalot API and set up on-chain contracts.
+
+        Must be called once before using any trading, swap, or transfer methods.
+        Fetches in order: environments (sets Web3 providers), then in parallel:
+        tokens, RFQ pairs, contract deployments, and CLOB trading pairs.
 
         Returns:
-            Result with success message on success, or error message on failure
+            Result containing ``"Client initialized with all configurations."`` on
+            success, or an error message on failure.
+
+        Example:
+            >>> async with DexalotClient() as client:
+            ...     result = await client.initialize_client()
+            ...     if not result.success:
+            ...         raise RuntimeError(result.error)
         """
         await self.connect()
         with track_operation(self.logger, "initialize_client", parent_env=self.parent_env):
@@ -916,21 +936,25 @@ class DexalotBaseClient:
                 raise Exception(f"Failed to fetch CLOB pairs: {result.error}")
 
     async def reinitialize(self, force_refresh: bool = False) -> Result[str]:
-        """Reinitialize all client configuration data.
+        """Refresh all configuration data loaded during ``initialize_client()``.
 
-        Refreshes all data loaded during `initialize_client()`:
-        - Environments (chain_config, w3_l1, w3_mainnet, mainnet_providers, chain_id, subnet_chain_id, env)
-        - Tokens (token_data)
-        - RFQ pairs (rfq_pairs)
-        - Deployments (deployments, contract instances)
-        - CLOB pairs (pairs)
+        Use this in long-running processes when trading pairs, token metadata, or
+        contract deployments may have changed.  Refreshes:
+
+        - Environments (``chain_config``, Web3 providers, ``chain_id``, ``subnet_chain_id``)
+        - Tokens (``token_data``)
+        - RFQ pairs (``rfq_pairs``)
+        - Deployments (``deployments``, contract instances)
+        - CLOB pairs (``pairs``)
 
         Args:
-            force_refresh: If True, clears relevant caches before reinitializing.
-                          This ensures fresh data is fetched even if cache TTL hasn't expired.
+            force_refresh: If ``True``, clears the static and semi-static caches
+                before fetching, guaranteeing fresh data regardless of TTL.
+                Defaults to ``False``.
 
         Returns:
-            Result with success message on success, or error message on failure
+            Result containing ``"Client reinitialized with all configurations."`` on
+            success, or an error message on failure.
         """
         await self.connect()
         with track_operation(self.logger, "reinitialize", parent_env=self.parent_env):
@@ -1079,13 +1103,18 @@ class DexalotBaseClient:
 
     @async_ttl_cached(_STATIC_CACHE)
     async def get_environments(self) -> Result[list]:
-        """Fetch and return the list of environments.
+        """Fetch the list of Dexalot trading environments from the API.
+
+        Each environment entry describes one blockchain network (subnet or mainnet)
+        including its chain ID, RPC endpoint, and environment type.  Results are
+        normalised to snake_case field names before returning.
+
+        Note:
+            Cached for 1 hour (static cache tier).
 
         Returns:
-            Result[list]: List of environments on success, error message on failure.
-
-        Note: Cached for 1 hour (static data). Environments are transformed to
-        standardized field names (snake_case) before returning.
+            Result containing a list of environment dicts on success, or an error
+            message on failure.
         """
         if not self._cache_enabled:
             # Bypass cache by clearing it for this call
@@ -1107,12 +1136,18 @@ class DexalotBaseClient:
 
     @async_ttl_cached(_STATIC_CACHE)
     async def get_mainnets(self) -> Result[dict]:
-        """Return a dictionary of connected mainnet networks: {chain_id: chain_name}.
+        """Return a mapping of connected mainnet chain IDs to their display names.
+
+        Note:
+            Cached for 1 hour (static cache tier).
 
         Returns:
-            Result[dict]: Dictionary mapping chain_id to chain_name on success, error message on failure.
+            Result containing ``{chain_id: chain_name}`` on success, or an error
+            message on failure.
 
-        Note: Cached for 1 hour (static data). Always fetches from API (respecting cache TTL).
+        Example:
+            >>> result = await client.get_mainnets()
+            >>> # {43114: "Avalanche", 1: "Ethereum", ...}
         """
         if not self._cache_enabled:
             # Bypass cache by clearing it for this call
@@ -1173,14 +1208,19 @@ class DexalotBaseClient:
 
     @async_ttl_cached(_SEMI_STATIC_CACHE)
     async def get_tokens(self) -> Result[list]:
-        """Get list of available tokens on Dexalot as a list of mainnet tokens as Dexalot L1 does not allow any ERC20 deployments.
+        """Fetch the list of tokens available on Dexalot (mainnet tokens only).
+
+        Returns one entry per unique token symbol, keyed to a mainnet chain.
+        Dexalot L1 does not allow ERC20 deployments, so only mainnet token
+        addresses are included.  Results are normalised to snake_case fields.
+
+        Note:
+            Cached for 15 minutes (semi-static cache tier).
 
         Returns:
-            Result[list]: List of token objects with symbol, name, address, decimals, etc. on success,
-                         error message on failure.
-
-        Note: Cached for 15 minutes (semi-static data). Always fetches from API (respecting cache TTL).
-        Tokens are transformed to standardized field names (snake_case) before returning.
+            Result containing a list of token dicts (``symbol``, ``name``,
+            ``decimals``, ``address``, ``chain``, ``chain_id``) on success, or an
+            error message on failure.
         """
         if not self._cache_enabled:
             # Bypass cache by clearing it for this call
@@ -1239,12 +1279,19 @@ class DexalotBaseClient:
 
     @async_ttl_cached(_STATIC_CACHE)
     async def get_deployment(self) -> Result[dict]:
-        """Get deployment configuration.
+        """Fetch contract deployment configuration (addresses and ABIs) from the API.
+
+        Populates and returns ``self.deployments`` with entries for
+        ``TradePairs``, ``PortfolioMain``, ``PortfolioSub``, and ``MainnetRFQ``.
+        Also wires up on-chain contract instances (``trade_pairs_contract``,
+        ``portfolio_sub_contract``, ``portfolio_main_avax_contract``).
+
+        Note:
+            Cached for 1 hour (static cache tier).
 
         Returns:
-            Result[dict]: Deployment configuration dictionary on success, error message on failure.
-
-        Note: Cached for 1 hour (static data). Always fetches from API (respecting cache TTL).
+            Result containing the ``deployments`` dictionary on success, or an
+            error message on failure.
         """
         if not self._cache_enabled:
             # Bypass cache by clearing it for this call

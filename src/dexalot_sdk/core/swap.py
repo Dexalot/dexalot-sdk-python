@@ -34,13 +34,19 @@ class SwapClient(DexalotBaseClient):
 
     @async_ttl_cached(_SEMI_STATIC_CACHE)
     @track_method("swap")
-    async def get_swap_pairs(self, chain_identifier) -> Result[dict]:
-        """
-        Get available swap pairs for a specific chain.
-        :param chain_identifier: Chain ID (int) or Chain Name (str)
-        :return: Result with dictionary of pairs on success, or error message on failure
+    async def get_swap_pairs(self, chain_identifier: int | str) -> Result[dict]:
+        """Fetch available SimpleSwap (RFQ) pairs for a specific chain.
 
-        Note: Cached for 15 minutes (semi-static data). Always fetches from API (respecting cache TTL).
+        Note:
+            Cached for 15 minutes (semi-static cache tier).
+
+        Args:
+            chain_identifier: Chain ID (``int``) or chain name (``str``), e.g.
+                ``43114`` or ``"Avalanche"``.
+
+        Returns:
+            Result containing a dict of RFQ pair data keyed by pair symbol on
+            success, or an error message on failure.
         """
         if not self._cache_enabled:
             # Bypass cache by clearing it for this call
@@ -196,14 +202,22 @@ class SwapClient(DexalotBaseClient):
         return transformed
 
     async def _get_swap_quote_base(
-        self, from_token, to_token, amount, chain_id=43114, firm=False
+        self, from_token: str, to_token: str, amount: float, chain_id: int | None = 43114, firm: bool = False
     ) -> Result[dict]:
-        """
-        Internal helper to get a quote for SimpleSwap.
-        firm: If True, get a firm quote (executable). If False, get an indicative quote.
+        """Internal helper to request a quote from the RFQ API.
+
+        Args:
+            from_token: Symbol of the token to sell.
+            to_token: Symbol of the token to buy.
+            amount: Amount of ``from_token`` in human-readable units.
+            chain_id: Numeric chain ID (defaults to Avalanche mainnet, 43114).
+            firm: If ``True``, request a firm (executable, signed) quote via
+                ``firmquote`` endpoint.  If ``False``, request an indicative
+                (soft) quote via ``pairprice`` endpoint.
 
         Returns:
-            Result with quote data (dict) on success, or error message on failure
+            Result containing a normalised quote dict on success, or an error
+            message on failure.
         """
         chain_id_int = self._resolve_chain_id(chain_id) or CHAIN_ID_AVAX_MAINNET
 
@@ -310,14 +324,22 @@ class SwapClient(DexalotBaseClient):
     async def get_swap_firm_quote(
         self, from_token: str, to_token: str, amount: float, chain_id: int | None = None
     ) -> Result[dict]:
-        """
-        Get a firm quote for a swap (executable).
+        """Request a firm (signed, executable) quote for a SimpleSwap.
 
-        :param from_token: Symbol of token to sell
-        :param to_token: Symbol of token to buy
-        :param amount: Amount of from_token to sell
-        :param chain_id: Chain ID (optional, defaults to self.chain_id)
-        :return: Result with firm quote dictionary on success, or error message on failure
+        A firm quote is cryptographically signed by the market maker and can be
+        passed directly to ``execute_rfq_swap()``.  Firm quotes have a limited
+        validity window.
+
+        Args:
+            from_token: Symbol of the token to sell (e.g. ``"AVAX"``).
+            to_token: Symbol of the token to buy (e.g. ``"USDC"``).
+            amount: Amount of ``from_token`` to sell in human-readable units.
+            chain_id: Numeric chain ID.  Defaults to ``self.chain_id`` (set
+                during ``initialize_client()``).
+
+        Returns:
+            Result containing a firm quote dict (including ``secure_quote`` and
+            ``quote_id``) on success, or an error message on failure.
         """
         # Validate swap parameters
         swap_params_result = validate_swap_params(from_token, to_token, amount)
@@ -338,14 +360,21 @@ class SwapClient(DexalotBaseClient):
     async def get_swap_soft_quote(
         self, from_token: str, to_token: str, amount: float, chain_id: int | None = None
     ) -> Result[dict]:
-        """
-        Get a soft quote (indicative price).
+        """Request a soft (indicative) quote for a SimpleSwap.
 
-        :param from_token: Symbol of token to sell
-        :param to_token: Symbol of token to buy
-        :param amount: Amount of from_token to sell
-        :param chain_id: Chain ID (optional, defaults to self.chain_id)
-        :return: Result with soft quote dictionary on success, or error message on failure
+        A soft quote shows an estimated price but is not signed and cannot be
+        executed directly.  Use ``get_swap_firm_quote()`` when you need an
+        executable quote.
+
+        Args:
+            from_token: Symbol of the token to sell (e.g. ``"AVAX"``).
+            to_token: Symbol of the token to buy (e.g. ``"USDC"``).
+            amount: Amount of ``from_token`` to sell in human-readable units.
+            chain_id: Numeric chain ID.  Defaults to ``self.chain_id``.
+
+        Returns:
+            Result containing an indicative quote dict on success, or an error
+            message on failure.
         """
         # Validate swap parameters
         swap_params_result = validate_swap_params(from_token, to_token, amount)
@@ -364,11 +393,24 @@ class SwapClient(DexalotBaseClient):
 
     @track_method("swap")
     async def execute_rfq_swap(self, quote: dict, wait_for_receipt: bool = True) -> Result[str]:
-        """
-        Execute an RFQ swap using a firm quote.
+        """Execute a SimpleSwap using a firm quote from ``get_swap_firm_quote()``.
 
-        :param quote: The firm quote dictionary returned by get_swap_firm_quote.
-        :return: Result with transaction hash message on success, or error message on failure
+        Signs the quote with the current account's private key and submits the
+        transaction to the ``MainnetRFQ`` contract.
+
+        Args:
+            quote: Firm quote dict as returned by ``get_swap_firm_quote()``.
+                Also accepts a ``Result[dict]`` directly — if the result is
+                unsuccessful, fails immediately.
+            wait_for_receipt: If ``True``, block until the swap transaction is
+                confirmed on-chain.
+
+        Returns:
+            Result containing a confirmation message with the transaction hash on
+            success, or an error message on failure.
+
+        Raises:
+            ValueError: If no signer account is configured.
         """
         if not self.account:
             raise ValueError(

@@ -168,16 +168,21 @@ class CLOBClient(DexalotBaseClient):
 
     @async_ttl_cached(_ORDERBOOK_CACHE)
     @track_method("clob")
-    async def get_orderbook(self, pair) -> Result[dict]:
-        """
-        Get the orderbook snapshot for a pair using getNBook contract method.
-        Returns top 10 bids and asks.
+    async def get_orderbook(self, pair: str) -> Result[dict]:
+        """Fetch the top-10 bids and asks for a trading pair.
 
-        Note: Cached for 1 second (real-time data with short TTL to reduce API load).
+        Reads directly from the ``TradePairs`` contract via ``getNBook``.
+
+        Note:
+            Cached for 1 second (orderbook cache tier).
+
+        Args:
+            pair: Trading pair symbol, e.g. ``"AVAX/USDC"``.
 
         Returns:
-            Result with orderbook data (dict with 'pair', 'bids', 'asks') on success,
-            or error message on failure
+            Result containing ``{"pair": str, "bids": list, "asks": list}`` where
+            each bid/ask entry is ``{"price": float, "quantity": float}``.
+            Returns an error message on failure.
         """
         # Validate pair format
         pair_result = validate_pair_format(pair, "pair")
@@ -243,16 +248,27 @@ class CLOBClient(DexalotBaseClient):
 
     @track_method("clob")
     async def add_order(
-        self, pair, side, amount, price, order_type="LIMIT", wait_for_receipt: bool = True
+        self, pair: str, side: str, amount: float, price,
+        order_type: str = "LIMIT", wait_for_receipt: bool = True
     ) -> Result[dict]:
-        """
-        Place a new order.
-        side: 'BUY' or 'SELL'
-        order_type: 'LIMIT' or 'MARKET'
+        """Place a single limit or market order on the CLOB.
+
+        Checks portfolio balance before submitting.  Rounds ``price`` and
+        ``amount`` to the pair's display decimals before encoding.
+
+        Args:
+            pair: Trading pair symbol, e.g. ``"AVAX/USDC"``.
+            side: ``"BUY"`` or ``"SELL"`` (case-insensitive).
+            amount: Order quantity in base-token units (human-readable).
+            price: Limit price in quote-token units.  Required for ``"LIMIT"``
+                orders; ignored for ``"MARKET"`` orders.
+            order_type: ``"LIMIT"`` (default) or ``"MARKET"``.
+            wait_for_receipt: If ``True``, block until the transaction is
+                confirmed on-chain and return the receipt status.
 
         Returns:
-            Result with order details (dict with 'status', 'tx_hash', 'client_order_id') on success,
-            or error message on failure
+            Result containing ``{"status": str, "tx_hash": str, "client_order_id": str}``
+            on success, or an error message on failure.
         """
         if not self.account:
             return Result.fail("Private key not configured.")
@@ -355,11 +371,23 @@ class CLOBClient(DexalotBaseClient):
             return Result.fail(error_msg)
 
     @track_method("clob")
-    async def cancel_order(self, order_id, wait_for_receipt: bool = True) -> Result[str]:
-        """Cancel a single order by ID (Internal or Client ID).
+    async def cancel_order(self, order_id: str | bytes, wait_for_receipt: bool = True) -> Result[str]:
+        """Cancel a single open order by its Internal ID or Client Order ID.
+
+        Automatically detects whether ``order_id`` is an internal order ID
+        (starts with ``\\x00``) or a client-generated ID and tries the most
+        likely contract method first, falling back to the alternative on failure.
+
+        Args:
+            order_id: Order identifier as a hex string (``"0x..."``), plain
+                string, or ``bytes32``.  Both internal IDs and client order IDs
+                are accepted.
+            wait_for_receipt: If ``True``, block until the cancellation
+                transaction is confirmed on-chain.
 
         Returns:
-            Result with transaction hash message on success, or error message on failure
+            Result containing a confirmation message with the transaction hash on
+            success, or an error message on failure.
         """
         if not self.account:
             return Result.fail("Private key not configured.")
@@ -473,10 +501,15 @@ class CLOBClient(DexalotBaseClient):
 
     @track_method("clob")
     async def cancel_all_orders(self) -> Result[str]:
-        """Cancels all open orders.
+        """Cancel all open orders for the current account in a single transaction.
+
+        Fetches open orders via ``get_open_orders()`` then delegates to
+        ``cancel_list_orders()`` with all internal IDs.
 
         Returns:
-            Result with success message on success, or error message on failure
+            Result containing a confirmation message with the transaction hash on
+            success, or an error message if no open orders are found or the
+            cancellation fails.
         """
         open_orders_result = await self.get_open_orders()
         if not open_orders_result.success:
@@ -575,11 +608,18 @@ class CLOBClient(DexalotBaseClient):
 
         return transformed
 
-    async def get_open_orders(self, pair=None) -> Result[list]:
-        """Fetches open orders from the REST API.
+    async def get_open_orders(self, pair: str | None = None) -> Result[list]:
+        """Fetch open orders for the current account from the REST API.
+
+        Args:
+            pair: Optional trading pair filter, e.g. ``"AVAX/USDC"``.  If
+                ``None``, returns all open orders across all pairs.
 
         Returns:
-            Result with list of open orders on success, or error message on failure
+            Result containing a list of order dicts on success, or an error
+            message on failure.  Each dict includes fields such as ``id``,
+            ``clientOrderId``, ``tradePairId``, ``price``, ``quantity``,
+            ``filledQuantity``, ``side``, and ``status``.
         """
         if not self.account:
             return Result.fail("Private key not configured.")
@@ -595,7 +635,7 @@ class CLOBClient(DexalotBaseClient):
 
         try:
             headers = self._get_auth_headers()
-            params = {"category": 0}  # 0 = Open Orders
+            params: dict[str, Any] = {"category": 0}  # 0 = Open Orders
             if pair:
                 params["pair"] = pair
 
@@ -626,11 +666,21 @@ class CLOBClient(DexalotBaseClient):
             return Result.fail(error_msg)
 
     @track_method("clob")
-    async def get_order(self, order_id) -> Result[dict]:
-        """Returns the details of the order given (by Internal ID or Client ID).
+    async def get_order(self, order_id: str | bytes) -> Result[dict]:
+        """Fetch the details of an order by its Internal ID or Client Order ID.
+
+        Tries ``getOrder`` (internal ID) first; falls back to
+        ``getOrderByClientId`` if the result is empty.
+
+        Args:
+            order_id: Order identifier as a hex string (``"0x..."``), plain
+                string, or ``bytes32``.
 
         Returns:
-            Result with order details (dict) on success, or error message on failure
+            Result containing an order dict with ``id``, ``clientOrderId``,
+            ``tradePairId``, ``price``, ``quantity``, ``filledQuantity``,
+            ``side``, ``type``, ``status``, and ``pair`` on success, or an
+            error message on failure.
         """
         if not self.account:
             return Result.fail("Private key not configured.")
@@ -687,11 +737,19 @@ class CLOBClient(DexalotBaseClient):
             return Result.fail(error_msg)
 
     @track_method("clob")
-    async def get_order_by_client_id(self, client_order_id) -> Result[dict]:
-        """Returns the details of the order given by Client Order ID.
+    async def get_order_by_client_id(self, client_order_id: str | bytes) -> Result[dict]:
+        """Fetch the details of an order by its Client Order ID only.
+
+        Unlike ``get_order``, this method never falls back to the internal ID
+        and always calls ``getOrderByClientOrderId`` on the contract.
+
+        Args:
+            client_order_id: Client-generated order ID as a hex string
+                (``"0x..."``), plain string, or ``bytes32``.
 
         Returns:
-            Result with order details (dict) on success, or error message on failure
+            Result containing an order dict (same fields as ``get_order``) on
+            success, or an error message on failure.
         """
         if not self.account:
             return Result.fail("Private key not configured.")
@@ -939,14 +997,23 @@ class CLOBClient(DexalotBaseClient):
         return order_tuples, client_order_ids, required_balances, None
 
     @track_method("clob")
-    async def add_limit_order_list(self, orders, wait_for_receipt: bool = True) -> Result[dict]:
-        """
-        Add a list of BUY or SELL Limit Orders in a single transaction.
-        orders: List of dicts: {"pair": "AVAX/USDC", "side": "BUY", "amount": 1.0, "price": 10.0}
+    async def add_limit_order_list(self, orders: list[dict], wait_for_receipt: bool = True) -> Result[dict]:
+        """Place multiple limit orders in a single on-chain transaction.
+
+        Checks aggregated portfolio balances across all orders before submitting.
+
+        Args:
+            orders: List of order dicts, each with:
+                - ``pair`` (str): Trading pair, e.g. ``"AVAX/USDC"``.
+                - ``side`` (str): ``"BUY"`` or ``"SELL"``.
+                - ``amount`` (float): Quantity in base-token units.
+                - ``price`` (float): Limit price in quote-token units.
+            wait_for_receipt: If ``True``, block until the transaction is
+                confirmed on-chain.
 
         Returns:
-            Result with order details (dict with 'tx_hash', 'client_order_ids') on success,
-            or error message on failure
+            Result containing ``{"tx_hash": str, "client_order_ids": list[str]}``
+            on success, or an error message on failure.
         """
         if not self.account:
             return Result.fail("Private key not configured.")
@@ -997,11 +1064,18 @@ class CLOBClient(DexalotBaseClient):
             return Result.fail(error_msg)
 
     @track_method("clob")
-    async def cancel_list_orders(self, order_ids, wait_for_receipt: bool = True) -> Result[str]:
-        """Cancels all orders contained in the given array of order ids (Internal IDs).
+    async def cancel_list_orders(self, order_ids: list, wait_for_receipt: bool = True) -> Result[str]:
+        """Cancel multiple orders by Internal ID in a single on-chain transaction.
+
+        Args:
+            order_ids: List of internal order IDs.  Each element may be a hex
+                string (``"0x..."``), a decimal string, an integer, or ``bytes32``.
+            wait_for_receipt: If ``True``, block until the cancellation is
+                confirmed on-chain.
 
         Returns:
-            Result with transaction hash message on success, or error message on failure
+            Result containing a confirmation message with the transaction hash on
+            success, or an error message on failure.
         """
         if not self.account:
             return Result.fail("Private key not configured.")
@@ -1047,14 +1121,25 @@ class CLOBClient(DexalotBaseClient):
 
     @track_method("clob")
     async def replace_order(
-        self, order_id, new_price, new_amount, wait_for_receipt: bool = True
+        self, order_id: str | bytes, new_price: float, new_amount: float,
+        wait_for_receipt: bool = True
     ) -> Result[str]:
-        """
-        Cancels the given order and replaces it with one for the same pair with the given price and quantity.
-        Uses cancelAndReplaceOrder.
+        """Cancel an existing order and replace it atomically with new price and quantity.
+
+        Uses the contract's ``cancelReplaceOrder`` function.  Fetches the
+        existing order to determine the pair and decimal precision.
+
+        Args:
+            order_id: Identifier of the order to replace (hex string, plain
+                string, or ``bytes32``).
+            new_price: New limit price in quote-token units.
+            new_amount: New quantity in base-token units.
+            wait_for_receipt: If ``True``, block until the transaction is
+                confirmed on-chain.
 
         Returns:
-            Result with transaction hash message on success, or error message on failure
+            Result containing a confirmation message with the transaction hash on
+            success, or an error message on failure.
         """
         if not self.account:
             return Result.fail("Private key not configured.")
@@ -1108,12 +1193,19 @@ class CLOBClient(DexalotBaseClient):
 
     @track_method("clob")
     async def cancel_list_orders_by_client_id(
-        self, client_order_ids, wait_for_receipt: bool = True
+        self, client_order_ids: list, wait_for_receipt: bool = True
     ) -> Result[str]:
-        """Cancels all orders contained in the given array of Client Order IDs.
+        """Cancel multiple orders by Client Order ID in a single on-chain transaction.
+
+        Args:
+            client_order_ids: List of client-generated order IDs.  Each element
+                may be a hex string (``"0x..."``), a plain string, or ``bytes32``.
+            wait_for_receipt: If ``True``, block until the cancellation is
+                confirmed on-chain.
 
         Returns:
-            Result with transaction hash message on success, or error message on failure
+            Result containing a confirmation message with the transaction hash on
+            success, or an error message on failure.
         """
         if not self.account:
             return Result.fail("Private key not configured.")
@@ -1153,15 +1245,25 @@ class CLOBClient(DexalotBaseClient):
 
     @track_method("clob")
     async def cancel_add_list(
-        self, replacements: list, wait_for_receipt: bool = True
+        self, replacements: list[dict], wait_for_receipt: bool = True
     ) -> Result[dict]:
-        """
-        To Cancel/Replace multiple Orders in a single transaction using cancelAddList.
-        replacements: List of dicts: {"order_id": "...", "pair": "AVAX/USDC", "side": "BUY", "amount": 1.0, "price": 10.0}
+        """Cancel existing orders and place new ones atomically in a single transaction.
+
+        Uses the contract's ``cancelAddList`` function.
+
+        Args:
+            replacements: List of replacement dicts, each with:
+                - ``order_id`` (str | bytes): ID of the order to cancel.
+                - ``pair`` (str): Trading pair, e.g. ``"AVAX/USDC"``.
+                - ``side`` (str): ``"BUY"`` or ``"SELL"``.
+                - ``amount`` (float): New quantity in base-token units.
+                - ``price`` (float): New limit price in quote-token units.
+            wait_for_receipt: If ``True``, block until the transaction is
+                confirmed on-chain.
 
         Returns:
-            Result with transaction details (dict with 'tx_hash') on success,
-            or error message on failure
+            Result containing ``{"tx_hash": str}`` on success, or an error
+            message on failure.
         """
         if not self.account:
             return Result.fail("Private key not configured.")
@@ -1288,16 +1390,23 @@ class CLOBClient(DexalotBaseClient):
     async def subscribe_to_events(
         self, topic: str, callback: Callable, is_private: bool = False
     ) -> None:
-        """
-        Subscribe to WebSocket events with a callback.
+        """Subscribe to real-time WebSocket events for a topic.
+
+        Requires ``ws_manager_enabled=True`` in config (or ``DEXALOT_WS_MANAGER_ENABLED=true``).
+        The WebSocket connection is started automatically on first subscription.
 
         Args:
-            topic: Topic to subscribe to (e.g., "OrderBook/AVAX/USDC" or "Orders")
-            callback: Callable that receives message data (dict)
-            is_private: Whether this is a private topic requiring authentication
+            topic: Topic to subscribe to.  Public orderbook topics use the
+                format ``"AVAX/USDC"`` or ``"OrderBook/AVAX/USDC"``.  Private
+                trader event topics (e.g. ``"Orders"``) require ``is_private=True``.
+            callback: Async or sync callable invoked with each message payload
+                (a dict).  Runs on the asyncio event loop.
+            is_private: Set to ``True`` for topics that require authentication
+                (orders, executions, balance updates).
 
         Raises:
-            RuntimeError: If WebSocket is disabled in config
+            RuntimeError: If ``ws_manager_enabled`` is ``False`` in config.
+            ValueError: If the orderbook pair for a public topic is not found.
         """
         manager = self._get_ws_manager()
         if manager is None:
@@ -1330,21 +1439,27 @@ class CLOBClient(DexalotBaseClient):
             manager.subscribe(topic, callback, is_private)
 
     def unsubscribe_from_events(self, topic: str) -> None:
-        """
-        Unsubscribe from a topic.
+        """Unsubscribe from a previously subscribed WebSocket topic.
+
+        No-op if the WebSocket manager is not initialised or the topic is not
+        currently subscribed.
 
         Args:
-            topic: Topic to unsubscribe from
+            topic: Topic string matching the one used in ``subscribe_to_events``.
         """
         if hasattr(self, "_ws_manager") and self._ws_manager is not None:
             self._ws_manager.unsubscribe(topic)
 
     async def close_websocket(self, *, grace_s: float = 3.0) -> None:
-        """Close WebSocket connection and cleanup.
+        """Gracefully close the WebSocket connection and cancel its background task.
 
-        Awaits ``mgr.disconnect()`` (which cancels the background asyncio task)
-        with an optional timeout.  On timeout or ``CancelledError`` we return
-        without re-raising so that test/fixture teardown can finish cleanly.
+        Awaits ``disconnect()`` on the WebSocket manager with a timeout of
+        ``grace_s`` seconds.  Returns cleanly on timeout or ``CancelledError``
+        so that teardown code is not blocked.
+
+        Args:
+            grace_s: Maximum seconds to wait for the background task to finish
+                before returning regardless.  Defaults to ``3.0``.
         """
         if not hasattr(self, "_ws_manager") or self._ws_manager is None:
             return

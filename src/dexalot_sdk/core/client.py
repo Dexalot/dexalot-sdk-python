@@ -1,3 +1,5 @@
+from typing import Any
+
 from ..utils import Utils
 from ..utils.observability import configure_logging
 from .clob import CLOBClient
@@ -53,7 +55,22 @@ class DexalotClient(CLOBClient, SwapClient, TransferClient):
         self._ws_manager = None
 
     @staticmethod
-    def unit_conversion(amount, decimals, to_base=True):
+    def unit_conversion(amount: float, decimals: int, to_base: bool = True) -> Any:
+        """Convert between human-readable and atomic (wei-like) units.
+
+        Args:
+            amount: The value to convert.
+            decimals: Number of decimal places for the token (e.g. 18 for AVAX, 6 for USDC).
+            to_base: If True, multiply by 10**decimals (human → atomic).
+                     If False, divide by 10**decimals (atomic → human).
+
+        Returns:
+            Converted amount as a float.
+
+        Example:
+            >>> DexalotClient.unit_conversion(1.5, 18)       # → 1500000000000000000
+            >>> DexalotClient.unit_conversion(1_000_000, 6, to_base=False)  # → 1.0
+        """
         return Utils.unit_conversion(amount, decimals, to_base)
 
     @staticmethod
@@ -72,6 +89,19 @@ class DexalotClient(CLOBClient, SwapClient, TransferClient):
         """
         configure_logging(log_level=log_level, log_format=log_format)
 
-    def get_revert_reason(self, error_msg):
-        """Expose internal revert reason parser."""
-        return self._parse_revert_reason(error_msg)
+    def get_revert_reason(self, error_msg: Any) -> str:
+        """Parse a contract revert error message into a human-readable description.
+
+        Looks up the error code in the loaded ``errors.json`` table and returns
+        a descriptive message when a match is found. Returns the original message
+        unchanged if no code matches.
+
+        Args:
+            error_msg: Raw error string from a failed transaction, typically
+                       containing a 4-byte error selector or named error code.
+
+        Returns:
+            Human-readable error description, or the original ``error_msg`` if
+            no matching code is found.
+        """
+        return str(self._parse_revert_reason(error_msg))
