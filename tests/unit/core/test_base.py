@@ -144,7 +144,7 @@ class TestDexalotBaseClient:
 
         # Verify Web3 initialization
         assert client.w3_l1 is not None
-        assert client.w3_mainnet is not None
+        assert client.w3_connected_chain is not None
 
     async def test_initialize_client_failure(self, client):
         """Test initialization failure handling."""
@@ -868,7 +868,7 @@ class TestDexalotBaseClient:
 
         # Check that it didn't crash and logged warning
         assert "Avalanche" in client.chain_config
-        assert "Avalanche" not in client.mainnet_providers
+        assert "Avalanche" not in client.connected_chain_providers
 
     async def test_coverage_gaps(self, client):
         """Test edge cases in initialization."""
@@ -940,7 +940,7 @@ class TestDexalotBaseClient:
 
     async def test_get_tokens_with_cached_data(self, client):
         """Test get_tokens() with cached token_data."""
-        # Setup chain_config with mainnet chain IDs
+        # Setup chain_config with connected-chain IDs
         client.chain_config = {
             "Avalanche": {"chain_id": 43114},
             "Fuji": {"chain_id": 43113},
@@ -1151,8 +1151,8 @@ class TestDexalotBaseClient:
         assert not result.success
         assert "API Error" in result.error or "getting tokens" in result.error
 
-    async def test_get_tokens_filters_by_mainnet_chain_id(self, client):
-        """Test get_tokens() only includes mainnet tokens."""
+    async def test_get_tokens_filters_by_connected_chain_id(self, client):
+        """Test get_tokens() only includes connected-chain tokens."""
         client.chain_config = {"Fuji": {"chain_id": 43113}}
 
         # Mock environments and tokens API
@@ -1333,31 +1333,33 @@ class TestDexalotBaseClient:
         client._session = None
         await client.close()
 
-    async def test_close_web3_providers_w3_mainnet_disconnect_exception(self, client):
-        """Test _close_web3_providers when w3_mainnet.provider.disconnect() raises exception."""
-        # Set up w3_mainnet with a provider that raises exception on disconnect
+    async def test_close_web3_providers_w3_connected_chain_disconnect_exception(self, client):
+        """Test _close_web3_providers when w3_connected_chain.provider.disconnect() raises exception."""
+        # Set up w3_connected_chain with a provider that raises exception on disconnect
         mock_provider = AsyncMock()
         mock_provider.disconnect = AsyncMock(side_effect=Exception("Disconnect failed"))
-        mock_w3_mainnet = MagicMock()
-        mock_w3_mainnet.provider = mock_provider
-        client.w3_mainnet = mock_w3_mainnet
+        mock_w3_connected_chain = MagicMock()
+        mock_w3_connected_chain.provider = mock_provider
+        client.w3_connected_chain = mock_w3_connected_chain
 
         # Should not raise exception, should handle gracefully
         await client._close_web3_providers()
 
         # Verify disconnect was called
         mock_provider.disconnect.assert_called_once()
-        # Verify w3_mainnet was set to None
-        assert client.w3_mainnet is None
+        # Verify w3_connected_chain was set to None
+        assert client.w3_connected_chain is None
 
-    async def test_close_web3_providers_mainnet_providers_disconnect_exception(self, client):
-        """Test _close_web3_providers when mainnet_providers disconnect raises exception."""
-        # Set up mainnet_providers with providers that raise exceptions on disconnect
+    async def test_close_web3_providers_connected_chain_providers_disconnect_exception(
+        self, client
+    ):
+        """Test _close_web3_providers when connected_chain_providers disconnect raises exception."""
+        # Set up connected_chain_providers with providers that raise exceptions on disconnect
         mock_provider1 = AsyncMock()
         mock_provider1.provider.disconnect = AsyncMock(side_effect=Exception("Disconnect failed 1"))
         mock_provider2 = AsyncMock()
         mock_provider2.provider.disconnect = AsyncMock(side_effect=Exception("Disconnect failed 2"))
-        client.mainnet_providers = {
+        client.connected_chain_providers = {
             "Avalanche": mock_provider1,
             "Fuji": mock_provider2,
         }
@@ -1368,8 +1370,8 @@ class TestDexalotBaseClient:
         # Verify disconnect was called for both providers
         mock_provider1.provider.disconnect.assert_called_once()
         mock_provider2.provider.disconnect.assert_called_once()
-        # Verify mainnet_providers was cleared
-        assert len(client.mainnet_providers) == 0
+        # Verify connected_chain_providers was cleared
+        assert len(client.connected_chain_providers) == 0
 
     async def test_rate_limiter_disabled(self, mock_env):
         """Test that rate limiters are None when rate_limit_enabled is False."""
@@ -1512,11 +1514,11 @@ class TestDexalotBaseClient:
         client_without_failover = DexalotBaseClient(config=config)
         assert client_without_failover._provider_manager is None
 
-    async def test_find_chain_for_provider_mainnet_providers(self, client):
-        """Test _find_chain_for_provider finding provider in mainnet_providers."""
+    async def test_find_chain_for_provider_connected_chain_providers(self, client):
+        """Test _find_chain_for_provider finding provider in connected_chain_providers."""
 
         mock_provider = MagicMock()
-        client.mainnet_providers["TestChain"] = mock_provider
+        client.connected_chain_providers["TestChain"] = mock_provider
 
         chain_name = client._find_chain_for_provider(mock_provider)
         assert chain_name == "TestChain"
@@ -1749,7 +1751,7 @@ class TestDexalotBaseClient:
 
     @patch("dexalot_sdk.utils.provider_manager.AsyncWeb3")
     @patch("dexalot_sdk.core.base.AsyncWeb3")
-    async def test_process_env_config_provider_init_fails_mainnet(
+    async def test_process_env_config_provider_init_fails_connected_chain_env(
         self, mock_web3_base, mock_web3_provider, client
     ):
         """Test _process_environment_config when AsyncWeb3 init fails in fallback."""
@@ -1771,8 +1773,8 @@ class TestDexalotBaseClient:
 
         # Should not raise, but log warning
         await client_without_failover._process_environment_config(env)
-        # Provider should not be in mainnet_providers
-        assert "TestChain" not in client_without_failover.mainnet_providers
+        # Provider should not be in connected_chain_providers
+        assert "TestChain" not in client_without_failover.connected_chain_providers
 
     @patch("dexalot_sdk.utils.provider_manager.AsyncWeb3")
     @patch("dexalot_sdk.core.base.AsyncWeb3")
@@ -1815,15 +1817,15 @@ class TestDexalotBaseClient:
         await client_without_failover._process_environment_config(env)
         assert client_without_failover.w3_l1 is None
 
-    async def test_setup_mainnet_provider_empty_rpc_urls(self, client):
-        """Test _setup_mainnet_provider when rpc_urls is empty."""
+    async def test_setup_connected_chain_provider_empty_rpc_urls(self, client):
+        """Test _setup_connected_chain_provider when rpc_urls is empty."""
         await client.connect()
 
         # Call with empty rpc_urls - should return early without error
-        await client._setup_mainnet_provider("TestChain", [])
+        await client._setup_connected_chain_provider("TestChain", [])
 
-        # Should not add anything to mainnet_providers
-        assert "TestChain" not in client.mainnet_providers
+        # Should not add anything to connected_chain_providers
+        assert "TestChain" not in client.connected_chain_providers
 
     async def test_process_subnet_config_empty_rpc_urls(self, client):
         """Test _process_subnet_config when rpc_urls is empty."""
@@ -1875,7 +1877,7 @@ class TestDexalotBaseClient:
         # Add provider and set up chain
         await client_with_failover._provider_manager.add_providers("TestChain", ["https://rpc1"])
         mock_provider = await client_with_failover._provider_manager.get_provider("TestChain")
-        client_with_failover.mainnet_providers["TestChain"] = mock_provider
+        client_with_failover.connected_chain_providers["TestChain"] = mock_provider
         client_with_failover.chain_config["TestChain"] = {"chain_id": 1}
 
         mock_provider.eth.gas_price = AsyncMock(return_value=1000000000)
@@ -2011,7 +2013,7 @@ class TestDexalotBaseClient:
 
     @patch("dexalot_sdk.utils.provider_manager.AsyncWeb3")
     @patch("dexalot_sdk.core.base.AsyncWeb3")
-    async def test_process_env_config_provider_manager_fallback_mainnet(
+    async def test_process_env_config_provider_manager_fallback_connected_chain_env(
         self, mock_web3_base, mock_web3_provider, client
     ):
         """Test _process_environment_config fallback when provider manager fails."""
@@ -2041,11 +2043,11 @@ class TestDexalotBaseClient:
         await client_with_failover._process_environment_config(env)
 
         # Should fallback to direct provider creation
-        assert "TestChain" in client_with_failover.mainnet_providers
+        assert "TestChain" in client_with_failover.connected_chain_providers
 
     @patch("dexalot_sdk.utils.provider_manager.AsyncWeb3")
     @patch("dexalot_sdk.core.base.AsyncWeb3")
-    async def test_process_env_config_provider_manager_disabled_mainnet(
+    async def test_process_env_config_provider_manager_disabled_connected_chain_env(
         self, mock_web3_base, mock_web3_provider, client
     ):
         """Test _process_environment_config when provider manager is disabled."""
@@ -2067,9 +2069,10 @@ class TestDexalotBaseClient:
 
         await client_without_failover._process_environment_config(env)
 
-        # Should set w3_mainnet from mainnet_providers
-        assert client_without_failover.w3_mainnet == client_without_failover.mainnet_providers.get(
-            "Fuji"
+        # Should set w3_connected_chain from connected_chain_providers
+        assert (
+            client_without_failover.w3_connected_chain
+            == client_without_failover.connected_chain_providers.get("Fuji")
         )
 
     @patch("dexalot_sdk.utils.provider_manager.AsyncWeb3")

@@ -215,7 +215,7 @@ class SwapClient(DexalotBaseClient):
             from_token: Symbol of the token to sell.
             to_token: Symbol of the token to buy.
             amount: Amount of ``from_token`` in human-readable units.
-            chain_id: Numeric chain ID (defaults to Avalanche mainnet, 43114).
+            chain_id: Numeric chain ID (defaults to Avalanche C-Chain, 43114).
             firm: If ``True``, request a firm (executable, signed) quote via
                 ``firmquote`` endpoint.  If ``False``, request an indicative
                 (soft) quote via ``pairprice`` endpoint.

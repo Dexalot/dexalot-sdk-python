@@ -8,7 +8,7 @@
 
 - **Unified Client**: Single `DexalotClient` interface for all Dexalot operations
 - **Modular Architecture**: Separate clients for CLOB, Swap, and Transfer operations
-- **Multi-Chain Support**: Works with Dexalot L1 subnet and connected mainnet networks
+- **Multi-Chain Support**: Works with Dexalot L1 subnet and connected chains
 - **Caching**: TTL-based memory cache utilities for performance optimization
 
 ## Architecture
@@ -185,7 +185,7 @@ The SDK includes a built-in 4-level caching system to optimize performance by re
 
 | Level | Data Type | Default TTL | Examples |
 |-------|-----------|-------------|----------|
-| **Static** | Rarely changes | 1 hour | Environments, deployments, mainnets |
+| **Static** | Rarely changes | 1 hour | Environments, deployments, connected chains |
 | **Semi-Static** | Changes occasionally | 15 minutes | Tokens, trading pairs |
 | **Balance** | User-specific, updates frequently | 10 seconds | Portfolio balances, wallet balances |
 | **Orderbook** | Real-time data | 1 second | Order book snapshots |

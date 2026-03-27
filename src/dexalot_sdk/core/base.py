@@ -105,8 +105,8 @@ class DexalotBaseClient:
         self.chain_id: int | None = None
         self.subnet_chain_id: int | None = None
         self.w3_l1: AsyncWeb3[Any] | None = None
-        self.w3_mainnet: AsyncWeb3[Any] | None = None
-        self.mainnet_providers: dict[str, AsyncWeb3[Any]] = {}
+        self.w3_connected_chain: AsyncWeb3[Any] | None = None
+        self.connected_chain_providers: dict[str, AsyncWeb3[Any]] = {}
         self.account: Account | None = None
         self._session: aiohttp.ClientSession | None = None
 
@@ -311,23 +311,23 @@ class DexalotBaseClient:
                 pass  # Ignore errors during cleanup
             self.w3_l1 = None
 
-        # Close w3_mainnet provider
-        if hasattr(self, "w3_mainnet") and self.w3_mainnet is not None:
+        # Close connected-chain provider
+        if hasattr(self, "w3_connected_chain") and self.w3_connected_chain is not None:
             try:
-                await self.w3_mainnet.provider.disconnect()
+                await self.w3_connected_chain.provider.disconnect()
             except Exception:
                 pass
-            self.w3_mainnet = None
+            self.w3_connected_chain = None
 
-        # Close all mainnet providers
-        if hasattr(self, "mainnet_providers"):
-            for _name, provider in list(self.mainnet_providers.items()):
+        # Close all connected-chain providers
+        if hasattr(self, "connected_chain_providers"):
+            for _name, provider in list(self.connected_chain_providers.items()):
                 try:
                     if provider:
                         await provider.provider.disconnect()
                 except Exception:
                     pass
-            self.mainnet_providers.clear()
+            self.connected_chain_providers.clear()
 
     async def __aenter__(self):
         return await self.connect()
@@ -471,13 +471,13 @@ class DexalotBaseClient:
         # Check w3_l1
         if self.w3_l1 and self.w3_l1 == w3:
             return "DEXALOT_L1"
-        # Check w3_mainnet
-        if self.w3_mainnet is not None and self.w3_mainnet == w3:
-            for name, provider in self.mainnet_providers.items():
+        # Check w3_connected_chain
+        if self.w3_connected_chain is not None and self.w3_connected_chain == w3:
+            for name, provider in self.connected_chain_providers.items():
                 if provider == w3:
                     return name
-        # Check mainnet_providers
-        for name, provider in self.mainnet_providers.items():
+        # Check connected_chain_providers
+        for name, provider in self.connected_chain_providers.items():
             if provider == w3:
                 return name
         return None
@@ -684,7 +684,7 @@ class DexalotBaseClient:
         await self.connect()
         with track_operation(self.logger, "initialize_client", parent_env=self.parent_env):
             try:
-                # Fetch environments first (sets w3_l1, w3_mainnet needed for deployments)
+                # Fetch environments first (sets w3_l1, w3_connected_chain needed for deployments)
                 await self._fetch_environments()
                 # Then fetch other data in parallel
                 await asyncio.gather(
@@ -779,12 +779,12 @@ class DexalotBaseClient:
         rpc = env.get("rpc") or env.get("chain_instance")
 
         if env_type == "mainnet":
-            await self._process_mainnet_config(env, rpc)
+            await self._process_connected_chain_config(env, rpc)
         elif env_type == "subnet":
             await self._process_subnet_config(env, rpc)
 
-    async def _process_mainnet_config(self, env, rpc):
-        """Process mainnet environment configuration."""
+    async def _process_connected_chain_config(self, env, rpc):
+        """Process connected-chain environment configuration."""
         chain_id = env.get("chainid") or env.get("chain_id")
         name = env.get("network") or env.get("chain_display_name")
         native_symbol = env.get("native_token_symbol", "ETH")
@@ -799,13 +799,13 @@ class DexalotBaseClient:
         # Get RPC URLs: API response (can be comma-separated) + env var override
         rpc_urls = self._get_rpc_urls(chain_id, native_symbol, rpc)
 
-        await self._setup_mainnet_provider(name, rpc_urls)
+        await self._setup_connected_chain_provider(name, rpc_urls)
 
         if (name == "Avalanche" or name == "Fuji") and rpc_urls:
             await self._setup_avalanche_fuji_provider(name, chain_id, rpc_urls)
 
-    async def _setup_mainnet_provider(self, name, rpc_urls):
-        """Set up mainnet provider with failover support."""
+    async def _setup_connected_chain_provider(self, name, rpc_urls):
+        """Set up a connected-chain provider with failover support."""
         if not rpc_urls:
             return
 
@@ -813,24 +813,24 @@ class DexalotBaseClient:
             await self._provider_manager.add_providers(name, rpc_urls)
             primary_provider = await self._provider_manager.get_provider(name)
             if primary_provider:
-                self.mainnet_providers[name] = primary_provider
+                self.connected_chain_providers[name] = primary_provider
             else:
                 fallback_provider = self._create_provider_fallback(rpc_urls[0], name)
                 if fallback_provider:
-                    self.mainnet_providers[name] = fallback_provider
+                    self.connected_chain_providers[name] = fallback_provider
         else:
             fallback_provider = self._create_provider_fallback(rpc_urls[0], name)
             if fallback_provider:
-                self.mainnet_providers[name] = fallback_provider
+                self.connected_chain_providers[name] = fallback_provider
 
     async def _setup_avalanche_fuji_provider(self, name, chain_id, rpc_urls):
-        """Set up Avalanche or Fuji mainnet provider."""
+        """Set up Avalanche or Fuji connected-chain provider."""
         if self._provider_manager:
-            self.w3_mainnet = await self._provider_manager.get_provider(name)
-            if not self.w3_mainnet:
-                self.w3_mainnet = self.mainnet_providers.get(name)
+            self.w3_connected_chain = await self._provider_manager.get_provider(name)
+            if not self.w3_connected_chain:
+                self.w3_connected_chain = self.connected_chain_providers.get(name)
         else:
-            self.w3_mainnet = self.mainnet_providers.get(name)
+            self.w3_connected_chain = self.connected_chain_providers.get(name)
         self.chain_id = chain_id
 
     async def _process_subnet_config(self, env, rpc):
@@ -966,7 +966,7 @@ class DexalotBaseClient:
                     self.invalidate_cache(level="static")
                     self.invalidate_cache(level="semi_static")
 
-                # Fetch environments first (sets w3_l1, w3_mainnet needed for deployments)
+                # Fetch environments first (sets w3_l1, w3_connected_chain needed for deployments)
                 await self._fetch_environments()
                 # Then fetch other data in parallel
                 await asyncio.gather(
@@ -1018,8 +1018,8 @@ class DexalotBaseClient:
                 if "PortfolioMain" not in self.deployments:
                     self.deployments["PortfolioMain"] = {}
                 self.deployments["PortfolioMain"]["Avalanche"] = {"address": address, "abi": abi}
-                if self.w3_mainnet:
-                    self.portfolio_main_avax_contract = self.w3_mainnet.eth.contract(
+                if self.w3_connected_chain:
+                    self.portfolio_main_avax_contract = self.w3_connected_chain.eth.contract(
                         address=address, abi=abi
                     )
 
@@ -1107,7 +1107,7 @@ class DexalotBaseClient:
     async def get_environments(self) -> Result[list]:
         """Fetch the list of Dexalot trading environments from the API.
 
-        Each environment entry describes one blockchain network (subnet or mainnet)
+        Each environment entry describes one blockchain network (subnet or connected chain)
         including its chain ID, RPC endpoint, and environment type.  Results are
         normalised to snake_case field names before returning.
 
@@ -1210,10 +1210,10 @@ class DexalotBaseClient:
 
     @async_ttl_cached(_SEMI_STATIC_CACHE)
     async def get_tokens(self) -> Result[list]:
-        """Fetch the list of tokens available on Dexalot (mainnet tokens only).
+        """Fetch the list of tokens available on Dexalot (connected-chain tokens only).
 
-        Returns one entry per unique token symbol, keyed to a mainnet chain.
-        Dexalot L1 does not allow ERC20 deployments, so only mainnet token
+        Returns one entry per unique token symbol, keyed to a connected chain.
+        Dexalot L1 does not allow ERC20 deployments, so only connected-chain token
         addresses are included.  Results are normalised to snake_case fields.
 
         Note:
@@ -1230,8 +1230,8 @@ class DexalotBaseClient:
             _SEMI_STATIC_CACHE._store.pop(key, None)
 
         try:
-            # Get mainnet chain IDs - fetch environments if chain_config is not available
-            mainnet_chain_ids = set()
+            # Get connected-chain IDs - fetch environments if chain_config is not available
+            connected_chain_ids = set()
             if not self.chain_config:
                 # Fetch environments to get chain_config
                 envs_result = await self.get_environments()
@@ -1241,7 +1241,7 @@ class DexalotBaseClient:
             for config in self.chain_config.values():
                 chain_id = config.get("chain_id")
                 if chain_id:
-                    mainnet_chain_ids.add(chain_id)
+                    connected_chain_ids.add(chain_id)
 
             # Always fetch fresh from API (cache decorator handles TTL)
             async with await self._make_http_request(
@@ -1260,8 +1260,8 @@ class DexalotBaseClient:
                 chain_id = token.get("chain_id")
 
                 if symbol and symbol not in seen_symbols and chain_id:
-                    # Only include mainnet tokens (not L1 subnet tokens)
-                    if chain_id in mainnet_chain_ids:
+                    # Only include connected-chain tokens (not L1 subnet tokens)
+                    if chain_id in connected_chain_ids:
                         unique_tokens.append(
                             {
                                 "symbol": symbol,
@@ -1301,7 +1301,7 @@ class DexalotBaseClient:
             _STATIC_CACHE._store.pop(key, None)
 
         try:
-            # Ensure environments are fetched first (needed for w3_l1, w3_mainnet)
+            # Ensure environments are fetched first (needed for w3_l1, w3_connected_chain)
             if not self.chain_config:
                 envs_result = await self.get_environments()
                 if not envs_result.success:

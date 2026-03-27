@@ -32,17 +32,17 @@ def client():
             w3_l1.eth.gas_price = ConstantAwaitable(1000000000)
             w3_l1.to_hex.side_effect = lambda x: f"0x{x.hex()}" if isinstance(x, bytes) else str(x)
 
-            w3_mainnet = MagicMock()
-            w3_mainnet.eth.contract = MagicMock()
-            w3_mainnet.eth.get_transaction_count = AsyncMock(return_value=1)
-            w3_mainnet.eth.send_raw_transaction = AsyncMock(return_value=b"tx_hash")
-            w3_mainnet.eth.gas_price = ConstantAwaitable(1000000000)
-            w3_mainnet.to_hex.side_effect = lambda x: (
+            w3_connected_chain = MagicMock()
+            w3_connected_chain.eth.contract = MagicMock()
+            w3_connected_chain.eth.get_transaction_count = AsyncMock(return_value=1)
+            w3_connected_chain.eth.send_raw_transaction = AsyncMock(return_value=b"tx_hash")
+            w3_connected_chain.eth.gas_price = ConstantAwaitable(1000000000)
+            w3_connected_chain.to_hex.side_effect = lambda x: (
                 f"0x{x.hex()}" if isinstance(x, bytes) else str(x)
             )
 
             client.w3_l1 = w3_l1
-            client.w3_mainnet = w3_mainnet
+            client.w3_connected_chain = w3_connected_chain
             client.portfolio_main_avax_contract = MagicMock()
             client.portfolio_sub_contract = MagicMock()
 
@@ -101,7 +101,7 @@ def client():
             client.portfolio_sub_contract.functions.withdrawToken.return_value.fn_name = (
                 "withdrawToken"
             )
-            w3_mainnet.eth.contract.side_effect = mock_contract
+            w3_connected_chain.eth.contract.side_effect = mock_contract
 
             yield client
 

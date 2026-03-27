@@ -30,7 +30,7 @@ GET /trading/environments
 #### Description
 
 Returns an array of current blockchain environments. There will always be
-2 sub-environments with one subnet and multiple mainnets and subnet. They are all tied
+sub-environments covering one subnet and multiple connected chains, all tied
 to a single parentenv.
 
 #### Sample Request
@@ -108,7 +108,7 @@ GET /trading/tokens
 #### Description
 
 Returns an array of available tokens. This will always return the
-mainnet token list as Dexalot subnet does not allow any ERC20
+connected-chain token list, as Dexalot subnet does not allow any ERC20
 deployments.
 
 #### Sample Request
@@ -328,7 +328,7 @@ GET /trading/pairs
 Returns an array of available markets (trade pairs). This will always
 return the subnet pairs list as markets, as trade pairs and order books
 can only exist in the Dexalot subnet. ( Note: Base & Quote address will
-always show the mainnet token addresses for consistency)
+always show the connected-chain token addresses for consistency)
 
 #### Sample Request
 

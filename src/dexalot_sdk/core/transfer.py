@@ -36,8 +36,8 @@ class TransferClient(DexalotBaseClient):
             provider = await self._provider_manager.get_provider(chain)
             if provider:
                 return provider
-        # Fallback to mainnet_providers if provider manager is disabled or returns None
-        return self.mainnet_providers.get(chain)
+        # Fallback to connected_chain_providers if provider manager is disabled or returns None.
+        return self.connected_chain_providers.get(chain)
 
     def _get_available_chains(self) -> list[str]:
         """
@@ -46,8 +46,8 @@ class TransferClient(DexalotBaseClient):
         Returns:
             List of chain names
         """
-        # Always include chains from mainnet_providers (for backwards compatibility)
-        chains = set(self.mainnet_providers.keys())
+        # Always include chains from connected_chain_providers
+        chains = set(self.connected_chain_providers.keys())
 
         if self._provider_manager:
             # Also include chains from provider manager
@@ -169,7 +169,7 @@ class TransferClient(DexalotBaseClient):
             balance = await self._get_l1_native_balance(query_address)
             return Result.ok(balance)
 
-        # Check connected mainnet
+        # Check connected chain
         w3_provider = await self._get_provider_for_chain(chain)
         if not w3_provider:
             available = ["Dexalot L1"] + self._get_available_chains()
@@ -244,7 +244,7 @@ class TransferClient(DexalotBaseClient):
                 info["chain_balances"].append(l1_entry)
             return Result.ok(info)
 
-        # Check connected mainnet
+        # Check connected chain
         w3_provider = await self._get_provider_for_chain(chain)
         if not w3_provider:
             available = ["Dexalot L1"] + self._get_available_chains()
@@ -273,7 +273,7 @@ class TransferClient(DexalotBaseClient):
     async def get_all_chain_wallet_balances(self, address: str | None = None) -> Result[dict]:
         """Get all token balances across all connected chain wallets.
 
-        Queries Dexalot L1 (native ALOT) and all connected mainnet chains
+        Queries Dexalot L1 (native ALOT) and all connected chains
         concurrently, including native and ERC20 token balances.
 
         Note:
@@ -310,7 +310,7 @@ class TransferClient(DexalotBaseClient):
 
         tasks = [self._get_l1_native_balance(query_address)]
 
-        # Connected Mainnet Network Balances
+        # Connected chain network balances
         for name in self._get_available_chains():
             w3_provider = await self._get_provider_for_chain(name)
             if not w3_provider:
@@ -360,7 +360,7 @@ class TransferClient(DexalotBaseClient):
     async def _get_native_balance(
         self, chain_name: str, w3_provider, address: str, native_symbol: str
     ):
-        """Get native token balance on a mainnet chain."""
+        """Get native token balance on a connected chain."""
         entry = {
             "chain": chain_name,
             "symbol": native_symbol,
@@ -939,7 +939,7 @@ class TransferClient(DexalotBaseClient):
         use_layerzero: bool = False,
         wait_for_receipt: bool = True,
     ) -> Result[str]:
-        """Deposit a token from a mainnet chain into the Dexalot portfolio.
+        """Deposit a token from a connected chain into the Dexalot portfolio.
 
         For AVAX, calls ``depositNative``; for ERC20 tokens, approves the
         ``PortfolioMain`` contract and calls ``depositToken``.  A bridge fee
@@ -965,7 +965,7 @@ class TransferClient(DexalotBaseClient):
         if not validation_result.success:
             return Result.fail(validation_result.error or "Invalid deposit parameters")
 
-        w3 = self.w3_mainnet
+        w3 = self.w3_connected_chain
         contract = self.portfolio_main_avax_contract
 
         if not w3 or not contract:
@@ -1028,7 +1028,7 @@ class TransferClient(DexalotBaseClient):
         use_layerzero: bool = False,
         wait_for_receipt: bool = True,
     ) -> Result[str]:
-        """Withdraw a token from the Dexalot portfolio to a mainnet chain wallet.
+        """Withdraw a token from the Dexalot portfolio to a connected chain wallet.
 
         Calls the ``PortfolioSub`` contract's withdraw function on Dexalot L1.
         The token arrives in the wallet on ``destination_chain`` after the
@@ -1140,7 +1140,7 @@ class TransferClient(DexalotBaseClient):
         if source_chain not in self.chain_config:
             return Result.fail(f"Source chain '{source_chain}' not known.")
 
-        w3 = self.w3_mainnet
+        w3 = self.w3_connected_chain
         contract = self.portfolio_main_avax_contract
 
         if not w3 or not contract:

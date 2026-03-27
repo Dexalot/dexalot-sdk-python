@@ -322,7 +322,7 @@ For a valid quote either takerAmount (for a sell swap) or makerAmount (for a buy
 | takerAmount           | N | The amount of taker asset for the trade, provided for a sell swap. Should be multiplied by evm_decimals of the taker asset. e.g. for USDC evm_decimals = 6, for a 100 USD trade this number should be 100000000 |
 | makerAmount           | N | The amount of maker asset for the trade, provided for a buy swap. Should be multiplied by evm_decimals of the maker asset. e.g. for AVAX evm_decimals = 18, for a 100 AVAX trade this number should be 100000000000000000000 |
 | userAddress           | Y | The originating user performing the swap (not the executor contract), e.g. trader address: 0x05A1AAC00662ADda4Aa25E1FA658f4256ed881eD |
-| executor              | N | The executor contract address which calls the mainnet rfq contract (if not provided userAddress is used as the executor)
+| executor              | N | The executor contract address which calls the connected-chain MainnetRFQ contract (if not provided userAddress is used as the executor)
 | slippage              | N | The slippage of the aggregator swap in bps, e.g. '100' for 1% |
 | partner               | N | If applicable, a string identifier for the partner executing the swap on your platform |
 | txType                | N | EVM transaction type i.e. 1 for EIP-2930 or 2 for EIP-1559, if provided returns full transaction object |
@@ -468,7 +468,7 @@ const order = {
     makerAsset: "0x68B773B8C10F2ACE8aC51980A1548B6B48a2eC54",
     // source token (AVAX)
     takerAsset: "0x0000000000000000000000000000000000000000",
-    // mainnetRFQ contract address
+    // connected-chain MainnetRFQ contract address
     maker: "0x4C72Cd84BB81beD576B162A323f7842c863ab711",
     // address of contract/trader invoking swap
     taker: "0x05A1AAC00662ADda4Aa25E1FA658f4256ed881eD",

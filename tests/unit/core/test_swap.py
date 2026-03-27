@@ -38,7 +38,7 @@ class TestSwapClient:
                     43114: {"AVAX/USDC": {}},  # Only AVAX/USDC to test reverse lookup
                     43113: {"AVAX/USDC": {}},
                 }
-                client.mainnet_providers = {"Avalanche": MagicMock()}
+                client.connected_chain_providers = {"Avalanche": MagicMock()}
                 client.deployments = {"MainnetRFQ": {"Avalanche": {"address": "0xRFQ", "abi": []}}}
                 client._parse_revert_reason = lambda e: str(e)
                 client.chain_id = 43114

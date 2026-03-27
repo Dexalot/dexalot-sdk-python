@@ -145,8 +145,8 @@ class TestProviderFailover:
             init_result = await client.initialize_client()
             assert init_result.success, f"Failed to initialize client: {init_result.error}"
 
-            # Should still have providers in mainnet_providers
-            assert len(client.mainnet_providers) > 0 or client.w3_l1 is not None
+            # Should still have providers in connected_chain_providers
+            assert len(client.connected_chain_providers) > 0 or client.w3_l1 is not None
 
             # Provider manager should be None
             assert client._provider_manager is None
