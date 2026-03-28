@@ -1,4 +1,5 @@
 import asyncio
+import inspect
 import time
 from collections.abc import Callable, Hashable
 from functools import wraps
@@ -130,6 +131,11 @@ def async_ttl_cached(cache: MemoryCache):
 
             cached = cache.get(key)
             if cached is not None:
+                hook = getattr(instance, f"_rehydrate_cached_{func.__name__}", None)
+                if hook is not None:
+                    maybe_awaitable = hook(cached, *args[1:], **kwargs)
+                    if inspect.isawaitable(maybe_awaitable):
+                        await maybe_awaitable
                 return cached
 
             do_work = False
@@ -138,6 +144,11 @@ def async_ttl_cached(cache: MemoryCache):
                 # the initial cache miss and acquiring _pending_lock.
                 cached = cache.get(key)
                 if cached is not None:
+                    hook = getattr(instance, f"_rehydrate_cached_{func.__name__}", None)
+                    if hook is not None:
+                        maybe_awaitable = hook(cached, *args[1:], **kwargs)
+                        if inspect.isawaitable(maybe_awaitable):
+                            await maybe_awaitable
                     return cached
                 if key in _pending:
                     fut: asyncio.Future[Any] = _pending[key]

@@ -5,15 +5,16 @@ from web3 import AsyncWeb3
 
 class AsyncNonceManager:
     """
-    Thread-safe nonce manager for tracking transaction nonces per (chain_id, address) combination.
-    Prevents race conditions when multiple transactions are sent concurrently.
+    Async nonce manager for tracking transaction nonces per ``(chain_id, address)``.
+    Prevents race conditions when multiple transactions are sent concurrently on
+    the same asyncio event loop.
     """
 
     def __init__(self):
         """Initialize the nonce manager."""
         # Maps "{chain_id}:{address}" to current nonce value
         self._nonces: dict[str, int] = {}
-        # Per-key locks for thread safety
+        # Per-key asyncio locks prevent concurrent nonce reuse.
         self._locks: dict[str, asyncio.Lock] = {}
         # Track if nonce has been fetched from chain
         self._initialized: dict[str, bool] = {}

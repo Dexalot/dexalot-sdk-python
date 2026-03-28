@@ -27,8 +27,8 @@ class DexalotConfig:
         api_base_url: Override the REST API base URL.  Auto-selected from
             ``parent_env`` when ``None``.
             Env var: ``API_BASE_URL_TESTNET`` / ``API_BASE_URL_MAINNET``.
-        private_key: Hex-encoded private key (``0x`` prefix, 66 chars).  Zeroed
-            after ``Account`` creation.  Prefer passing a pre-built ``signer``
+        private_key: Hex-encoded private key (``0x`` prefix, 66 chars). Cleared
+            from config after ``Account`` creation. Prefer passing a pre-built ``signer``
             object to the constructor.
             Env var: ``PRIVATE_KEY``.
         timestamped_auth: When ``True``, sign ``"dexalot{ts}"`` and include
@@ -188,7 +188,9 @@ class DexalotConfig:
     @classmethod
     def from_env(cls, **kwargs) -> "DexalotConfig":
         """
-        Load configuration starting from environment variables, then overriding with kwargs.
+        Load configuration from defaults, .env, and environment variables, then
+        apply any explicit kwargs last.
+
         Precedence:
         1. kwargs (Constructor Arguments)
         2. os.environ (System Environment Variables)
@@ -281,7 +283,6 @@ class DexalotConfig:
         }
 
         # API Base URL logic
-        # Logic from base.py:
         # if "fuji" in parent_env.lower():
         #     api_base_url = os.getenv("API_BASE_URL_TESTNET", API_BASE_URL_TESTNET)
         # else:

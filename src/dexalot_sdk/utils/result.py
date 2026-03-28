@@ -7,8 +7,9 @@ from dataclasses import dataclass
 class Result[T]:
     """Standardized result type for SDK methods.
 
-    This type provides a consistent way to handle both success and error cases
-    across all SDK methods, replacing the inconsistent string/dict return patterns.
+    This type provides a consistent way to handle success and operational
+    failures across the async SDK methods that return ``Result``. Some helper
+    methods still return raw values or raise on programmer/configuration errors.
 
     Attributes:
         success: True if the operation succeeded, False otherwise

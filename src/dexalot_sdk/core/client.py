@@ -21,11 +21,11 @@ class DexalotClient(CLOBClient, SwapClient, TransferClient):
         self,
         signer=None,
         parent_env=None,
-        enable_cache=True,
-        cache_ttl_static=3600,
-        cache_ttl_semi_static=900,
-        cache_ttl_balance=10,
-        cache_ttl_orderbook=1,
+        enable_cache=None,
+        cache_ttl_static=None,
+        cache_ttl_semi_static=None,
+        cache_ttl_balance=None,
+        cache_ttl_orderbook=None,
         config=None,
         **kwargs,
     ):
@@ -34,11 +34,11 @@ class DexalotClient(CLOBClient, SwapClient, TransferClient):
         Args:
             signer: Optional web3 Account for signing transactions.
             parent_env: Optional environment override (e.g., 'fuji-multi').
-            enable_cache: Enable caching for read operations (default: True).
-            cache_ttl_static: TTL in seconds for static data (default: 3600).
-            cache_ttl_semi_static: TTL in seconds for semi-static data (default: 900).
-            cache_ttl_balance: TTL in seconds for balance data (default: 10).
-            cache_ttl_orderbook: TTL in seconds for orderbook data (default: 1).
+            enable_cache: Override cache enablement. If ``None``, use env / config defaults.
+            cache_ttl_static: Override static-cache TTL in seconds.
+            cache_ttl_semi_static: Override semi-static-cache TTL in seconds.
+            cache_ttl_balance: Override balance-cache TTL in seconds.
+            cache_ttl_orderbook: Override orderbook-cache TTL in seconds.
             config: Optional DexalotConfig object.
         """
         super().__init__(

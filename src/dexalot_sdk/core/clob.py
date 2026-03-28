@@ -126,14 +126,15 @@ class CLOBClient(DexalotBaseClient):
 
     @async_ttl_cached(_SEMI_STATIC_CACHE)
     @track_method("clob")
-    async def get_clob_pairs(self) -> Result[str]:
+    async def get_clob_pairs(self) -> Result[list[dict[str, Any]]]:
         """Fetch and store trading pair metadata.
 
         Note: Cached for 15 minutes (semi-static data). Pairs are transformed to
         standardized field names (snake_case) before storing.
 
         Returns:
-            Result with success message on success, or error message on failure
+            Result containing the normalized pair list on success. Also populates
+            ``client.pairs`` keyed by pair symbol for follow-on SDK operations.
         """
         try:
             # Use self._session from DexalotBaseClient
@@ -145,27 +146,41 @@ class CLOBClient(DexalotBaseClient):
 
             # Transform pairs before processing
             transformed_data = [self._transform_pair_from_api(item) for item in data]
-
-            self.pairs = {}
-            for item in transformed_data:
-                if item.get("env") in [ENV_PROD_MULTI_SUBNET, ENV_FUJI_MULTI_SUBNET]:
-                    pair_name = item["pair"]
-                    self.pairs[pair_name] = {
-                        "pair": pair_name,
-                        "base": item["base"],
-                        "quote": item["quote"],
-                        "base_decimals": item.get("base_decimals"),
-                        "quote_decimals": item.get("quote_decimals"),
-                        "base_display_decimals": item.get("base_display_decimals", 18),
-                        "quote_display_decimals": item.get("quote_display_decimals", 18),
-                        "min_trade_amount": float(item.get("min_trade_amount", 0)),
-                        "max_trade_amount": float(item.get("max_trade_amount", 0)),
-                        "tradePairId": Utils.to_bytes32(pair_name),
-                    }
-            return Result.ok("Pairs fetched and cached.")
+            pair_list = self._store_clob_pairs(transformed_data)
+            return Result.ok(pair_list)
         except Exception as e:
             error_msg = self._sanitize_error(e, "fetching pairs")
             return Result.fail(error_msg)
+
+    def _store_clob_pairs(self, transformed_data: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """Normalize pair metadata into both list and keyed lookup forms."""
+        pair_map: dict[str, dict[str, Any]] = {}
+        for item in transformed_data:
+            if item.get("env") not in [ENV_PROD_MULTI_SUBNET, ENV_FUJI_MULTI_SUBNET]:
+                continue
+
+            pair_name = item["pair"]
+            pair_map[pair_name] = {
+                "pair": pair_name,
+                "base": item["base"],
+                "quote": item["quote"],
+                "base_decimals": item.get("base_decimals"),
+                "quote_decimals": item.get("quote_decimals"),
+                "base_display_decimals": item.get("base_display_decimals", 18),
+                "quote_display_decimals": item.get("quote_display_decimals", 18),
+                "min_trade_amount": float(item.get("min_trade_amount", 0)),
+                "max_trade_amount": float(item.get("max_trade_amount", 0)),
+                "tradePairId": Utils.to_bytes32(pair_name),
+            }
+
+        self.pairs = pair_map
+        return list(pair_map.values())
+
+    def _rehydrate_cached_get_clob_pairs(self, cached: Result[list[dict[str, Any]]]) -> None:
+        """Rebuild ``client.pairs`` when ``get_clob_pairs`` is served from cache."""
+        if not cached.success or cached.data is None:
+            return
+        self.pairs = {pair["pair"]: dict(pair) for pair in cached.data}
 
     @async_ttl_cached(_ORDERBOOK_CACHE)
     @track_method("clob")

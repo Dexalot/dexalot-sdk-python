@@ -107,6 +107,14 @@ class TransferClient(DexalotBaseClient):
             error_msg = self._sanitize_error(e, "getting token details")
             return Result.fail(error_msg)
 
+    def _rehydrate_cached_get_token_details(self, cached: Result[dict], token: str) -> None:
+        """Restore ``token_data`` when token details are served from cache."""
+        if not cached.success or cached.data is None:
+            return
+        if not self.token_data:
+            self.token_data = {}
+        self.token_data[token] = cached.data
+
     @track_method("transfer")
     async def get_chain_wallet_balance(
         self, chain: str, token: str, address: str | None = None

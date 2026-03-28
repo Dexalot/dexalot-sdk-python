@@ -1,4 +1,5 @@
 import asyncio
+import copy
 import json
 import logging
 import os
@@ -68,11 +69,11 @@ class DexalotBaseClient:
         self,
         signer: "Account | None" = None,
         parent_env: str | None = None,
-        enable_cache: bool = True,
-        cache_ttl_static: int = 3600,
-        cache_ttl_semi_static: int = 900,
-        cache_ttl_balance: int = 10,
-        cache_ttl_orderbook: int = 1,
+        enable_cache: bool | None = None,
+        cache_ttl_static: int | None = None,
+        cache_ttl_semi_static: int | None = None,
+        cache_ttl_balance: int | None = None,
+        cache_ttl_orderbook: int | None = None,
         config: "DexalotConfig | None" = None,
     ):
         """Initialize DexalotBaseClient.
@@ -81,11 +82,11 @@ class DexalotBaseClient:
             signer: Optional web3 Account for signing transactions.
                     If None, falls back to PRIVATE_KEY in config.
             parent_env: Optional environment override (e.g., 'fuji-multi').
-            enable_cache: Enable caching for read operations (default: True).
-            cache_ttl_static: TTL in seconds for static data (default: 3600).
-            cache_ttl_semi_static: TTL in seconds for semi-static data (default: 900).
-            cache_ttl_balance: TTL in seconds for balance data (default: 10).
-            cache_ttl_orderbook: TTL in seconds for orderbook data (default: 1).
+            enable_cache: Override cache enablement. If ``None``, use env / config defaults.
+            cache_ttl_static: Override static-cache TTL in seconds.
+            cache_ttl_semi_static: Override semi-static-cache TTL in seconds.
+            cache_ttl_balance: Override balance-cache TTL in seconds.
+            cache_ttl_orderbook: Override orderbook-cache TTL in seconds.
             config: Optional DexalotConfig object. If provided, other config args are ignored.
         """
         self.config = self._initialize_config(
@@ -123,11 +124,11 @@ class DexalotBaseClient:
         self,
         config: "DexalotConfig | None",
         parent_env: str | None,
-        enable_cache: bool,
-        cache_ttl_static: int,
-        cache_ttl_semi_static: int,
-        cache_ttl_balance: int,
-        cache_ttl_orderbook: int,
+        enable_cache: bool | None,
+        cache_ttl_static: int | None,
+        cache_ttl_semi_static: int | None,
+        cache_ttl_balance: int | None,
+        cache_ttl_orderbook: int | None,
     ) -> "DexalotConfig":
         """Initialize configuration from provided config or environment."""
         if config is None:
@@ -135,14 +136,16 @@ class DexalotBaseClient:
             if parent_env is not None:
                 kwargs["parent_env"] = parent_env
 
-            # Pass explicit kwargs to override env vars if needed.
-            # Ideally we would only pass them if they differ from defaults, but
-            # since they are in the signature, we pass them.
-            kwargs["enable_cache"] = enable_cache
-            kwargs["cache_ttl_static"] = cache_ttl_static
-            kwargs["cache_ttl_semi_static"] = cache_ttl_semi_static
-            kwargs["cache_ttl_balance"] = cache_ttl_balance
-            kwargs["cache_ttl_orderbook"] = cache_ttl_orderbook
+            if enable_cache is not None:
+                kwargs["enable_cache"] = enable_cache
+            if cache_ttl_static is not None:
+                kwargs["cache_ttl_static"] = cache_ttl_static
+            if cache_ttl_semi_static is not None:
+                kwargs["cache_ttl_semi_static"] = cache_ttl_semi_static
+            if cache_ttl_balance is not None:
+                kwargs["cache_ttl_balance"] = cache_ttl_balance
+            if cache_ttl_orderbook is not None:
+                kwargs["cache_ttl_orderbook"] = cache_ttl_orderbook
 
             return DexalotConfig.from_env(**kwargs)
         return config
@@ -704,6 +707,10 @@ class DexalotBaseClient:
             response.raise_for_status()
             environments = await response.json()
 
+        await self._apply_environment_state(environments)
+
+    async def _apply_environment_state(self, environments: list[dict[str, Any]]) -> None:
+        """Apply environment metadata to provider and chain state."""
         for env in environments:
             chain_id = env.get("chainid") or env.get("chain_id")
             if chain_id == self.CHAIN_ID_AVAX_MAINNET:
@@ -718,8 +725,18 @@ class DexalotBaseClient:
 
         # Map chain names to IDs and configs
         self.chain_config = {}
+        self.connected_chain_providers = {}
+        self.chain_id = None
+        self.w3_connected_chain = None
+        self.w3_l1 = None
         for env in environments:
             await self._process_environment_config(env)
+
+    async def _rehydrate_cached_get_environments(self, cached: Result[list]) -> None:
+        """Restore provider and chain state when environments come from cache."""
+        if not cached.success or cached.data is None:
+            return
+        await self._apply_environment_state(cached.data)
 
     def _reject_insecure_rpc_urls(self, urls: list[str]) -> list[str]:
         """
@@ -1131,6 +1148,7 @@ class DexalotBaseClient:
                 data = await response.json()
                 # Transform environments to standardized field names
                 transformed = [self._transform_environment_from_api(env) for env in data]
+                await self._apply_environment_state(transformed)
                 return Result.ok(transformed)
         except Exception as e:
             error_msg = self._sanitize_error(e, "getting environments")
@@ -1163,8 +1181,9 @@ class DexalotBaseClient:
                 return Result.fail(f"Failed to fetch environments: {envs_result.error}")
 
             chains = {}
-            for name, config in self.chain_config.items():
-                cid = config.get("chain_id")
+            for env in envs_result.data or []:
+                cid = env.get("chain_id")
+                name = env.get("network")
                 if cid:
                     chains[cid] = name
             return Result.ok(chains)
@@ -1339,3 +1358,35 @@ class DexalotBaseClient:
         except Exception as e:
             error_msg = self._sanitize_error(e, "getting deployment")
             return Result.fail(error_msg)
+
+    def _apply_deployment_state(self, deployments: dict[str, Any]) -> None:
+        """Restore deployment mappings and contract handles from cached data."""
+        self.deployments = copy.deepcopy(deployments)
+        if self.w3_l1 and self.deployments.get("TradePairs"):
+            trade_pairs = self.deployments["TradePairs"]
+            if trade_pairs.get("address") and trade_pairs.get("abi") is not None:
+                self.trade_pairs_contract = self.w3_l1.eth.contract(
+                    address=trade_pairs["address"], abi=trade_pairs["abi"]
+                )
+        if self.w3_l1 and self.deployments.get("PortfolioSub"):
+            portfolio_sub = self.deployments["PortfolioSub"]
+            if portfolio_sub.get("address") and portfolio_sub.get("abi") is not None:
+                self.portfolio_sub_contract = self.w3_l1.eth.contract(
+                    address=portfolio_sub["address"], abi=portfolio_sub["abi"]
+                )
+        if self.w3_connected_chain and self.deployments.get("PortfolioMain", {}).get("Avalanche"):
+            portfolio_main = self.deployments["PortfolioMain"]["Avalanche"]
+            if portfolio_main.get("address") and portfolio_main.get("abi") is not None:
+                self.portfolio_main_avax_contract = self.w3_connected_chain.eth.contract(
+                    address=portfolio_main["address"], abi=portfolio_main["abi"]
+                )
+
+    async def _rehydrate_cached_get_deployment(self, cached: Result[dict]) -> None:
+        """Restore deployment state when ``get_deployment`` is served from cache."""
+        if not cached.success or cached.data is None:
+            return
+        if not self.chain_config or not self.w3_l1:
+            envs_result = await self.get_environments()
+            if not envs_result.success:
+                return
+        self._apply_deployment_state(cached.data)

@@ -92,6 +92,19 @@ class SwapClient(DexalotBaseClient):
 
         return Result.ok(self.rfq_pairs[chain_id])
 
+    def _rehydrate_cached_get_swap_pairs(
+        self, cached: Result[dict], chain_identifier: int | str
+    ) -> None:
+        """Restore ``rfq_pairs`` when ``get_swap_pairs`` returns from cache."""
+        if not cached.success or cached.data is None:
+            return
+        chain_id = self._resolve_chain_id(chain_identifier)
+        if chain_id is None:
+            return
+        if not self.rfq_pairs:
+            self.rfq_pairs = {}
+        self.rfq_pairs[chain_id] = cached.data
+
     def _transform_quote_from_api(self, quote: dict) -> dict:
         """Transform API quote response to match standardized field names (snake_case).
 
