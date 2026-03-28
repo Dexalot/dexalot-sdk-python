@@ -427,8 +427,17 @@ class TestDexalotBaseClient:
             {
                 "env": "fuji-multi-avax",
                 "chainid": 43113,
+                "chain_display_name": "Fuji",
                 "rpc": "https://fuji.example.com",
-            }
+                "type": "mainnet",
+            },
+            {
+                "env": "production-multi-avax",
+                "chainid": 43114,
+                "chain_display_name": "Avalanche",
+                "rpc": "https://avax.example.com",
+                "type": "mainnet",
+            },
         ]
 
         mock_resp = AsyncMock()
@@ -437,42 +446,14 @@ class TestDexalotBaseClient:
         mock_cm = AsyncMock()
         mock_cm.__aenter__.return_value = mock_resp
         client._mock_session.get.return_value = mock_cm
-
-        client.chain_config = {
-            "Avalanche": {"chain_id": 43114},
-            "Fuji": {"chain_id": 43113},
-            "Other": {},  # Missing chain_id
-        }
 
         res = await client.get_chains()
         assert res.success
         assert res.data == {43114: "Avalanche", 43113: "Fuji"}
-        assert "Other" not in res.data.values()
 
     async def test_get_chains_error(self, client):
         """Test get_chains error handling."""
-        # Mock environments call to succeed first
-        mock_env_resp = [
-            {
-                "env": "fuji-multi-avax",
-                "chainid": 43113,
-                "rpc": "https://fuji.example.com",
-            }
-        ]
-
-        mock_resp = AsyncMock()
-        mock_resp.json.return_value = mock_env_resp
-        mock_resp.raise_for_status = MagicMock()
-        mock_cm = AsyncMock()
-        mock_cm.__aenter__.return_value = mock_resp
-        client._mock_session.get.return_value = mock_cm
-
-        # Make chain_config raise an exception when iterated
-        class ErrorDict:
-            def items(self):
-                raise Exception("Test error")
-
-        client.chain_config = ErrorDict()
+        client.get_environments = AsyncMock(side_effect=Exception("Test error"))
         result = await client.get_chains()
         assert not result.success
         assert "getting chains" in result.error.lower() or "test error" in result.error.lower()
@@ -2516,6 +2497,79 @@ class TestDexalotBaseClient:
         assert client.deployments is not None
         assert "TradePairs" in client.deployments
         assert result.success
+
+    async def test_rehydrate_cached_get_environments_ignores_failed_or_empty_results(self, client):
+        """Cached environment rehydration should skip failed and empty results."""
+        from dexalot_sdk.utils.result import Result
+
+        client.chain_config = {"keep": {"chain_id": 1}}
+
+        await client._rehydrate_cached_get_environments(Result.fail("boom"))
+        assert client.chain_config == {"keep": {"chain_id": 1}}
+
+        await client._rehydrate_cached_get_environments(Result.ok(None))
+        assert client.chain_config == {"keep": {"chain_id": 1}}
+
+    def test_apply_deployment_state_restores_contract_handles(self, client):
+        """Deployment rehydration should rebuild all contract handles when providers exist."""
+        client.w3_l1 = MagicMock()
+        client.w3_connected_chain = MagicMock()
+        trade_pairs_contract = MagicMock()
+        portfolio_sub_contract = MagicMock()
+        portfolio_main_contract = MagicMock()
+        client.w3_l1.eth.contract.side_effect = [trade_pairs_contract, portfolio_sub_contract]
+        client.w3_connected_chain.eth.contract.return_value = portfolio_main_contract
+
+        deployments = {
+            "TradePairs": {"address": "0xTP", "abi": []},
+            "PortfolioSub": {"address": "0xPS", "abi": []},
+            "PortfolioMain": {"Avalanche": {"address": "0xPM", "abi": []}},
+        }
+
+        client._apply_deployment_state(deployments)
+
+        assert client.deployments == deployments
+        assert client.trade_pairs_contract is trade_pairs_contract
+        assert client.portfolio_sub_contract is portfolio_sub_contract
+        assert client.portfolio_main_avax_contract is portfolio_main_contract
+
+    async def test_rehydrate_cached_get_deployment_fetches_environments_first(self, client):
+        """Deployment rehydration should bootstrap env state before rebuilding contracts."""
+        from dexalot_sdk.utils.result import Result
+
+        client.chain_config = {}
+        client.w3_l1 = None
+
+        with (
+            patch.object(
+                client, "get_environments", new=AsyncMock(return_value=Result.ok([]))
+            ) as envs,
+            patch.object(client, "_apply_deployment_state") as apply_state,
+        ):
+            await client._rehydrate_cached_get_deployment(Result.ok({"TradePairs": {}}))
+
+        envs.assert_awaited_once()
+        apply_state.assert_called_once_with({"TradePairs": {}})
+
+    async def test_rehydrate_cached_get_deployment_skips_apply_when_env_bootstrap_fails(
+        self, client
+    ):
+        """Deployment rehydration should bail out if env restoration fails."""
+        from dexalot_sdk.utils.result import Result
+
+        client.chain_config = {}
+        client.w3_l1 = None
+
+        with (
+            patch.object(
+                client, "get_environments", new=AsyncMock(return_value=Result.fail("env down"))
+            ) as envs,
+            patch.object(client, "_apply_deployment_state") as apply_state,
+        ):
+            await client._rehydrate_cached_get_deployment(Result.ok({"TradePairs": {}}))
+
+        envs.assert_awaited_once()
+        apply_state.assert_not_called()
 
     # ------------------------------------------------------------------
     # camelCase transform fallbacks + get_chains / get_deployments env-fail

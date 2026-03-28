@@ -98,6 +98,35 @@ class TestSwapClient:
         assert not result.success
         assert "No swap pairs found" in result.error or "Failed to fetch RFQ pairs" in result.error
 
+    async def test_get_swap_pairs_rehydrates_cached_state(self, client):
+        """Cached RFQ pair results should still rebuild ``client.rfq_pairs``."""
+        first_result = await client.get_swap_pairs(43114)
+        assert first_result.success
+
+        cached_client = client.__class__()
+        cached_client.api_base_url = client.api_base_url
+        cached_client.chain_config = client.chain_config
+        cached_client._cache_enabled = True
+        cached_client.rfq_pairs = {}
+        cached_client._session = client._session
+
+        second_result = await cached_client.get_swap_pairs(43114)
+        assert second_result.success
+        assert second_result.data == {"AVAX/USDC": {}}
+        assert cached_client.rfq_pairs[43114] == {"AVAX/USDC": {}}
+
+    def test_rehydrate_cached_get_swap_pairs_ignores_failed_or_unresolved_input(self, client):
+        """Rehydration should skip failed results and unknown chain identifiers."""
+        from dexalot_sdk.utils.result import Result
+
+        client.rfq_pairs = {}
+
+        client._rehydrate_cached_get_swap_pairs(Result.fail("boom"), 43114)
+        assert client.rfq_pairs == {}
+
+        client._rehydrate_cached_get_swap_pairs(Result.ok({"AVAX/USDC": {}}), "Unknown")
+        assert client.rfq_pairs == {}
+
     async def test_transform_quote_from_api(self, client):
         """Test _transform_quote_from_api transforms field names to snake_case."""
         # Test lowercase fields

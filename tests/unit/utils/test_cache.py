@@ -118,6 +118,50 @@ async def test_async_ttl_cached_decorator():
 
 
 @pytest.mark.asyncio
+async def test_async_ttl_cached_rehydrates_from_double_checked_cache_hit():
+    """Async rehydration hook runs when second cache check finds a value."""
+    cache = MemoryCache(ttl_seconds=60)
+    call_count = 0
+
+    class MockClient:
+        api_base_url = "https://api.dexalot.com"
+        _cache_enabled = True
+
+        def __init__(self):
+            self.rehydrated = False
+
+        async def _rehydrate_cached_fetch(self, cached):
+            self.rehydrated = cached == "cached-value"
+
+        @async_ttl_cached(cache)
+        async def fetch(self):
+            nonlocal call_count
+            call_count += 1
+            return "fresh-value"
+
+    client = MockClient()
+    original_get = cache.get
+    calls = 0
+
+    def get_with_late_hit(key):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return None
+        return "cached-value"
+
+    cache.get = get_with_late_hit
+    try:
+        result = await client.fetch()
+    finally:
+        cache.get = original_get
+
+    assert result == "cached-value"
+    assert client.rehydrated is True
+    assert call_count == 0
+
+
+@pytest.mark.asyncio
 async def test_async_ttl_cached_env_isolation():
     """Cache keys are namespaced by api_base_url; two envs never share results."""
 

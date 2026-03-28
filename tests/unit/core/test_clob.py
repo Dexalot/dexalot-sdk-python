@@ -162,6 +162,40 @@ class TestCLOBClient:
             or transformed4.get("base_display_decimals") is None
         )
 
+    def test_store_clob_pairs_filters_unsupported_envs(self, client):
+        """Only subnet pair metadata should be stored for CLOB operations."""
+        stored = client._store_clob_pairs(
+            [
+                {
+                    "env": "unsupported-env",
+                    "pair": "BAD/PAIR",
+                    "base": "BAD",
+                    "quote": "PAIR",
+                },
+                {
+                    "env": "fuji-multi-subnet",
+                    "pair": "AVAX/USDC",
+                    "base": "AVAX",
+                    "quote": "USDC",
+                },
+            ]
+        )
+
+        assert [pair["pair"] for pair in stored] == ["AVAX/USDC"]
+        assert list(client.pairs) == ["AVAX/USDC"]
+
+    def test_rehydrate_cached_get_clob_pairs_ignores_missing_data(self, client):
+        """No rehydration should happen for failed or empty cached results."""
+        from dexalot_sdk.utils.result import Result
+
+        client.pairs = {"KEEP/ME": {}}
+
+        client._rehydrate_cached_get_clob_pairs(Result.fail("boom"))
+        assert client.pairs == {"KEEP/ME": {}}
+
+        client._rehydrate_cached_get_clob_pairs(Result.ok(None))
+        assert client.pairs == {"KEEP/ME": {}}
+
     async def test_get_clob_pairs(self, client):
         """Test fetching pairs."""
         mock_resp_data = [
@@ -202,7 +236,7 @@ class TestCLOBClient:
         res = await client.get_clob_pairs()
 
         assert res.success
-        assert res.data == "Pairs fetched and cached."
+        assert [pair["pair"] for pair in res.data] == ["AVAX/USDC", "BTC/USDC"]
         assert "AVAX/USDC" in client.pairs
         assert "BTC/USDC" in client.pairs
         assert client.pairs["AVAX/USDC"]["base_decimals"] == 18
@@ -247,6 +281,7 @@ class TestCLOBClient:
 
         res = await client.get_clob_pairs()
         assert res.success
+        assert {pair["pair"] for pair in res.data} == {"AVAX/USDC", "BTC/USDC"}
 
         # First pair: lowercase fields transformed
         assert "AVAX/USDC" in client.pairs
@@ -297,11 +332,52 @@ class TestCLOBClient:
 
         res = await client.get_clob_pairs()
         assert res.success
+        assert [pair["pair"] for pair in res.data] == ["ETH/USDC"]
         assert "ETH/USDC" in client.pairs
         assert client.pairs["ETH/USDC"]["base_decimals"] == 18  # Prefer existing
         assert client.pairs["ETH/USDC"]["quote_decimals"] == 6  # Prefer existing
         assert client.pairs["ETH/USDC"]["base_display_decimals"] == 18  # Prefer existing
         assert client.pairs["ETH/USDC"]["min_trade_amount"] == 0.01  # Prefer existing
+
+    async def test_get_clob_pairs_rehydrates_pairs_on_cache_hit(self, client):
+        """Cached pair results should still rebuild ``client.pairs`` for a fresh client."""
+        mock_resp_data = [
+            {
+                "env": "fuji-multi-subnet",
+                "pair": "AVAX/USDC",
+                "base": "AVAX",
+                "quote": "USDC",
+                "base_evmdecimals": 18,
+                "quote_evmdecimals": 6,
+                "basedisplaydecimals": 18,
+                "quotedisplaydecimals": 6,
+                "mintrade_amnt": "0.1",
+                "maxtrade_amnt": "1000",
+            }
+        ]
+
+        mock_resp = AsyncMock()
+        mock_resp.json.return_value = mock_resp_data
+        mock_resp.raise_for_status = MagicMock()
+
+        mock_cm = AsyncMock()
+        mock_cm.__aenter__.return_value = mock_resp
+        client._mock_session.get.return_value = mock_cm
+
+        first_result = await client.get_clob_pairs()
+        assert first_result.success
+
+        cached_client = client.__class__()
+        cached_client.api_base_url = client.api_base_url
+        cached_client._cache_enabled = True
+        cached_client.pairs = {}
+        cached_client._sanitize_error = client._sanitize_error
+        cached_client._session = client._session
+
+        second_result = await cached_client.get_clob_pairs()
+        assert second_result.success
+        assert [pair["pair"] for pair in second_result.data] == ["AVAX/USDC"]
+        assert "AVAX/USDC" in cached_client.pairs
 
     async def test_get_orderbook(self, client):
         """Test get_orderbook."""
@@ -320,7 +396,7 @@ class TestCLOBClient:
         # Mock get_clob_pairs to avoid overwriting pairs
         from dexalot_sdk.utils.result import Result
 
-        client.get_clob_pairs = AsyncMock(return_value=Result.ok("Pairs fetched and cached."))
+        client.get_clob_pairs = AsyncMock(return_value=Result.ok([{"pair": VALID_PAIR}]))
 
         # Mock contract call
         # getNBook returns (prices, quantities, nextPointers, ...)
@@ -358,7 +434,7 @@ class TestCLOBClient:
         # Mock get_clob_pairs to avoid overwriting pairs
         from dexalot_sdk.utils.result import Result
 
-        client.get_clob_pairs = AsyncMock(return_value=Result.ok("Pairs fetched and cached."))
+        client.get_clob_pairs = AsyncMock(return_value=Result.ok([{"pair": VALID_PAIR}]))
 
         # Mock contract call
         # getNBook returns (prices, quantities, nextPointers, ...)
@@ -402,7 +478,7 @@ class TestCLOBClient:
                 "tradePairId": b"id",
             }
         }
-        client.get_clob_pairs = AsyncMock(return_value=Result.ok("Pairs fetched and cached."))
+        client.get_clob_pairs = AsyncMock(return_value=Result.ok([{"pair": VALID_PAIR}]))
 
         mock_bids = ([100_000_000], [2_500_000_000_000_000_000], [0])
         mock_asks = ([101_000_000], [1_500_000_000_000_000_000], [0])
@@ -1226,7 +1302,7 @@ class TestCLOBClient:
                 "tradePairId": b"id",
             }
         }
-        client.get_clob_pairs = AsyncMock(return_value=Result.ok("Pairs fetched and cached."))
+        client.get_clob_pairs = AsyncMock(return_value=Result.ok([{"pair": VALID_PAIR}]))
 
         # Make contract call raise an exception
         client.trade_pairs_contract.functions.getNBook.return_value.call = AsyncMock(
@@ -1708,7 +1784,7 @@ class TestCLOBClient:
         # We need to make sure get_clob_pairs returns {} and is not a MagicMock that returns something else
         from dexalot_sdk.utils.result import Result
 
-        client.get_clob_pairs = AsyncMock(return_value=Result.ok("Pairs fetched and cached."))
+        client.get_clob_pairs = AsyncMock(return_value=Result.ok([{"pair": VALID_PAIR}]))
         res = await client.get_orderbook("INVALID/PAIR")
         assert not res.success
         # Validation catches invalid format first, but if it passes validation, we check for "not found"
@@ -2337,7 +2413,7 @@ class TestCLOBClient:
         client.pairs = {}
         from dexalot_sdk.utils.result import Result
 
-        client.get_clob_pairs = AsyncMock(return_value=Result.ok("Pairs fetched and cached."))
+        client.get_clob_pairs = AsyncMock(return_value=Result.ok([{"pair": VALID_PAIR}]))
 
         result = await client._ensure_pair_exists("AVAX/USDC")
         assert result is False
@@ -2345,7 +2421,7 @@ class TestCLOBClient:
         client.pairs = {"AVAX/USDC": {}}
         from dexalot_sdk.utils.result import Result
 
-        client.get_clob_pairs = AsyncMock(return_value=Result.ok("Pairs fetched and cached."))
+        client.get_clob_pairs = AsyncMock(return_value=Result.ok([{"pair": VALID_PAIR}]))
 
         result = await client._ensure_pair_exists("AVAX/USDC")
         assert result is True

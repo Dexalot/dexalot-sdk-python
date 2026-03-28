@@ -182,6 +182,30 @@ class TestTransferClient:
         assert not result.success
         assert "not found" in result.error
 
+    def test_rehydrate_cached_get_token_details_initializes_cache(self, client):
+        """Token-detail rehydration should rebuild token_data for cached responses."""
+        from dexalot_sdk.utils.result import Result
+
+        client.token_data = {}
+
+        client._rehydrate_cached_get_token_details(
+            Result.ok({"fuji": {"symbol": "AVAX", "address": "0x1"}}), "AVAX"
+        )
+
+        assert client.token_data["AVAX"]["fuji"]["symbol"] == "AVAX"
+
+    def test_rehydrate_cached_get_token_details_ignores_failed_or_empty_results(self, client):
+        """Failed or empty cached token results should not mutate token_data."""
+        from dexalot_sdk.utils.result import Result
+
+        client.token_data = {"KEEP": {"env": {"symbol": "KEEP"}}}
+
+        client._rehydrate_cached_get_token_details(Result.fail("boom"), "AVAX")
+        assert "AVAX" not in client.token_data
+
+        client._rehydrate_cached_get_token_details(Result.ok(None), "AVAX")
+        assert "AVAX" not in client.token_data
+
     async def test_get_chain_wallet_balance(self, client):
         client.w3_l1.eth.get_balance.return_value = 10 * 10**18
         info = await client.get_chain_wallet_balance("Dexalot L1", "ALOT")

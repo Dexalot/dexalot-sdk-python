@@ -108,6 +108,36 @@ class TestDexalotConfig:
                 cfg = DexalotConfig.from_env()
                 assert cfg.enable_cache is False
 
+    def test_client_uses_env_cache_settings_when_kwargs_omitted(self):
+        """DexalotClient() should not override cache env vars with constructor defaults."""
+        env_vars = {
+            "DEXALOT_ENABLE_CACHE": "false",
+            "DEXALOT_CACHE_TTL_STATIC": "111",
+            "DEXALOT_CACHE_TTL_SEMI_STATIC": "222",
+            "DEXALOT_CACHE_TTL_BALANCE": "333",
+            "DEXALOT_CACHE_TTL_ORDERBOOK": "444",
+        }
+        with patch.dict(os.environ, env_vars, clear=False):
+            with patch("dexalot_sdk.core.config.load_dotenv"):
+                client = DexalotClient()
+                assert client.config.enable_cache is False
+                assert client.config.cache_ttl_static == 111
+                assert client.config.cache_ttl_semi_static == 222
+                assert client.config.cache_ttl_balance == 333
+                assert client.config.cache_ttl_orderbook == 444
+
+    def test_client_cache_kwargs_override_env(self):
+        """Explicit client kwargs should still override env cache settings."""
+        env_vars = {
+            "DEXALOT_ENABLE_CACHE": "false",
+            "DEXALOT_CACHE_TTL_STATIC": "111",
+        }
+        with patch.dict(os.environ, env_vars, clear=False):
+            with patch("dexalot_sdk.core.config.load_dotenv"):
+                client = DexalotClient(enable_cache=True, cache_ttl_static=999)
+                assert client.config.enable_cache is True
+                assert client.config.cache_ttl_static == 999
+
     def test_env_int_parsing_error(self):
         """Test parsing of integer environment variables with invalid input."""
         with patch.dict(os.environ, {"DEXALOT_CACHE_TTL_STATIC": "invalid"}):
