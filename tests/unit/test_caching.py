@@ -522,11 +522,37 @@ class TestWriteOperationsNeverCached:
             mock_receipt = MagicMock()
             mock_receipt.status = 1
             client._send_trade_tx = AsyncMock(return_value=("0xdef456", mock_receipt))
-            client._get_order_id_bytes = MagicMock(return_value=b"\x00" * 32)
+            from dexalot_sdk.utils.result import Result
+
+            client._resolve_order_reference = AsyncMock(
+                return_value=Result.ok(
+                    {
+                        "id_type": "internal",
+                        "input_bytes": b"\x00" * 32,
+                        "order_data": (
+                            b"\x00" * 32,
+                            b"\x01" * 32,
+                            b"TPID",
+                            10000000,
+                            0,
+                            10**18,
+                            0,
+                            0,
+                            "0xUser",
+                            0,
+                            1,
+                            0,
+                            1,
+                        ),
+                        "internal_id_bytes": b"\x00" * 32,
+                        "client_order_id_bytes": b"\x01" * 32,
+                    }
+                )
+            )
 
             # Call cancel_order twice
-            await client.cancel_order("0x123")
-            await client.cancel_order("0x123")
+            await client.cancel_order("0x0123")
+            await client.cancel_order("0x0123")
 
             # Should execute both times (not cached)
             assert client._send_trade_tx.call_count == 2

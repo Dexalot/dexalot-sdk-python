@@ -84,6 +84,53 @@ class TestCLOBClient:
 
             return client
 
+    def _stub_resolved_order(
+        self,
+        client,
+        *,
+        id_type: str = "internal",
+        pair: str = "AVAX/USDC",
+        trade_pair_id: bytes = b"TPID",
+        internal_id: bytes | None = None,
+        client_order_id: bytes | None = None,
+        side: int = 0,
+        price_wei: int = 10_000_000,
+        quantity_wei: int = 10**18,
+    ):
+        from dexalot_sdk.utils.result import Result
+
+        resolved_internal_id = internal_id or (b"\x01".rjust(32, b"\0"))
+        resolved_client_order_id = client_order_id or (b"\xab" * 32)
+        order_data = (
+            resolved_internal_id,
+            resolved_client_order_id,
+            trade_pair_id,
+            price_wei,
+            0,
+            quantity_wei,
+            0,
+            0,
+            VALID_ADDRESS,
+            side,
+            1,
+            0,
+            1,
+        )
+        client._resolve_order_reference = AsyncMock(
+            return_value=Result.ok(
+                {
+                    "id_type": id_type,
+                    "input_bytes": resolved_internal_id
+                    if id_type == "internal"
+                    else resolved_client_order_id,
+                    "order_data": order_data,
+                    "internal_id_bytes": resolved_internal_id,
+                    "client_order_id_bytes": resolved_client_order_id,
+                }
+            )
+        )
+        return order_data
+
     def test_transform_pair_from_api(self, client):
         """Test _transform_pair_from_api with various field name combinations."""
         # Test lowercase fields transformed to snake_case
@@ -572,6 +619,7 @@ class TestCLOBClient:
 
     async def test_cancel_order(self, client):
         """Test cancel_order."""
+        self._stub_resolved_order(client, id_type="internal")
         mock_receipt = MagicMock()
         mock_receipt.status = 1
         client._send_trade_tx = AsyncMock(return_value=("0xTxHash", mock_receipt))
@@ -585,11 +633,6 @@ class TestCLOBClient:
 
     async def test_replace_order(self, client):
         """Test replace_order."""
-        # Mock get_order to return valid order details
-        from dexalot_sdk.utils.result import Result
-
-        client.get_order = AsyncMock(return_value=Result.ok({"pair": "AVAX/USDC"}))
-
         # Ensure pair exists
         client.pairs = {
             "AVAX/USDC": {
@@ -601,6 +644,7 @@ class TestCLOBClient:
                 "tradePairId": b"TPID",
             }
         }
+        self._stub_resolved_order(client, pair="AVAX/USDC", trade_pair_id=b"TPID")
 
         mock_receipt = MagicMock()
         mock_receipt.status = 1
@@ -615,7 +659,7 @@ class TestCLOBClient:
         # Inspections should be on the contract function call itself
         client.trade_pairs_contract.functions.cancelReplaceOrder.assert_called_once()
         args = client.trade_pairs_contract.functions.cancelReplaceOrder.call_args[0]
-        assert args[0] == bytes.fromhex("01")  # 0x01
+        assert args[0] == bytes.fromhex("01").rjust(32, b"\0")
         assert args[2] == 10000000  # 10.0 * 10^6
         assert args[3] == 1000000000000000000  # 1.0 * 10^18
 
@@ -949,6 +993,7 @@ class TestCLOBClient:
             {"order_id": "0x01", "amount": 1.0, "price": 11.0, "pair": "AVAX/USDC", "side": "BUY"}
         ]
 
+        self._stub_resolved_order(client, pair="AVAX/USDC", trade_pair_id=b"TPID")
         client._ensure_pair_exists = AsyncMock(return_value=True)
         client._send_trade_tx = AsyncMock(return_value=("0xTxHash", MagicMock(status=1)))
 
@@ -961,7 +1006,7 @@ class TestCLOBClient:
         client.trade_pairs_contract.functions.cancelAddList.assert_called_once()
         args = client.trade_pairs_contract.functions.cancelAddList.call_args[0]
         # cancelAddList(_orderIds, _newOrders)
-        assert args[0][0] == bytes.fromhex("01")
+        assert args[0][0] == bytes.fromhex("01").rjust(32, b"\0")
         assert args[1][0][1] == b"TPID"
         assert args[1][0][2] == 11000000  # 11.0 * 10^6
 
@@ -1014,6 +1059,7 @@ class TestCLOBClient:
 
     async def test_cancel_order_receipt_status_failed(self, client):
         """Test cancel_order when receipt status != 1."""
+        self._stub_resolved_order(client, id_type="internal")
         mock_receipt = MagicMock()
         mock_receipt.status = 0  # Failed transaction
         client._send_trade_tx = AsyncMock(return_value=("0xTxHash", mock_receipt))
@@ -1025,21 +1071,11 @@ class TestCLOBClient:
         assert "Transaction reverted" in res.error
 
     async def test_cancel_order_fallback_internal_to_client_receipt_failed(self, client):
-        """Test cancel_order fallback path: Internal ID fails, Client ID receipt status != 1."""
-        # First call fails (Internal ID), second succeeds but receipt status is 0
+        """Test cancel_order on the client-ID path when receipt status != 1."""
+        self._stub_resolved_order(client, id_type="client")
         mock_receipt_failed = MagicMock()
         mock_receipt_failed.status = 0
-
-        def side_effect(*args, **kwargs):
-            # First call raises exception (Internal ID fails)
-            if not hasattr(side_effect, "called"):
-                side_effect.called = True
-                raise Exception("Internal ID failed")
-            # Second call returns failed receipt (Client ID)
-            return ("0xTxHash", mock_receipt_failed)
-
-        client._send_trade_tx = AsyncMock(side_effect=side_effect)
-        client._get_order_id_bytes = MagicMock(return_value=b"\x00" * 32)  # Internal ID
+        client._send_trade_tx = AsyncMock(return_value=("0xTxHash", mock_receipt_failed))
 
         res = await client.cancel_order(
             "0x1234567890123456789012345678901234567890123456789012345678901234"
@@ -1048,23 +1084,11 @@ class TestCLOBClient:
         assert "Transaction reverted" in res.error
 
     async def test_cancel_order_fallback_client_to_internal_receipt_failed(self, client):
-        """Test cancel_order fallback path: Client ID fails, Internal ID receipt status != 1."""
-        # First call fails (Client ID), second succeeds but receipt status is 0
+        """Test cancel_order on the internal-ID path when receipt status != 1."""
+        self._stub_resolved_order(client, id_type="internal")
         mock_receipt_failed = MagicMock()
         mock_receipt_failed.status = 0
-
-        def side_effect(*args, **kwargs):
-            # First call raises exception (Client ID fails)
-            if not hasattr(side_effect, "called"):
-                side_effect.called = True
-                raise Exception("Client ID failed")
-            # Second call returns failed receipt (Internal ID)
-            return ("0xTxHash", mock_receipt_failed)
-
-        client._send_trade_tx = AsyncMock(side_effect=side_effect)
-        client._get_order_id_bytes = MagicMock(
-            return_value=b"\x01" * 32
-        )  # Client ID (not starting with \x00)
+        client._send_trade_tx = AsyncMock(return_value=("0xTxHash", mock_receipt_failed))
 
         res = await client.cancel_order(
             "0x1234567890123456789012345678901234567890123456789012345678901234"
@@ -1084,9 +1108,6 @@ class TestCLOBClient:
 
     async def test_replace_order_receipt_status_failed(self, client):
         """Test replace_order when receipt status != 1."""
-        from dexalot_sdk.utils.result import Result
-
-        client.get_order = AsyncMock(return_value=Result.ok({"pair": "AVAX/USDC"}))
         client.pairs = {
             "AVAX/USDC": {
                 "pair": "AVAX/USDC",
@@ -1097,6 +1118,7 @@ class TestCLOBClient:
                 "tradePairId": b"TPID",
             }
         }
+        self._stub_resolved_order(client, pair="AVAX/USDC", trade_pair_id=b"TPID")
         mock_receipt = MagicMock()
         mock_receipt.status = 0  # Failed transaction
         client._send_trade_tx = AsyncMock(return_value=("0xTxHash", mock_receipt))
@@ -1171,13 +1193,11 @@ class TestCLOBClient:
                 "tradePairId": b"TPID",
             }
         }
-        from dexalot_sdk.utils.result import Result
-
         mock_receipt = MagicMock()
         mock_receipt.status = 1
         client._send_trade_tx = AsyncMock(return_value=("0xTxHash", mock_receipt))
-        client.get_order = AsyncMock(return_value=Result.ok({"pair": "AVAX/USDC"}))
         client.get_portfolio_balance = AsyncMock(return_value={"available": 100.0})
+        self._stub_resolved_order(client, pair="AVAX/USDC", trade_pair_id=b"TPID")
 
         replacements = [
             {"order_id": "0x01", "pair": "AVAX/USDC", "side": "BUY", "amount": 1.0, "price": 10.0}
@@ -1258,6 +1278,7 @@ class TestCLOBClient:
         assert "not found" in res.error
 
         # cancel_add_list pair not found
+        self._stub_resolved_order(client, pair="INVALID", trade_pair_id=b"ID")
         res = await client.cancel_add_list(
             [{"order_id": "1", "pair": "INVALID", "amount": 1, "price": 1, "side": "BUY"}]
         )
@@ -1395,6 +1416,7 @@ class TestCLOBClient:
         mock_receipt = MagicMock()
         mock_receipt.status = 0  # Transaction reverted
         client._send_trade_tx = AsyncMock(return_value=("0xTxHash", mock_receipt))
+        self._stub_resolved_order(client, pair="AVAX/USDC", trade_pair_id=b"TPID")
 
         replacements = [
             {
@@ -1491,6 +1513,7 @@ class TestCLOBClient:
 
         client.get_portfolio_balance = AsyncMock(return_value=Result.ok({"available": 1000.0}))
         client._send_trade_tx = AsyncMock(side_effect=Exception("Err"))
+        self._stub_resolved_order(client, id_type="internal", pair="P", trade_pair_id=b"ID")
 
         result = await client.cancel_order("0x01")
         assert not result.success
@@ -1510,6 +1533,10 @@ class TestCLOBClient:
         assert not result.success
 
         # get_order exception
+        try:
+            del client._resolve_order_reference
+        except AttributeError:
+            pass
         client.trade_pairs_contract.functions.getOrder.side_effect = Exception("Err")
         result = await client.get_order("1")
         assert not result.success
@@ -1576,7 +1603,6 @@ class TestCLOBClient:
         client.trade_pairs_contract = MagicMock()
         from dexalot_sdk.utils.result import Result
 
-        client.get_order = AsyncMock(return_value=Result.ok({"pair": "AVAX/USDC"}))
         client.pairs = {
             "AVAX/USDC": {
                 "pair": "AVAX/USDC",
@@ -1585,23 +1611,54 @@ class TestCLOBClient:
                 "tradePairId": b"ID",
             }
         }
+        self._stub_resolved_order(client, pair="AVAX/USDC", trade_pair_id=b"ID")
         client._send_trade_tx = AsyncMock(return_value=("0xTxHash", MagicMock(status=1)))
 
         await client.replace_order("order_id_string", 1, 1)
 
-        from dexalot_sdk.utils.result import Result
-
-        client.get_order = AsyncMock(return_value=Result.fail("Error"))
+        client._resolve_order_reference = AsyncMock(return_value=Result.fail("Error"))
         result = await client.replace_order("1", 1, 1)
         assert not result.success
         assert "Could not fetch order" in result.error
 
-        client.get_order = AsyncMock(return_value=Result.ok({}))
+        client._resolve_order_reference = AsyncMock(
+            return_value=Result.ok(
+                {
+                    "id_type": "internal",
+                    "input_bytes": b"\x01".rjust(32, b"\0"),
+                    "order_data": (
+                        b"\x01".rjust(32, b"\0"),
+                        b"\xab" * 32,
+                        b"UNKNOWN",
+                        1,
+                        0,
+                        1,
+                        0,
+                        0,
+                        VALID_ADDRESS,
+                        0,
+                        1,
+                        0,
+                        1,
+                    ),
+                    "internal_id_bytes": b"\x01".rjust(32, b"\0"),
+                    "client_order_id_bytes": b"\xab" * 32,
+                }
+            )
+        )
         result = await client.replace_order("1", 1, 1)
         assert not result.success
         assert "Could not determine pair" in result.error
 
-        client.get_order = AsyncMock(return_value=Result.ok({"pair": "AVAX/USDC"}))
+        client.pairs = {
+            "AVAX/USDC": {
+                "pair": "AVAX/USDC",
+                "base_decimals": 18,
+                "quote_decimals": 6,
+                "tradePairId": b"ID",
+            }
+        }
+        self._stub_resolved_order(client, pair="AVAX/USDC", trade_pair_id=b"ID")
         client._send_trade_tx.side_effect = Exception("Gas Err")
         result = await client.replace_order("1", 1, 1)
         assert not result.success
@@ -1622,6 +1679,7 @@ class TestCLOBClient:
 
         client._ensure_pair_exists = AsyncMock(return_value=True)
         client._send_trade_tx.side_effect = Exception("Gas Err")
+        self._stub_resolved_order(client, pair="AVAX/USDC", trade_pair_id=b"ID", id_type="internal")
         result = await client.cancel_add_list(
             [{"order_id": "1", "pair": "AVAX/USDC", "amount": 1, "price": 1, "side": "BUY"}]
         )
@@ -1840,10 +1898,12 @@ class TestCLOBClient:
         assert not result.success
         assert "Transaction reverted" in result.error
 
-        client._send_trade_tx.side_effect = [Exception("Revert"), ("0xTxHash", MagicMock(status=1))]
+        self._stub_resolved_order(client, id_type="internal", pair=VALID_PAIR, trade_pair_id=b"ID")
+        client._send_trade_tx.side_effect = None
+        client._send_trade_tx.return_value = ("0xTxHash", MagicMock(status=1))
         res = await client.cancel_order(VALID_ORDER_ID)  # Not likely internal
         assert res.success
-        assert "Cancel transaction sent (Internal ID)" in res.data
+        assert "Cancel transaction sent" in res.data
         client._send_trade_tx.side_effect = None
 
         mock_resp = AsyncMock()
@@ -1869,7 +1929,7 @@ class TestCLOBClient:
         # If Client ID returns data, it stops.
         res = await client.get_order("0x1234")
         assert res.success
-        assert res.data["price"] == 100.0
+        assert res.data["price"] == 10.0
 
         # Now test fallback: Client ID returns empty, Internal ID succeeds
         client.trade_pairs_contract.functions.getOrderByClientId.return_value.call = AsyncMock(
@@ -1880,7 +1940,7 @@ class TestCLOBClient:
         )
         res = await client.get_order("0x1234")
         assert res.success
-        assert res.data["price"] == 100.0
+        assert res.data["price"] == 10.0
 
     async def test_clob_missing_coverage_4(self, client):
         """Test additional error paths."""
@@ -2021,7 +2081,7 @@ class TestCLOBClient:
         client.trade_pairs_contract.functions.getOrderByClientId.side_effect = Exception("Err")
         res = await client.get_order("0x01")
         assert not res.success
-        assert "Order not found (Internal ID)" in res.error
+        assert "getting order by client ID" in res.error
 
         await client.cancel_list_orders(["order_id_string"])
 
@@ -2181,6 +2241,56 @@ class TestCLOBClient:
             {"order_id": b"\x01" * 32, "pair": "P", "side": "BUY", "amount": 1, "price": 1},
         ]
 
+        client._resolve_order_reference = AsyncMock(
+            side_effect=[
+                __import__("dexalot_sdk.utils.result", fromlist=["Result"]).Result.ok(
+                    {
+                        "id_type": "internal",
+                        "input_bytes": (12345).to_bytes(32, "big"),
+                        "order_data": (
+                            (12345).to_bytes(32, "big"),
+                            b"\xaa" * 32,
+                            b"ID",
+                            10_000_000,
+                            0,
+                            10**18,
+                            0,
+                            0,
+                            VALID_ADDRESS,
+                            1,
+                            1,
+                            0,
+                            1,
+                        ),
+                        "internal_id_bytes": (12345).to_bytes(32, "big"),
+                        "client_order_id_bytes": b"\xaa" * 32,
+                    }
+                ),
+                __import__("dexalot_sdk.utils.result", fromlist=["Result"]).Result.ok(
+                    {
+                        "id_type": "internal",
+                        "input_bytes": b"\x01" * 32,
+                        "order_data": (
+                            b"\x01" * 32,
+                            b"\xbb" * 32,
+                            b"ID",
+                            10_000_000,
+                            0,
+                            10**18,
+                            0,
+                            0,
+                            VALID_ADDRESS,
+                            0,
+                            1,
+                            0,
+                            1,
+                        ),
+                        "internal_id_bytes": b"\x01" * 32,
+                        "client_order_id_bytes": b"\xbb" * 32,
+                    }
+                ),
+            ]
+        )
         res = await client.cancel_add_list(replacements)
         assert res.success
         assert "tx_hash" in res.data
@@ -2192,7 +2302,7 @@ class TestCLOBClient:
         order_ids = call_args[0]
         new_orders = call_args[1]
 
-        assert order_ids[0] == 12345
+        assert order_ids[0] == (12345).to_bytes(32, "big")
         assert order_ids[1] == b"\x01" * 32
 
         # Check SELL order (Index 0)
@@ -2205,11 +2315,62 @@ class TestCLOBClient:
         replacements_invalid = [
             {"order_id": "1", "pair": "P", "side": "INVALID", "amount": 1, "price": 1}
         ]
+        self._stub_resolved_order(client, pair="P", trade_pair_id=b"ID")
         result = await client.cancel_add_list(replacements_invalid)
         assert not result.success
         assert "Invalid side" in result.error
 
         client._send_trade_tx.side_effect = Exception("Gas estimation failed")
+        client._resolve_order_reference = AsyncMock(
+            side_effect=[
+                __import__("dexalot_sdk.utils.result", fromlist=["Result"]).Result.ok(
+                    {
+                        "id_type": "internal",
+                        "input_bytes": (12345).to_bytes(32, "big"),
+                        "order_data": (
+                            (12345).to_bytes(32, "big"),
+                            b"\xaa" * 32,
+                            b"ID",
+                            10_000_000,
+                            0,
+                            10**18,
+                            0,
+                            0,
+                            VALID_ADDRESS,
+                            1,
+                            1,
+                            0,
+                            1,
+                        ),
+                        "internal_id_bytes": (12345).to_bytes(32, "big"),
+                        "client_order_id_bytes": b"\xaa" * 32,
+                    }
+                ),
+                __import__("dexalot_sdk.utils.result", fromlist=["Result"]).Result.ok(
+                    {
+                        "id_type": "internal",
+                        "input_bytes": b"\x01" * 32,
+                        "order_data": (
+                            b"\x01" * 32,
+                            b"\xbb" * 32,
+                            b"ID",
+                            10_000_000,
+                            0,
+                            10**18,
+                            0,
+                            0,
+                            VALID_ADDRESS,
+                            0,
+                            1,
+                            0,
+                            1,
+                        ),
+                        "internal_id_bytes": b"\x01" * 32,
+                        "client_order_id_bytes": b"\xbb" * 32,
+                    }
+                ),
+            ]
+        )
         result = await client.cancel_add_list(replacements)
         assert not result.success
         assert "Gas estimation failed" in result.error
@@ -2222,36 +2383,35 @@ class TestCLOBClient:
         client._send_trade_tx = AsyncMock(return_value=("tx_hash", MagicMock(status=1)))
 
         internal_id = "0x00" + "1" * 62
+        self._stub_resolved_order(
+            client,
+            id_type="internal",
+            internal_id=bytes.fromhex(internal_id[2:]),
+            client_order_id=b"\xaa" * 32,
+        )
         res = await client.cancel_order(internal_id)
         assert res.success
         assert "Cancel transaction sent (Internal ID)" in res.data
 
-        client._send_trade_tx.side_effect = [
-            Exception("Internal Fail"),
-            ("0xTxHash", MagicMock(status=1)),
-        ]
-
-        res = await client.cancel_order(internal_id)
-        assert res.success
-        assert "Cancel transaction sent (Client ID)" in res.data
-        assert res.success
-        assert "Cancel transaction sent (Client ID)" in res.data
-
-        client._send_trade_tx.side_effect = [Exception("Internal Fail"), Exception("Client Fail")]
+        client._send_trade_tx.side_effect = Exception("Internal Fail")
 
         res = await client.cancel_order(internal_id)
         assert not res.success
         assert "cancelling order" in res.error.lower()
 
         client_id = "0x11" + "1" * 62
-        client._send_trade_tx.side_effect = [
-            Exception("Client Fail"),
-            ("0xTxHash", MagicMock(status=1)),
-        ]
+        self._stub_resolved_order(
+            client,
+            id_type="client",
+            internal_id=b"\x01".rjust(32, b"\0"),
+            client_order_id=bytes.fromhex(client_id[2:]),
+        )
+        client._send_trade_tx.side_effect = None
+        client._send_trade_tx.return_value = ("0xTxHash", MagicMock(status=1))
 
         res = await client.cancel_order(client_id)
         assert res.success
-        assert "Cancel transaction sent (Internal ID)" in res.data
+        assert "Cancel transaction sent (Client ID)" in res.data
         client._send_trade_tx.side_effect = None
 
     async def test_clob_critical_coverage(self, client):
@@ -2259,6 +2419,7 @@ class TestCLOBClient:
         client.account = MagicMock()
         client.account.address = VALID_ADDRESS
         client._send_trade_tx = AsyncMock(return_value=("tx", MagicMock(status=1)))
+        self._stub_resolved_order(client, id_type="internal")
 
         res = await client.cancel_order(VALID_ORDER_ID)
         assert res.success
@@ -2735,6 +2896,213 @@ class TestCLOBClient:
         assert not result.success
         assert "Invalid client_order_id" in result.error
 
+    async def test_resolution_helper_edge_cases(self, client):
+        """Cover deterministic resolution helper branches and edge-case guards."""
+        from dexalot_sdk.utils.result import Result
+
+        client.account = None
+        trader_result = await client._get_trader_checksum_address()
+        assert not trader_result.success
+        assert "Private key not configured" in trader_result.error
+
+        assert client._classify_order_id_input(1) == "internal"
+        assert client._classify_order_id_input("ab" * 32) == "ambiguous"
+
+        client.trade_pairs_contract = None
+        assert not (await client._fetch_order_by_internal_id(b"\x01" * 32)).success
+        assert not (await client._fetch_order_by_client_id(b"\x01" * 32)).success
+        assert not (await client._resolve_order_reference("0x02")).success
+
+        client.trade_pairs_contract = MagicMock()
+        resolve_int = await client._resolve_order_reference(1)
+        assert not resolve_int.success
+        assert "got int" in resolve_int.error
+
+        client._get_order_id_bytes = MagicMock(side_effect=ValueError("boom"))
+        result = await client._resolve_order_reference("0x02")
+        assert not result.success
+        assert "normalizing order id" in result.error.lower()
+
+        # Restore actual method for the remaining helper tests.
+        try:
+            del client._get_order_id_bytes
+        except AttributeError:
+            pass
+
+        class NoClientMethods:
+            pass
+
+        client.account = MagicMock()
+        client.account.address = VALID_ADDRESS
+        client.trade_pairs_contract.functions = NoClientMethods()
+        fetch_none = await client._fetch_order_by_client_id(b"\x01" * 32)
+        assert fetch_none.success
+        assert fetch_none.data is None
+
+        client._fetch_order_by_client_id = AsyncMock(return_value=Result.ok(None))
+        result = await client.get_order_by_client_id("client-id")
+        assert not result.success
+        assert "Order not found (Client ID)." in result.error
+
+        client._fetch_order_by_client_id = AsyncMock(side_effect=Exception("boom"))
+        result = await client.get_order_by_client_id("client-id")
+        assert not result.success
+        assert "getting order by client id" in result.error.lower()
+
+        client._resolve_order_reference = AsyncMock(
+            return_value=Result.ok(
+                {
+                    "id_type": "internal",
+                    "input_bytes": b"\x01" * 32,
+                    "order_data": (
+                        b"\x01" * 32,
+                        b"\x02" * 32,
+                        b"PAIR",
+                        1,
+                        0,
+                        1,
+                        0,
+                        0,
+                        VALID_ADDRESS,
+                        0,
+                        1,
+                        0,
+                        1,
+                    ),
+                    "internal_id_bytes": b"\x01" * 32,
+                    "client_order_id_bytes": b"\x02" * 32,
+                }
+            )
+        )
+        client._format_order_data = AsyncMock(side_effect=Exception("bad-format"))
+        result = await client.get_order("0x02")
+        assert not result.success
+        assert "getting order" in result.error.lower()
+
+        client.trade_pairs_contract = MagicMock()
+        client._send_trade_tx = AsyncMock(side_effect=Exception("boom"))
+        result = await client.cancel_order_by_client_id("client-id")
+        assert not result.success
+        assert "cancelling order by client id" in result.error.lower()
+
+        client.account = None
+        result = await client.cancel_order_by_client_id("client-id")
+        assert not result.success
+        assert result.error == "Private key not configured."
+
+        client.account = MagicMock()
+        client.account.address = VALID_ADDRESS
+        result = await client.cancel_order_by_client_id(123)
+        assert not result.success
+        assert "Invalid client_order_id" in result.error
+
+        client.trade_pairs_contract = None
+        result = await client.cancel_order_by_client_id("client-id")
+        assert not result.success
+        assert result.error == "TradePairs contract not initialized."
+
+        client.trade_pairs_contract = MagicMock()
+        client._send_trade_tx = AsyncMock(
+            return_value=("0xdead", type("Receipt", (), {"status": 0})())
+        )
+        result = await client.cancel_order_by_client_id("client-id")
+        assert not result.success
+        assert result.error == "Transaction reverted"
+
+        client._send_trade_tx = AsyncMock(return_value=("0xbeef", None))
+        result = await client.cancel_order_by_client_id("client-id", wait_for_receipt=False)
+        assert result.success
+        assert result.data == "Cancel transaction sent (Client ID): 0xbeef"
+
+        result = client._get_order_id_bytes("ab" * 32)
+        assert result == bytes.fromhex("ab" * 32)
+        with pytest.raises(ValueError, match="fit in 32 bytes"):
+            client._get_order_id_bytes("x" * 33)
+        marker = object()
+        assert client._get_order_id_bytes(marker) is marker
+
+    async def test_cancel_add_list_pair_resolution_guards(self, client):
+        """cancel_add_list should fail when pair inference is missing or conflicts."""
+        from dexalot_sdk.utils.result import Result
+
+        client.account = MagicMock()
+        client.account.address = VALID_ADDRESS
+        client.trade_pairs_contract = MagicMock()
+
+        client._resolve_order_reference = AsyncMock(
+            return_value=Result.ok(
+                {
+                    "id_type": "internal",
+                    "input_bytes": b"\x01" * 32,
+                    "order_data": (
+                        b"\x01" * 32,
+                        b"\x02" * 32,
+                        b"UNKNOWN",
+                        1,
+                        0,
+                        1,
+                        0,
+                        0,
+                        VALID_ADDRESS,
+                        0,
+                        1,
+                        0,
+                        1,
+                    ),
+                    "internal_id_bytes": b"\x01" * 32,
+                    "client_order_id_bytes": b"\x02" * 32,
+                }
+            )
+        )
+        client.pairs = {}
+        result = await client.cancel_add_list(
+            [{"order_id": "0x01", "amount": 1, "price": 1, "side": "BUY"}]
+        )
+        assert not result.success
+        assert "requires pair" in result.error
+
+        client.pairs = {
+            "P": {
+                "pair": "P",
+                "tradePairId": b"PAIR",
+                "base_decimals": 18,
+                "quote_decimals": 6,
+                "base": "AVAX",
+                "quote": "USDC",
+            }
+        }
+        client._ensure_pair_exists = AsyncMock(return_value=True)
+        client._resolve_order_reference = AsyncMock(
+            return_value=Result.ok(
+                {
+                    "id_type": "internal",
+                    "input_bytes": b"\x01" * 32,
+                    "order_data": (
+                        b"\x01" * 32,
+                        b"\x02" * 32,
+                        b"PAIR",
+                        1,
+                        0,
+                        1,
+                        0,
+                        0,
+                        VALID_ADDRESS,
+                        0,
+                        1,
+                        0,
+                        1,
+                    ),
+                    "internal_id_bytes": b"\x01" * 32,
+                    "client_order_id_bytes": b"\x02" * 32,
+                }
+            )
+        )
+        result = await client.cancel_add_list(
+            [{"order_id": "0x01", "pair": "OTHER", "amount": 1, "price": 1, "side": "BUY"}]
+        )
+        assert not result.success
+        assert "does not match existing order pair" in result.error
+
     async def test_validate_order_params_price_none_for_limit(self, client):
         """_validate_order_params requires price for LIMIT orders; returns fail Result when price is None."""
         side_enum, type_enum, error = client._validate_order_params("BUY", "LIMIT", None, None)
@@ -2757,8 +3125,7 @@ class TestCLOBClient:
 
     async def test_cancel_order_internal_id_dict_receipt_reverted(self, client):
         """cancel_order: Internal ID path with dict receipt whose status == 0 returns fail."""
-        # Order ID bytes starting with \x00 → is_likely_internal = True
-        client._get_order_id_bytes = MagicMock(return_value=b"\x00" * 32)
+        self._stub_resolved_order(client, id_type="internal", internal_id=b"\x00" * 32)
         # Return a plain dict receipt (exercises receipt.get("status", 1) branch)
         client._send_trade_tx = AsyncMock(return_value=("0xTxHash", {"status": 0}))
 

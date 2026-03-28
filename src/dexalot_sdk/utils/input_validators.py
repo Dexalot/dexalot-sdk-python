@@ -11,7 +11,7 @@ from .result import Result
 
 # Compiled regex patterns for performance (module-level)
 _PAIR_PATTERN = re.compile(r"^[A-Za-z0-9_-]+/[A-Za-z0-9_-]+$")
-_HEX_PATTERN = re.compile(r"^(0x)?[0-9a-fA-F]+$")
+_HEX_PATTERN = re.compile(r"^[0-9a-fA-F]+$")
 
 
 def validate_positive_float(value: object, param_name: str) -> Result[None]:
@@ -130,10 +130,14 @@ def validate_pair_format(pair: object, param_name: str = "pair") -> Result[None]
 
 
 def validate_order_id_format(order_id: object, param_name: str = "order_id") -> Result[None]:
-    """Validate that an order ID is in a valid format (hex string or bytes32).
+    """Validate that an order ID is in a supported SDK format.
 
     Args:
-        order_id: The order ID to validate (hex string with/without 0x, or bytes)
+        order_id: The order ID to validate. Supported forms are:
+            - bytes32 as ``bytes`` (exactly 32 bytes)
+            - hex strings with ``0x`` prefix (up to 32 bytes / 64 hex chars)
+            - decimal strings for internal IDs
+            - plain UTF-8 strings up to 32 bytes for client IDs
         param_name: Name of the parameter (for error messages)
 
     Returns:
@@ -154,17 +158,34 @@ def validate_order_id_format(order_id: object, param_name: str = "order_id") -> 
     if not order_id.strip():
         return Result.fail(f"Invalid {param_name}: cannot be empty")
 
-    # Check hex format
-    hex_str = order_id[2:] if order_id.startswith("0x") else order_id
-    if not _HEX_PATTERN.match(order_id):
-        return Result.fail(
-            f"Invalid {param_name}: must be valid hex string (with or without 0x prefix), got '{order_id[:20]}...'"
-        )
+    value = order_id.strip()
 
-    # For hex strings, check reasonable length (should be 64 chars for bytes32, but allow flexibility)
-    if len(hex_str) > 128:  # Allow up to 64 bytes (512 bits)
+    if value.startswith("0x"):
+        hex_str = value[2:]
+        if not hex_str:
+            return Result.fail(f"Invalid {param_name}: hex string cannot be empty after '0x'")
+        if not _HEX_PATTERN.match(hex_str):
+            return Result.fail(f"Invalid {param_name}: contains invalid hex characters")
+        if len(hex_str) % 2 != 0:
+            return Result.fail(
+                f"Invalid {param_name}: hex string must have an even number of characters"
+            )
+        if len(hex_str) > 64:
+            return Result.fail(
+                f"Invalid {param_name}: hex string too long for bytes32 (max 64 hex chars), got {len(hex_str)} chars"
+            )
+        return Result.ok(None)
+
+    if value.isdigit():
+        return Result.ok(None)
+
+    if len(value) == 64 and _HEX_PATTERN.match(value):
+        return Result.ok(None)
+
+    encoded = value.encode("utf-8")
+    if len(encoded) > 32:
         return Result.fail(
-            f"Invalid {param_name}: hex string too long (max 128 hex chars), got {len(hex_str)} chars"
+            f"Invalid {param_name}: plain string form must fit in 32 bytes, got {len(encoded)} bytes"
         )
 
     return Result.ok(None)

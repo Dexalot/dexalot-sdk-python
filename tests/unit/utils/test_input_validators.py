@@ -192,7 +192,21 @@ class TestValidateOrderIdFormat:
         """Test that invalid hex strings fail."""
         result = validate_order_id_format("0x123g", "order_id")
         assert not result.success
-        assert_contains(result.error, "must be valid hex string")
+        assert_contains(result.error, "invalid hex characters")
+
+    def test_hex_prefix_without_payload_fails(self):
+        result = validate_order_id_format("0x", "order_id")
+        assert not result.success
+        assert_contains(result.error, "cannot be empty after '0x'")
+
+    def test_unprefixed_64_char_hex_succeeds(self):
+        result = validate_order_id_format("ab" * 32, "order_id")
+        assert result.success
+
+    def test_plain_string_over_32_bytes_fails(self):
+        result = validate_order_id_format("x" * 33, "order_id")
+        assert not result.success
+        assert_contains(result.error, "must fit in 32 bytes")
 
     def test_wrong_bytes_length_fails(self):
         """Test that bytes with wrong length fail."""

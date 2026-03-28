@@ -806,10 +806,28 @@ All state-changing methods support `wait_for_receipt`:
 - `add_order(pair, side, amount, price, order_type="LIMIT", wait_for_receipt=True)`
 - `add_limit_order_list(orders, wait_for_receipt=True)`
 - `cancel_order(order_id, wait_for_receipt=True)`
+- `cancel_order_by_client_id(client_order_id, wait_for_receipt=True)`
 - `cancel_list_orders(order_ids, wait_for_receipt=True)`
 - `cancel_list_orders_by_client_id(client_order_ids, wait_for_receipt=True)`
 - `replace_order(order_id, new_price, new_amount, wait_for_receipt=True)`
 - `cancel_add_list(replacements, wait_for_receipt=True)`
+
+### Order ID Semantics
+
+Dexalot order flows expose three different identifiers with different purposes:
+
+- `id`: internal order ID used by Dexalot contracts and orderbook state
+- `clientOrderId`: client-generated order ID used for correlation and follow-up actions
+- `tx_hash`: transaction hash for the on-chain action that created or modified the order
+
+Use them as follows:
+
+- `get_order()` accepts either an internal order ID or a client order ID and resolves it deterministically.
+- `get_order_by_client_id()` uses the client-ID lookup path only.
+- `cancel_order()` and `replace_order()` accept either an internal order ID or a client order ID.
+- `cancel_order_by_client_id()` is available when you explicitly know you have a client order ID.
+- `cancel_add_list()` never falls back to a hardcoded pair. It resolves the existing order first, infers `pair` when possible, and otherwise requires `pair`.
+- `tx_hash` is not an order identifier and should not be passed to order lookup, cancel, or replace methods.
 
 **Transfer Operations:**
 - `deposit(token, amount, source_chain, use_layerzero=False, wait_for_receipt=True)`
@@ -1087,7 +1105,7 @@ Input validation is applied to all critical methods:
 - **Prices**: Must be positive, finite numbers
 - **Addresses**: Must be valid Ethereum addresses (0x prefix, 42 chars, hex)
 - **Pairs**: Must be in `TOKEN/TOKEN` format
-- **Order IDs**: Must be valid hex strings or bytes32 format
+- **Order IDs**: Must be valid prefixed hex, decimal-string internal IDs, bytes32 values, or plain client IDs that fit in bytes32
 - **Token Symbols**: Must be non-empty, alphanumeric strings
 
 ### Handling Validation Errors

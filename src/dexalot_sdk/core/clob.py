@@ -399,15 +399,171 @@ class CLOBClient(DexalotBaseClient):
             error_msg = self._sanitize_error(e, "placing order")
             return Result.fail(error_msg)
 
+    @staticmethod
+    def _is_empty_order_data(order_data: Any) -> bool:
+        """Return True when a contract order tuple represents an empty order."""
+        return not order_data or len(order_data) == 0 or order_data[0] == b"\0" * 32
+
+    @staticmethod
+    async def _await_if_needed(value: Any) -> Any:
+        """Await values that are awaitable; return direct values unchanged."""
+        if hasattr(value, "__await__"):
+            return await value
+        return value
+
+    async def _get_trader_checksum_address(self) -> Result[str]:
+        """Return the current trader address in checksum form."""
+        if not self.account:
+            return Result.fail("Private key not configured.")
+
+        w3_l1 = await self._get_w3_l1()
+        if not w3_l1:
+            return Result.fail("L1 provider not available.")
+
+        return Result.ok(w3_l1.to_checksum_address(cast(str, cast(Any, self.account).address)))
+
+    def _classify_order_id_input(self, order_id: str | bytes | int) -> str:
+        """Classify an order-id input for deterministic resolution."""
+        if isinstance(order_id, int):
+            return "internal"
+        if isinstance(order_id, bytes):
+            return "ambiguous"
+        if order_id.startswith("0x"):
+            return "ambiguous"
+        if order_id.isdigit():
+            return "internal"
+        if len(order_id) == 64 and all(c in "0123456789abcdefABCDEF" for c in order_id):
+            return "ambiguous"
+        return "client"
+
+    def _build_order_resolution_sequence(self, order_id: str | bytes | int) -> list[str]:
+        """Build the deterministic lookup sequence for an order-id input."""
+        kind = self._classify_order_id_input(order_id)
+        if kind == "client":
+            return ["client"]
+        return ["internal", "client"]
+
+    async def _fetch_order_by_internal_id(
+        self, order_id_bytes: bytes
+    ) -> Result[tuple[Any, ...] | None]:
+        """Fetch an order using the internal-id contract lookup."""
+        contract = self.trade_pairs_contract
+        if not contract:
+            return Result.fail("TradePairs contract not initialized.")
+
+        try:
+            order_data = await self._await_if_needed(
+                contract.functions.getOrder(order_id_bytes).call()
+            )
+            if self._is_empty_order_data(order_data):
+                return Result.ok(None)
+            return Result.ok(order_data)
+        except Exception as e:
+            return Result.fail(self._sanitize_error(e, "getting order by internal ID"))
+
+    async def _fetch_order_by_client_id(
+        self, client_order_id_bytes: bytes
+    ) -> Result[tuple[Any, ...] | None]:
+        """Fetch an order using the canonical client-id contract lookup sequence."""
+        contract = self.trade_pairs_contract
+        if not contract:
+            return Result.fail("TradePairs contract not initialized.")
+
+        trader_result = await self._get_trader_checksum_address()
+        if not trader_result.success:
+            return cast(Result[tuple[Any, ...] | None], trader_result)
+        trader = trader_result.data
+
+        errors: list[Exception] = []
+        for method_name in ("getOrderByClientOrderId", "getOrderByClientId"):
+            method = getattr(contract.functions, method_name, None)
+            if method is None:
+                continue
+            try:
+                order_data = await self._await_if_needed(
+                    method(trader, client_order_id_bytes).call()
+                )
+                if self._is_empty_order_data(order_data):
+                    continue
+                return Result.ok(order_data)
+            except Exception as e:
+                errors.append(e)
+
+        if errors:
+            return Result.fail(self._sanitize_error(errors[0], "getting order by client ID"))
+        return Result.ok(None)
+
+    async def _resolve_order_reference(
+        self, order_id: str | bytes | int, *, allow_int: bool = False
+    ) -> Result[dict[str, Any]]:
+        """Resolve an order reference to a specific order and identifier type.
+
+        Returns:
+            Result containing:
+              - ``id_type``: ``"internal"`` or ``"client"``
+              - ``input_bytes``: normalized bytes32 form of the caller-provided ID
+              - ``order_data``: raw order tuple returned by the contract
+              - ``internal_id_bytes``: canonical internal order ID bytes32
+              - ``client_order_id_bytes``: canonical client order ID bytes32
+        """
+        if isinstance(order_id, int):
+            if not allow_int:
+                return Result.fail("Invalid order_id: must be string or bytes, got int")
+        else:
+            order_id_result = validate_order_id_format(order_id, "order_id")
+            if not order_id_result.success:
+                return cast(Result[dict[str, Any]], order_id_result)
+
+        contract = self.trade_pairs_contract
+        if not contract:
+            return Result.fail("TradePairs contract not initialized.")
+
+        try:
+            input_bytes = self._get_order_id_bytes(order_id)
+        except Exception as e:
+            return Result.fail(self._sanitize_error(e, "normalizing order ID"))
+
+        attempts = self._build_order_resolution_sequence(order_id)
+        errors: list[str] = []
+
+        for attempt in attempts:
+            if attempt == "internal":
+                result = await self._fetch_order_by_internal_id(input_bytes)
+            else:
+                result = await self._fetch_order_by_client_id(input_bytes)
+
+            if not result.success:
+                if result.error:
+                    errors.append(result.error)
+                continue
+
+            order_data = result.data
+            if order_data is None:
+                continue
+
+            return Result.ok(
+                {
+                    "id_type": attempt,
+                    "input_bytes": input_bytes,
+                    "order_data": order_data,
+                    "internal_id_bytes": order_data[0],
+                    "client_order_id_bytes": order_data[1],
+                }
+            )
+
+        if errors:
+            return Result.fail(errors[0])
+        return Result.fail("Order not found (checked supported ID paths).")
+
     @track_method("clob")
     async def cancel_order(
         self, order_id: str | bytes, wait_for_receipt: bool = True
     ) -> Result[str]:
         """Cancel a single open order by its Internal ID or Client Order ID.
 
-        Automatically detects whether ``order_id`` is an internal order ID
-        (starts with ``\\x00``) or a client-generated ID and tries the most
-        likely contract method first, falling back to the alternative on failure.
+        Resolves the provided order reference deterministically before executing
+        the matching contract method. Internal IDs cancel via ``cancelOrder``.
+        Client order IDs cancel via ``cancelOrderByClientId``.
 
         Args:
             order_id: Order identifier as a hex string (``"0x..."``), plain
@@ -434,97 +590,34 @@ class CLOBClient(DexalotBaseClient):
             return Result.fail("TradePairs contract not initialized.")
 
         try:
-            order_id_bytes = self._get_order_id_bytes(order_id)
+            resolved_result = await self._resolve_order_reference(order_id)
+            if not resolved_result.success:
+                return Result.fail(resolved_result.error or "Could not resolve order ID")
 
-            # Heuristic: Internal IDs start with 0x00 (bytes \x00), Client IDs usually don't.
-            is_likely_internal = order_id_bytes.startswith(b"\x00")
-
-            if is_likely_internal:
-                # 1. Try Internal ID
-                try:
-                    tx_hash_hex, receipt = await self._send_trade_tx(
-                        contract.functions.cancelOrder(order_id_bytes),
-                        wait_for_receipt=wait_for_receipt,
-                    )
-                    if (
-                        wait_for_receipt
-                        and receipt
-                        and (
-                            receipt.status
-                            if hasattr(receipt, "status")
-                            else receipt.get("status", 1)
-                        )
-                        != 1
-                    ):
-                        return Result.fail("Transaction reverted")
-                    return Result.ok(f"Cancel transaction sent (Internal ID): {tx_hash_hex}")
-                except Exception as e_internal:
-                    # Fallback to Client ID
-                    try:
-                        tx_hash_hex, receipt = await self._send_trade_tx(
-                            contract.functions.cancelOrderByClientId(order_id_bytes),
-                            wait_for_receipt=wait_for_receipt,
-                        )
-                        if (
-                            wait_for_receipt
-                            and receipt
-                            and (
-                                receipt.status
-                                if hasattr(receipt, "status")
-                                else receipt.get("status", 1)
-                            )
-                            != 1
-                        ):
-                            return Result.fail("Transaction reverted")
-                        return Result.ok(f"Cancel transaction sent (Client ID): {tx_hash_hex}")
-                    except Exception:
-                        error_msg = self._sanitize_error(
-                            e_internal, "cancelling order (tried both Internal and Client ID)"
-                        )
-                        return Result.fail(error_msg)
+            resolved = resolved_result.data
+            assert resolved is not None
+            id_type = resolved["id_type"]
+            if id_type == "client":
+                function_call = contract.functions.cancelOrderByClientId(
+                    resolved["client_order_id_bytes"]
+                )
+                result_label = "Client ID"
             else:
-                # 1. Try Client ID
-                try:
-                    tx_hash_hex, receipt = await self._send_trade_tx(
-                        contract.functions.cancelOrderByClientId(order_id_bytes),
-                        wait_for_receipt=wait_for_receipt,
-                    )
-                    if (
-                        wait_for_receipt
-                        and receipt
-                        and (
-                            receipt.status
-                            if hasattr(receipt, "status")
-                            else receipt.get("status", 1)
-                        )
-                        != 1
-                    ):
-                        return Result.fail("Transaction reverted")
-                    return Result.ok(f"Cancel transaction sent (Client ID): {tx_hash_hex}")
-                except Exception as e_client:
-                    # Fallback to Internal ID
-                    try:
-                        tx_hash_hex, receipt = await self._send_trade_tx(
-                            contract.functions.cancelOrder(order_id_bytes),
-                            wait_for_receipt=wait_for_receipt,
-                        )
-                        if (
-                            wait_for_receipt
-                            and receipt
-                            and (
-                                receipt.status
-                                if hasattr(receipt, "status")
-                                else receipt.get("status", 1)
-                            )
-                            != 1
-                        ):
-                            return Result.fail("Transaction reverted")
-                        return Result.ok(f"Cancel transaction sent (Internal ID): {tx_hash_hex}")
-                    except Exception:
-                        error_msg = self._sanitize_error(
-                            e_client, "cancelling order (tried both Client and Internal ID)"
-                        )
-                        return Result.fail(error_msg)
+                function_call = contract.functions.cancelOrder(resolved["internal_id_bytes"])
+                result_label = "Internal ID"
+
+            tx_hash_hex, receipt = await self._send_trade_tx(
+                function_call,
+                wait_for_receipt=wait_for_receipt,
+            )
+            if (
+                wait_for_receipt
+                and receipt
+                and (receipt.status if hasattr(receipt, "status") else receipt.get("status", 1))
+                != 1
+            ):
+                return Result.fail("Transaction reverted")
+            return Result.ok(f"Cancel transaction sent ({result_label}): {tx_hash_hex}")
 
         except Exception as e:
             error_msg = self._sanitize_error(e, "cancelling order")
@@ -700,8 +793,8 @@ class CLOBClient(DexalotBaseClient):
     async def get_order(self, order_id: str | bytes) -> Result[dict]:
         """Fetch the details of an order by its Internal ID or Client Order ID.
 
-        Tries ``getOrder`` (internal ID) first; falls back to
-        ``getOrderByClientId`` if the result is empty.
+        Resolves the provided ID deterministically. Internal lookup is attempted
+        for internal/ambiguous IDs; client lookup is attempted for client/ambiguous IDs.
 
         Args:
             order_id: Order identifier as a hex string (``"0x..."``), plain
@@ -726,39 +819,12 @@ class CLOBClient(DexalotBaseClient):
             return Result.fail("TradePairs contract not initialized.")
 
         try:
-            # Ensure order_id is bytes32
-            if isinstance(order_id, str):
-                if order_id.startswith("0x"):
-                    order_id_bytes = bytes.fromhex(order_id[2:])
-                else:
-                    order_id_bytes = order_id.encode("utf-8").ljust(32, b"\0")
-            else:
-                order_id_bytes = order_id
-
-            # Try getOrder(_orderId) first
-            order_data = await contract.functions.getOrder(order_id_bytes).call()
-
-            # Check if order found (ID is not empty/zero)
-            # order_data[0] is the ID (bytes32)
-            if order_data[0] == b"\0" * 32:
-                # Not found by Internal ID, try Client ID
-                # getOrderByClientId(_clientOrderId)
-                try:
-                    # For getOrderByClientId, we need the trader address as well
-                    w3_l1 = await self._get_w3_l1()
-                    if not w3_l1:
-                        return Result.fail("L1 provider not available.")
-                    trader = w3_l1.to_checksum_address(cast(str, cast(Any, self.account).address))
-                    order_data = await contract.functions.getOrderByClientId(
-                        trader, order_id_bytes
-                    ).call()
-                    if order_data[0] == b"\0" * 32:
-                        return Result.fail("Order not found (checked both Internal and Client ID).")
-                except Exception:
-                    # getOrderByClientId might fail if ABI is different or other issues
-                    return Result.fail("Order not found (Internal ID).")
-
-            order_details = await self._format_order_data(order_data)
+            resolved_result = await self._resolve_order_reference(order_id)
+            if not resolved_result.success:
+                return Result.fail(resolved_result.error or "Order not found")
+            resolved = resolved_result.data
+            assert resolved is not None
+            order_details = await self._format_order_data(resolved["order_data"])
             return Result.ok(order_details)
 
         except Exception as e:
@@ -769,8 +835,7 @@ class CLOBClient(DexalotBaseClient):
     async def get_order_by_client_id(self, client_order_id: str | bytes) -> Result[dict]:
         """Fetch the details of an order by its Client Order ID only.
 
-        Unlike ``get_order``, this method never falls back to the internal ID
-        and always calls ``getOrderByClientOrderId`` on the contract.
+        Unlike ``get_order``, this method uses the client-ID lookup path only.
 
         Args:
             client_order_id: Client-generated order ID as a hex string
@@ -793,23 +858,13 @@ class CLOBClient(DexalotBaseClient):
             return Result.fail("TradePairs contract not initialized.")
 
         try:
-            # Ensure client_order_id is bytes32
-            if isinstance(client_order_id, str):
-                if client_order_id.startswith("0x"):
-                    client_order_id_bytes = bytes.fromhex(client_order_id[2:])
-                else:
-                    client_order_id_bytes = client_order_id.encode("utf-8").ljust(32, b"\0")
-            else:
-                client_order_id_bytes = client_order_id
-
-            # getOrderByClientOrderId(_trader, _clientOrderId)
-            w3_l1 = await self._get_w3_l1()
-            if not w3_l1:
-                return Result.fail("L1 provider not available.")
-            trader = w3_l1.to_checksum_address(cast(str, cast(Any, self.account).address))
-            order_data = await contract.functions.getOrderByClientOrderId(
-                trader, client_order_id_bytes
-            ).call()
+            client_order_id_bytes = self._get_order_id_bytes(client_order_id)
+            fetch_result = await self._fetch_order_by_client_id(client_order_id_bytes)
+            if not fetch_result.success:
+                return Result.fail(fetch_result.error or "Order not found")
+            order_data = fetch_result.data
+            if order_data is None:
+                return Result.fail("Order not found (Client ID).")
             order_details = await self._format_order_data(order_data)
             return Result.ok(order_details)
 
@@ -1119,21 +1174,7 @@ class CLOBClient(DexalotBaseClient):
             return Result.fail("TradePairs contract not initialized.")
 
         try:
-            order_ids_bytes = []
-            for oid in order_ids:
-                if isinstance(oid, str):
-                    if oid.startswith("0x"):
-                        order_ids_bytes.append(bytes.fromhex(oid[2:]))
-                    else:
-                        # If ID is decimal string (from API sometimes), convert to int then bytes
-                        if oid.isdigit():
-                            order_ids_bytes.append(int(oid).to_bytes(32, "big"))
-                        else:
-                            order_ids_bytes.append(oid.encode("utf-8").ljust(32, b"\0"))
-                elif isinstance(oid, int):
-                    order_ids_bytes.append(oid.to_bytes(32, "big"))
-                else:
-                    order_ids_bytes.append(oid)
+            order_ids_bytes = [self._get_order_id_bytes(oid) for oid in order_ids]
 
             tx_hash_hex, receipt = await self._send_trade_tx(
                 contract.functions.cancelOrderList(order_ids_bytes),
@@ -1186,16 +1227,15 @@ class CLOBClient(DexalotBaseClient):
             return Result.fail("TradePairs contract not initialized.")
 
         try:
-            order_id_bytes = self._get_order_id_bytes(order_id)
-
-            # We need to fetch the order to know the pair, so we can normalize decimals.
-            order_details_result = await self.get_order(order_id)
-            if not order_details_result.success:
+            resolved_result = await self._resolve_order_reference(order_id)
+            if not resolved_result.success:
                 return Result.fail(
-                    f"Could not fetch order details for replacement: {order_details_result.error}"
+                    f"Could not fetch order details for replacement: {resolved_result.error}"
                 )
-
-            order_details = order_details_result.data
+            resolved = resolved_result.data
+            assert resolved is not None
+            order_id_bytes = resolved["internal_id_bytes"]
+            order_details = await self._format_order_data(resolved["order_data"])
             pair_name = order_details.get("pair")
             if not pair_name:
                 return Result.fail("Could not determine pair from order details.")
@@ -1228,6 +1268,40 @@ class CLOBClient(DexalotBaseClient):
             return Result.fail(error_msg)
 
     @track_method("clob")
+    async def cancel_order_by_client_id(
+        self, client_order_id: str | bytes, wait_for_receipt: bool = True
+    ) -> Result[str]:
+        """Cancel a single open order by its Client Order ID only."""
+        if not self.account:
+            return Result.fail("Private key not configured.")
+
+        client_order_id_result = validate_order_id_format(client_order_id, "client_order_id")
+        if not client_order_id_result.success:
+            return cast(Result[str], client_order_id_result)
+
+        contract = self.trade_pairs_contract
+        if not contract:
+            return Result.fail("TradePairs contract not initialized.")
+
+        try:
+            client_order_id_bytes = self._get_order_id_bytes(client_order_id)
+            tx_hash_hex, receipt = await self._send_trade_tx(
+                contract.functions.cancelOrderByClientId(client_order_id_bytes),
+                wait_for_receipt=wait_for_receipt,
+            )
+            if (
+                wait_for_receipt
+                and receipt
+                and (receipt.status if hasattr(receipt, "status") else receipt.get("status", 1))
+                != 1
+            ):
+                return Result.fail("Transaction reverted")
+            return Result.ok(f"Cancel transaction sent (Client ID): {tx_hash_hex}")
+        except Exception as e:
+            error_msg = self._sanitize_error(e, "cancelling order by client ID")
+            return Result.fail(error_msg)
+
+    @track_method("clob")
     async def cancel_list_orders_by_client_id(
         self, client_order_ids: list, wait_for_receipt: bool = True
     ) -> Result[str]:
@@ -1252,15 +1326,7 @@ class CLOBClient(DexalotBaseClient):
             return Result.fail("TradePairs contract not initialized.")
 
         try:
-            order_ids_bytes = []
-            for oid in client_order_ids:
-                if isinstance(oid, str):
-                    if oid.startswith("0x"):
-                        order_ids_bytes.append(bytes.fromhex(oid[2:]))
-                    else:
-                        order_ids_bytes.append(oid.encode("utf-8").ljust(32, b"\0"))
-                else:
-                    order_ids_bytes.append(oid)
+            order_ids_bytes = [self._get_order_id_bytes(oid) for oid in client_order_ids]
 
             tx_hash_hex, receipt = await self._send_trade_tx(
                 contract.functions.cancelOrderListByClientIds(order_ids_bytes),
@@ -1320,18 +1386,28 @@ class CLOBClient(DexalotBaseClient):
             required_balances: dict[str, float] = {}  # token -> amount
 
             for rep in replacements:
-                # 1. Prepare Order ID to Cancel
-                order_id = rep["order_id"]
-                if isinstance(order_id, str):
-                    if order_id.startswith("0x"):
-                        order_ids.append(bytes.fromhex(order_id[2:]))
-                    else:
-                        order_ids.append(order_id.encode("utf-8").ljust(32, b"\0"))
-                else:
-                    order_ids.append(order_id)
+                resolved_result = await self._resolve_order_reference(
+                    rep["order_id"], allow_int=True
+                )
+                if not resolved_result.success:
+                    return Result.fail(
+                        f"Could not resolve order '{rep['order_id']}' for cancel/add: {resolved_result.error}"
+                    )
+                resolved = resolved_result.data
+                assert resolved is not None
+                order_ids.append(resolved["internal_id_bytes"])
 
-                # 2. Prepare New Order
-                pair = rep.get("pair", "AVAX/USDC")
+                existing_order = await self._format_order_data(resolved["order_data"])
+                inferred_pair = existing_order.get("pair")
+                pair = rep.get("pair") or inferred_pair
+                if not pair:
+                    return Result.fail(
+                        f"Replacement for order '{rep['order_id']}' requires pair because it could not be inferred."
+                    )
+                if rep.get("pair") and inferred_pair and rep["pair"] != inferred_pair:
+                    return Result.fail(
+                        f"Replacement pair '{rep['pair']}' does not match existing order pair '{inferred_pair}'."
+                    )
                 if not await self._ensure_pair_exists(pair):
                     return Result.fail(f"Pair {pair} not found.")
 
@@ -1517,17 +1593,26 @@ class CLOBClient(DexalotBaseClient):
         return True
 
     def _get_order_id_bytes(self, order_id):
-        """Convert order ID to bytes32."""
+        """Convert an order identifier to canonical bytes32 form."""
         if isinstance(order_id, str):
-            if order_id.startswith("0x"):
-                return bytes.fromhex(order_id[2:])
-            elif order_id.isdigit():
-                # Handle decimal string IDs
-                return int(order_id).to_bytes(32, "big")
-            else:
-                return order_id.encode("utf-8").ljust(32, b"\0")
+            stripped = order_id.strip()
+            if stripped.startswith("0x"):
+                hex_str = stripped[2:]
+                if len(hex_str) % 2 != 0:
+                    raise ValueError("Hex order IDs must have an even number of characters.")
+                return bytes.fromhex(hex_str).rjust(32, b"\0")
+            if stripped.isdigit():
+                return int(stripped).to_bytes(32, "big")
+            if len(stripped) == 64 and all(c in "0123456789abcdefABCDEF" for c in stripped):
+                return bytes.fromhex(stripped)
+            encoded = stripped.encode("utf-8")
+            if len(encoded) > 32:
+                raise ValueError("Plain-string order IDs must fit in 32 bytes.")
+            return encoded.ljust(32, b"\0")
         elif isinstance(order_id, int):
             return order_id.to_bytes(32, "big")
+        elif isinstance(order_id, bytes):
+            return order_id.rjust(32, b"\0")
         return order_id
 
     async def _send_trade_tx(self, function_call, wait_for_receipt=False):
