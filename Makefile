@@ -1,5 +1,5 @@
 # Makefile for Dexalot Python SDK
-# Run from the python/ directory. Uses local .venv managed by uv.
+# Run from the repository root. Uses local .venv managed by uv.
 # Setup: uv venv && uv sync --group dev
 
 PYTHON := .venv/bin/python

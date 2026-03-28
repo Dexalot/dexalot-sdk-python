@@ -35,7 +35,7 @@ PARENTENV=fuji-multi   # testnet; use "production-multi" for mainnet
 For signing transactions, add:
 
 ```bash
-PRIVATE_KEY=0x...      # hex-encoded private key; zeroed after Account creation
+PRIVATE_KEY=0x...      # hex-encoded private key; cleared from config after Account creation
 ```
 
 Prefer passing a pre-built `eth_account.Account` object to the constructor instead of setting `PRIVATE_KEY` — this keeps the raw key out of the config entirely.
@@ -44,12 +44,12 @@ Prefer passing a pre-built `eth_account.Account` object to the constructor inste
 
 ## Core concepts
 
-### Result[T] — no exceptions
+### Result[T] — result-first operational API
 
-Every SDK method returns a `Result` object. The SDK **never raises** on expected failures (network errors, validation errors, contract reverts). Always check `.success` before accessing `.data`:
+Async operational methods return a `Result` object. Expected failures such as network errors, validation errors, and contract reverts are returned as `Result.fail(...)`. Some configuration or programmer errors can still raise immediately, so always check `.success` before accessing `.data` on Result-returning calls:
 
 ```python
-result = await client.get_trading_pairs()
+result = await client.get_clob_pairs()
 if result.success:
     pairs = result.data
 else:
@@ -68,20 +68,22 @@ The recommended pattern is `async with`:
 
 ```python
 async with DexalotClient() as client:
-    result = await client.get_trading_pairs()
+    await client.initialize_client()
+    result = await client.get_clob_pairs()
 ```
 
-The context manager calls `initialize_client()` on entry and `close_websocket()` on exit, ensuring HTTP sessions and WebSocket connections are cleaned up properly.
+The context manager opens the HTTP session on entry and calls `close()` on exit. It does **not** call `initialize_client()` automatically, so run `await client.initialize_client()` before trading, swap, transfer, or contract-dependent operations.
 
 Manual lifecycle:
 
 ```python
 client = DexalotClient()
+await client.connect()
 await client.initialize_client()
 try:
     ...
 finally:
-    await client.close_websocket()
+    await client.close()
 ```
 
 ---
@@ -96,8 +98,10 @@ from dexalot_sdk import DexalotClient
 
 async def main():
     async with DexalotClient() as client:
+        await client.initialize_client()
+
         # List available trading pairs
-        pairs_result = await client.get_trading_pairs()
+        pairs_result = await client.get_clob_pairs()
         if not pairs_result.success:
             print(f"Error: {pairs_result.error}")
             return
@@ -109,7 +113,8 @@ async def main():
         ob_result = await client.get_orderbook("ALOT/USDC")
         if ob_result.success:
             ob = ob_result.data
-            print("Best bid:", ob["rows"][0])   # first bid level
+            print("Best bid:", ob["bids"][0])
+            print("Best ask:", ob["asks"][0])
 
 asyncio.run(main())
 ```
@@ -127,6 +132,7 @@ config = DexalotConfig(
 )
 
 async with DexalotClient(config=config) as client:
+    await client.initialize_client()
     result = await client.get_tokens()
 ```
 
@@ -143,15 +149,16 @@ from eth_account import Account
 signer = Account.from_key("0x...")
 
 async with DexalotClient(signer=signer) as client:
+    await client.initialize_client()
     result = await client.add_order(
         pair="ALOT/USDC",
+        side="BUY",
+        amount=100.0,
         price=0.15,
-        quantity=100.0,
-        side=0,          # 0 = BUY, 1 = SELL
-        order_type=1,    # 1 = LIMIT, 4 = LIMIT_FOK, 5 = LIMIT_IOC
+        order_type="LIMIT",
     )
     if result.success:
-        print("Order placed. Tx:", result.data)
+        print("Order placed. Tx:", result.data["tx_hash"])
     else:
         print("Failed:", result.error)
 ```
@@ -159,13 +166,13 @@ async with DexalotClient(signer=signer) as client:
 ### Cancel an order
 
 ```python
-result = await client.cancel_order(pair="ALOT/USDC", order_id="0xabc...")
+result = await client.cancel_order(order_id="0xabc...")
 ```
 
 ### Cancel all orders for a pair
 
 ```python
-result = await client.cancel_all_orders(pair="ALOT/USDC")
+result = await client.cancel_all_orders()
 ```
 
 ### Batch operations
@@ -174,8 +181,8 @@ Place multiple orders in one transaction:
 
 ```python
 orders = [
-    {"pair": "ALOT/USDC", "price": 0.14, "quantity": 50.0, "side": 0, "order_type": 1},
-    {"pair": "ALOT/USDC", "price": 0.13, "quantity": 75.0, "side": 0, "order_type": 1},
+    {"pair": "ALOT/USDC", "side": "BUY", "amount": 50.0, "price": 0.14},
+    {"pair": "ALOT/USDC", "side": "BUY", "amount": 75.0, "price": 0.13},
 ]
 result = await client.add_limit_order_list(orders)
 ```
@@ -183,15 +190,22 @@ result = await client.add_limit_order_list(orders)
 Cancel multiple orders by ID:
 
 ```python
-result = await client.cancel_list_orders(pair="ALOT/USDC", order_ids=["0xabc...", "0xdef..."])
+result = await client.cancel_list_orders(order_ids=["0xabc...", "0xdef..."])
 ```
 
 Atomic cancel-and-replace (cancel list, then place new list):
 
 ```python
 result = await client.cancel_add_list(
-    cancel_ids=["0xold..."],
-    new_orders=[{"pair": "ALOT/USDC", "price": 0.16, "quantity": 100.0, "side": 0, "order_type": 1}],
+    replacements=[
+        {
+            "order_id": "0xold...",
+            "pair": "ALOT/USDC",
+            "side": "BUY",
+            "amount": 100.0,
+            "price": 0.16,
+        }
+    ],
 )
 ```
 
@@ -221,10 +235,9 @@ The swap flow is: soft quote → firm quote → execute. See [Simple Swap](simpl
 
 ```python
 result = await client.get_swap_soft_quote(
-    base_token="ALOT",
-    quote_token="USDC",
-    quantity=100.0,
-    side=0,   # 0 = BUY base token, 1 = SELL base token
+    from_token="ALOT",
+    to_token="USDC",
+    amount=100.0,
 )
 if result.success:
     print("Indicative price:", result.data)
@@ -234,20 +247,19 @@ if result.success:
 
 ```python
 result = await client.get_swap_firm_quote(
-    base_token="ALOT",
-    quote_token="USDC",
-    quantity=100.0,
-    side=0,
+    from_token="ALOT",
+    to_token="USDC",
+    amount=100.0,
 )
 if result.success:
     quote = result.data
-    print("Firm quote ID:", quote["nonceAndMeta"])
+    print("Firm quote ID:", quote["quote_id"])
 ```
 
 ### Execute swap
 
 ```python
-result = await client.execute_rfq_swap(quote=quote, signer=signer)
+result = await client.execute_rfq_swap(quote)
 if result.success:
     print("Swap tx:", result.data)
 ```
@@ -283,7 +295,7 @@ result = await client.get_all_chain_wallet_balances()
 result = await client.deposit(
     token="USDC",
     amount=100.0,
-    source_chain="avalanche",
+    source_chain="Avalanche",
 )
 if result.success:
     print("Deposit tx:", result.data)
@@ -295,7 +307,7 @@ if result.success:
 result = await client.withdraw(
     token="USDC",
     amount=50.0,
-    target_chain="avalanche",
+    target_chain="Avalanche",
 )
 ```
 
@@ -320,22 +332,24 @@ result = await client.get_deposit_bridge_fee(
 
 ## Real-time events — WebSocket
 
-The WebSocket manager must be enabled either via config or the `ws_manager_enabled` constructor kwarg.
+The WebSocket manager must be enabled either via config or the `ws_manager_enabled` constructor kwarg. `subscribe_to_events()` takes a `topic` string and may raise `RuntimeError` if the manager is disabled.
 
 ```python
 config = DexalotConfig(ws_manager_enabled=True)
 
 async with DexalotClient(config=config, signer=signer) as client:
-    # Subscribe to order updates for a pair
+    await client.initialize_client()
+
+    # Subscribe to order book updates for a pair
     await client.subscribe_to_events(
-        pair="ALOT/USDC",
+        topic="OrderBook/ALOT/USDC",
         callback=my_callback,
     )
 
     # Keep running
     await asyncio.sleep(60)
 
-    await client.unsubscribe_from_events(pair="ALOT/USDC")
+    client.unsubscribe_from_events("OrderBook/ALOT/USDC")
 ```
 
 Callback signature:

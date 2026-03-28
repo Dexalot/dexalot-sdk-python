@@ -51,14 +51,12 @@ brew install uv
 Install the SDK using uv (recommended):
 
 ```sh
-cd python
 uv venv && uv sync --group dev
 ```
 
 Or install with pip:
 
 ```sh
-cd python
 pip install -e .
 ```
 
@@ -96,7 +94,7 @@ asyncio.run(main())
 
 **Key Points:**
 - The SDK is **fully async** - all methods must be awaited
-- All methods return `Result[T]` for consistent error handling
+- Async operational methods return `Result[T]` for consistent error handling
 - Use `asyncio.run()` for scripts or `await` in async contexts
 - Always call `await client.close()` when done to clean up resources
 
@@ -137,7 +135,7 @@ asyncio.run(main())
 
 ### Error Handling with Result Pattern
 
-All SDK methods return `Result[T]` which provides consistent error handling:
+Async operational methods return `Result[T]` which provides consistent error handling:
 
 ```python
 result = await client.get_orderbook("AVAX/USDC")
@@ -166,10 +164,9 @@ No scripts are included in the SDK. For prompt validation, use the `dexalot-mcp`
 
 ## Testing
 
-Run tests from the `python/` directory:
+Run tests from the repository root:
 
 ```sh
-cd python
 make test  # Unit tests
 make cov   # Coverage report
 ```
@@ -179,7 +176,7 @@ make cov   # Coverage report
 
 The SDK includes a built-in 4-level caching system to optimize performance by reducing redundant API calls. Caching is **enabled by default** with sensible TTL (Time-To-Live) values.
 
-> **📖 Detailed Documentation**: See [SDK Caching Guide](../docs/sdk-caching.md) for comprehensive caching documentation, including advanced usage patterns, use cases, troubleshooting, and performance considerations.
+> **📖 Detailed Documentation**: See [SDK Caching Guide](docs/sdk-caching.md) for comprehensive caching documentation, including advanced usage patterns, use cases, troubleshooting, and performance considerations.
 
 ### Cache Levels
 
@@ -273,8 +270,8 @@ Balance data is cached per user address. When `address=None`, the SDK uses the c
 
 ```python
 # Each user gets their own cached balance data
-balance1 = client.get_portfolio_balance("USDC")  # Uses connected wallet
-balance2 = client.get_portfolio_balance("USDC", address="0xOtherUser")  # Different cache entry
+balance1 = await client.get_portfolio_balance("USDC")  # Uses connected wallet
+balance2 = await client.get_portfolio_balance("USDC", address="0xOtherUser")  # Different cache entry
 ```
 
 ### Performance Impact
@@ -681,11 +678,11 @@ See `examples/async_parallel.py` for more parallel operation examples.
 
 ## Error Handling
 
-The SDK uses a `Result[T]` pattern for consistent error handling across all methods.
+The SDK uses a `Result[T]` pattern for consistent error handling across async operational methods.
 
 ### Result Pattern
 
-All SDK methods return `Result[T]` with three fields:
+Async operational methods return `Result[T]` with three fields:
 - `success: bool` - True if operation succeeded
 - `data: T | None` - Result data on success, None on error
 - `error: str | None` - Error message on failure, None on success
@@ -1005,7 +1002,7 @@ async def main():
             print(f"Orderbook update: {message}")
         
         await client.subscribe_to_events(
-            topic="orderbook.AVAX/USDC",
+            topic="OrderBook/AVAX/USDC",
             callback=on_orderbook_update,
             is_private=False
         )
@@ -1015,7 +1012,7 @@ async def main():
             print(f"Order update: {message}")
         
         await client.subscribe_to_events(
-            topic="orders",
+            topic="Orders",
             callback=on_order_update,
             is_private=True
         )
@@ -1024,7 +1021,7 @@ async def main():
         await asyncio.sleep(60)
         
         # Unsubscribe when done
-        await client.unsubscribe_from_events("orderbook.AVAX/USDC")
+        client.unsubscribe_from_events("OrderBook/AVAX/USDC")
     finally:
         # Always close the client to clean up WebSocket and HTTP sessions
         if client is not None:
@@ -1053,21 +1050,21 @@ client = DexalotClient(config=config)
 
 ### One-Off Connections
 
-For one-time subscriptions, use `listen_to_events()` (doesn't use the manager):
+Use `subscribe_to_events()` with the manager enabled:
 
 ```python
 async def on_message(message):
     print(f"Received: {message}")
 
-# One-off connection (closes after callback completes)
-await client.listen_to_events(
-    topic="orderbook.AVAX/USDC",
+# Start the manager on first subscription
+await client.subscribe_to_events(
+    topic="OrderBook/AVAX/USDC",
     callback=on_message,
     is_private=False
 )
 
-# Note: For one-off connections, the WebSocket closes automatically
-# but you should still call client.close() to clean up HTTP sessions
+# Later, unsubscribe and close the client when done
+client.unsubscribe_from_events("OrderBook/AVAX/USDC")
 ```
 
 See `examples/websocket_manager.py` for complete examples.

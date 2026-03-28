@@ -1,6 +1,6 @@
 # Error Handling
 
-The SDK uses a `Result[T]` return type for all public methods. No exceptions are raised for expected failure conditions (network errors, validation failures, contract reverts). This guide covers the full error model, debugging workflow, and common errors.
+The SDK uses a `Result[T]` return type for its async operational methods. Expected failure conditions (network errors, validation failures, contract reverts) are returned as `Result.fail(...)`, while some configuration or programmer errors can still raise immediately. This guide covers the full error model, debugging workflow, and common errors.
 
 ---
 
@@ -15,18 +15,24 @@ Every SDK method returns a `Result` instance with three fields:
 | `error` | `str \| None` | Human-readable error message on failure; `None` on success |
 
 ```python
-result = await client.add_order(pair="ALOT/USDC", price=0.15, quantity=100.0, side=0, order_type=1)
+result = await client.add_order(
+    pair="ALOT/USDC",
+    side="BUY",
+    amount=100.0,
+    price=0.15,
+    order_type="LIMIT",
+)
 
 if result.success:
-    tx_hash = result.data      # str: transaction hash
+    tx_hash = result.data["tx_hash"]
 else:
-    print(result.error)        # str: sanitized error description
+    print(result.error)
 ```
 
 **Bool coercion** — `Result` evaluates to `True` when successful, so you can use it directly in conditionals:
 
 ```python
-if result := await client.get_trading_pairs():
+if result := await client.get_clob_pairs():
     pairs = result.data
 ```
 
@@ -58,7 +64,13 @@ Caught before any network call. Common causes:
 - Missing signer for write operations
 
 ```python
-result = await client.add_order(pair="ALOT/USDC", price=-1.0, quantity=100.0, side=0, order_type=1)
+result = await client.add_order(
+    pair="ALOT/USDC",
+    side="BUY",
+    amount=100.0,
+    price=-1.0,
+    order_type="LIMIT",
+)
 # result.success == False
 # result.error == "price must be positive"
 ```
@@ -68,7 +80,7 @@ result = await client.add_order(pair="ALOT/USDC", price=-1.0, quantity=100.0, si
 Returned when the REST API is unreachable, returns a non-200 status, or the request times out. Retry logic (if enabled) runs before the final failure is returned.
 
 ```python
-result = await client.get_trading_pairs()
+result = await client.get_clob_pairs()
 # result.success == False
 # result.error == "HTTP 503: service unavailable"  (sanitized)
 ```
@@ -78,7 +90,7 @@ result = await client.get_trading_pairs()
 Returned when a submitted transaction reverts on-chain. The raw revert error code is decoded via `get_revert_reason()` where possible.
 
 ```python
-result = await client.deposit(token="USDC", amount=99999.0, source_chain="avalanche")
+result = await client.deposit(token="USDC", amount=99999.0, source_chain="Avalanche")
 # result.success == False
 # result.error == "insufficient balance"   (decoded revert reason)
 ```
@@ -158,7 +170,7 @@ When an operation fails unexpectedly:
 | Error message (approx.) | Likely cause | Fix |
 |---|---|---|
 | `"signer required for this operation"` | Write operation called without a signer | Pass `signer=Account.from_key(...)` to constructor |
-| `"pair not found"` | Invalid trading pair symbol | Check `get_trading_pairs()` for valid symbols |
+| `"pair not found"` | Invalid trading pair symbol | Check `get_clob_pairs()` for valid symbols |
 | `"insufficient balance"` | Portfolio balance too low for the trade | Check `get_portfolio_balance()` first |
 | `"price must be positive"` | `price <= 0` passed to `add_order` | Validate price before calling |
 | `"HTTP 401"` | Auth header invalid or expired | Call `reinitialize()` to refresh auth |

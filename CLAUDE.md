@@ -19,11 +19,11 @@ Python SDK for the Dexalot DEX. Security and performance findings are tracked in
 | Balance | 10s | Account balances |
 | Orderbook | 1s | Order book snapshots |
 
-Caches are **module-level singletons shared across all client instances**, not per-instance. Per-instance `_cache_enabled` flag can bypass the cache entirely. There is no per-environment isolation — running testnet and mainnet clients simultaneously will share cache incorrectly.
+Caches are **module-level singletons shared across all client instances**, not per-instance. Per-instance `_cache_enabled` flag can bypass the cache entirely. Cache keys are namespaced by `api_base_url`, so testnet and mainnet data do not collide, but tests must still clear module-level caches between runs to avoid cross-test contamination.
 
 ### Result[T] pattern — no exceptions
 
-All SDK methods return `Result(success, data, error)` and never raise. Callers must always check `.success` before accessing `.data`. Factory methods: `Result.ok(data)` and `Result.fail(error_msg)`.
+Most async operational SDK methods return `Result(success, data, error)`. Construction, validation, and a few helper / WebSocket methods can still raise on programmer or configuration errors. Callers should check `.success` before accessing `.data` on Result-returning methods. Factory methods: `Result.ok(data)` and `Result.fail(error_msg)`.
 
 ### Config loading and validation
 
@@ -75,7 +75,7 @@ Unit tests in `tests/unit/` have no external dependencies. Integration tests in 
 
 ## Non-Obvious Decisions
 
-- **Private key handling**: After `Account` creation, `config.private_key` is zeroed out. Prefer passing a pre-built signer object so the raw key never touches the config at all.
+- **Private key handling**: After `Account` creation, `config.private_key` is cleared from config. Prefer passing a pre-built signer object so the raw key never touches the config at all.
 - **Cache key generation**: Uses `(func_name, api_base_url, args[1:], frozenset(kwargs.items()))` — `self` is excluded; keys are namespaced by `api_base_url`. Kwarg ordering affects cache hits; deep objects may produce false misses.
 - **Config validation timing**: `config.validate()` is called automatically inside `DexalotBaseClient.__init__`. Invalid configs raise at construction time.
 - **Error sanitization is lossy**: Regex stripping makes production debugging harder. Use DEBUG logging in development.
@@ -83,6 +83,7 @@ Unit tests in `tests/unit/` have no external dependencies. Integration tests in 
 - **Cache key for multi-env**: Cache keys are namespaced by `api_base_url`, so simultaneous testnet/mainnet clients do not share cached data. Test suites that use module-level caches must clear them between tests (e.g. `_SEMI_STATIC_CACHE.clear()`) since the key is env-based, not instance-based.
 - **`timestamped_auth` flag**: `_get_auth_headers` supports timestamped signing (`f"dexalot{ts}"` + `x-timestamp` header) via `config.timestamped_auth = True` (env: `DEXALOT_TIMESTAMPED_AUTH=true`). Defaults to `False` — the backend currently only accepts the static `"dexalot"` message. Enable only after backend confirms timestamp window validation. See remediation plan C-2.
 - **Cache stampede protection**: `async_ttl_cached` coalesces concurrent callers for the same uncached key using `asyncio.Future`. Only the first caller fetches; the rest await the same future. Prevents thundering herd on cache misses.
+- **Cached state rehydration cleanup**: Methods that return a payload and also rebuild internal SDK state from cached `Result` values currently use per-method rehydration hooks. A small shared helper/pattern for this could simplify the code later, but it is optional and not urgent now that behavior is consistent and fully covered.
 - **Cache cleanup is amortized**: `MemoryCache._cleanup()` runs every 50 writes (`_CLEANUP_INTERVAL`), not on every `set`. Size enforcement (`_trim()`) runs on every write. Separate concerns.
 - **Rate limiter concurrent sleeps**: `AsyncRateLimiter` acquires the lock only to reserve the slot, then releases before sleeping. Multiple waiters sleep independently — no serialization of the wait itself.
 - **Nonce manager lock is now lock-free on lookup**: The global `_dict_lock` was removed. `_get_lock()` uses `dict.setdefault()`, which is safe in asyncio's single-threaded model. Per-(chain_id, address) `asyncio.Lock` objects are still used for sequential nonce acquisition.

@@ -53,7 +53,7 @@ See [Caching Guide](sdk-caching.md) for TTL tuning and per-tier guidance.
 
 All I/O is async. The SDK is built on `asyncio` — no threading is used.
 
-**HTTP:** `aiohttp.ClientSession` with a configurable connection pool (`connection_pool_limit`, `connection_pool_limit_per_host`). A single session is created in `initialize_client()` and reused for the lifetime of the client.
+**HTTP:** `aiohttp.ClientSession` with a configurable connection pool (`connection_pool_limit`, `connection_pool_limit_per_host`). A single session is created in `connect()` and reused for the lifetime of the client. `initialize_client()` calls `connect()` as part of its setup flow.
 
 **WebSocket:** `websockets` async library. `WebSocketManager.connect()` and `subscribe()`/`unsubscribe()` are synchronous entry points that schedule coroutines on the running event loop via `loop.create_task()`. `disconnect()` is `async def`. WebSocket is opt-in (`ws_manager_enabled=False` by default).
 
@@ -107,7 +107,7 @@ DEXALOT_RPC_43114=https://primary.rpc.example.com,https://backup.rpc.example.com
 
 ### Private key handling
 
-After `Account` creation, `config.private_key` is zeroed out. Prefer passing a pre-built `signer` object to the constructor so the raw key never touches the config object.
+After `Account` creation, `config.private_key` is cleared from the config object. Prefer passing a pre-built `signer` object to the constructor so the raw key never touches the config object.
 
 ### RPC URL rejection
 

@@ -25,8 +25,8 @@ object. `_setup_account` calls `del private_key` on a local variable, not on `se
 The key is therefore always accessible at `client.config.private_key`.
 
 **Affected files:**
-- [python/src/dexalot_sdk/core/config.py:25](../python/src/dexalot_sdk/core/config.py#L25)
-- [python/src/dexalot_sdk/core/base.py:161-176](../python/src/dexalot_sdk/core/base.py#L161)
+- [src/dexalot_sdk/core/config.py:25](../src/dexalot_sdk/core/config.py#L25)
+- [src/dexalot_sdk/core/base.py:161-176](../src/dexalot_sdk/core/base.py#L161)
 
 **Implementation plan:**
 1. In `DexalotBaseClient._setup_account`, after creating the `Account` object, immediately null out
@@ -65,7 +65,7 @@ The key is therefore always accessible at `client.config.private_key`.
 The resulting signature is valid forever and replayable by anyone who intercepts the header.
 
 **Affected files:**
-- [python/src/dexalot_sdk/core/clob.py:505-516](../python/src/dexalot_sdk/core/clob.py#L505)
+- [src/dexalot_sdk/core/clob.py:505-516](../src/dexalot_sdk/core/clob.py#L505)
 
 **Implementation plan:**
 1. Check what the Dexalot REST API actually requires for `x-signature`. Consult
@@ -110,8 +110,8 @@ globals shared across all `DexalotBaseClient` instances. Two clients with differ
 served as the result for another.
 
 **Affected files:**
-- [python/src/dexalot_sdk/core/base.py:36-39](../python/src/dexalot_sdk/core/base.py#L36)
-- [python/src/dexalot_sdk/utils/cache.py](../python/src/dexalot_sdk/utils/cache.py)
+- [src/dexalot_sdk/core/base.py:36-39](../src/dexalot_sdk/core/base.py#L36)
+- [src/dexalot_sdk/utils/cache.py](../src/dexalot_sdk/utils/cache.py)
 
 **Implementation plan:**
 
@@ -154,7 +154,7 @@ which includes `self`. This means every cached result holds a permanent referenc
 client instance, preventing it from being garbage-collected even after it goes out of scope.
 
 **Affected files:**
-- [python/src/dexalot_sdk/utils/cache.py:64](../python/src/dexalot_sdk/utils/cache.py#L64)
+- [src/dexalot_sdk/utils/cache.py:64](../src/dexalot_sdk/utils/cache.py#L64)
 
 **Implementation plan:**
 This is naturally resolved when implementing H-1 (Option A). After fixing H-1, the key
@@ -184,7 +184,7 @@ correct but complex.
 `"close"` or `"connector"` would invoke arbitrary methods on the aiohttp session.
 
 **Affected files:**
-- [python/src/dexalot_sdk/core/base.py:423](../python/src/dexalot_sdk/core/base.py#L423)
+- [src/dexalot_sdk/core/base.py:423](../src/dexalot_sdk/core/base.py#L423)
 
 **Implementation plan:**
 ```python
@@ -211,7 +211,7 @@ async def _make_http_request(self, method: str, url: str, **kwargs):
 object. While currently only called internally with hardcoded strings, it is a footgun.
 
 **Affected files:**
-- [python/src/dexalot_sdk/core/base.py:478-481](../python/src/dexalot_sdk/core/base.py#L478)
+- [src/dexalot_sdk/core/base.py:478-481](../src/dexalot_sdk/core/base.py#L478)
 
 **Implementation plan:**
 1. Define an allowlist of permitted method prefixes:
@@ -240,9 +240,9 @@ dict values, bypassing the `_sanitize_error` pipeline. This can leak file paths,
 stack trace fragments.
 
 **Affected files:**
-- [python/src/dexalot_sdk/core/transfer.py:314-315](../python/src/dexalot_sdk/core/transfer.py#L314) — `_get_l1_native_balance`
-- [python/src/dexalot_sdk/core/transfer.py:335](../python/src/dexalot_sdk/core/transfer.py#L335) — `_get_native_balance`
-- [python/src/dexalot_sdk/core/transfer.py:387](../python/src/dexalot_sdk/core/transfer.py#L387) — already uses `_sanitize_error` but inconsistently
+- [src/dexalot_sdk/core/transfer.py:314-315](../src/dexalot_sdk/core/transfer.py#L314) — `_get_l1_native_balance`
+- [src/dexalot_sdk/core/transfer.py:335](../src/dexalot_sdk/core/transfer.py#L335) — `_get_native_balance`
+- [src/dexalot_sdk/core/transfer.py:387](../src/dexalot_sdk/core/transfer.py#L387) — already uses `_sanitize_error` but inconsistently
 
 **Implementation plan:**
 Replace all `f"Error: {e}"` in user-facing dicts with `self._sanitize_error(e, "<context>")`:
@@ -279,7 +279,7 @@ that the timestamp is within a reasonable window before sending, and no retry if
 is rejected by the server due to clock skew.
 
 **Affected files:**
-- [python/src/dexalot_sdk/utils/websocket_manager.py:355-366](../python/src/dexalot_sdk/utils/websocket_manager.py#L355)
+- [src/dexalot_sdk/utils/websocket_manager.py:355-366](../src/dexalot_sdk/utils/websocket_manager.py#L355)
 
 **Implementation plan:**
 1. Confirm with backend team what the accepted clock skew window is.
@@ -303,7 +303,7 @@ after the approval succeeds, the allowance remains live, allowing a future accid
 malicious re-spend.
 
 **Affected files:**
-- [python/src/dexalot_sdk/core/transfer.py:1110-1150](../python/src/dexalot_sdk/core/transfer.py#L1110)
+- [src/dexalot_sdk/core/transfer.py:1110-1150](../src/dexalot_sdk/core/transfer.py#L1110)
 
 **Implementation plan:**
 Wrap the approval + main transaction in a try/except. On failure of the main transaction,
@@ -337,8 +337,8 @@ This creates a hybrid threading/asyncio model that is hard to reason about and c
 cancelled via `asyncio.Task.cancel()`.
 
 **Affected files:**
-- [python/src/dexalot_sdk/utils/websocket_manager.py](../python/src/dexalot_sdk/utils/websocket_manager.py)
-- [python/pyproject.toml](../python/pyproject.toml)
+- [src/dexalot_sdk/utils/websocket_manager.py](../src/dexalot_sdk/utils/websocket_manager.py)
+- [pyproject.toml](../pyproject.toml)
 
 **Implementation plan:**
 1. Evaluate replacing `websocket-client` with the `websockets` library or `aiohttp`'s built-in
@@ -365,8 +365,8 @@ RPC URLs are used as-is with default SSL settings. There is no way to enforce mi
 version, disable insecure `http://` RPC URLs in production, or pin certificates.
 
 **Affected files:**
-- [python/src/dexalot_sdk/core/base.py:800-803](../python/src/dexalot_sdk/core/base.py#L800)
-- [python/src/dexalot_sdk/utils/provider_manager.py:94](../python/src/dexalot_sdk/utils/provider_manager.py#L94)
+- [src/dexalot_sdk/core/base.py:800-803](../src/dexalot_sdk/core/base.py#L800)
+- [src/dexalot_sdk/utils/provider_manager.py:94](../src/dexalot_sdk/utils/provider_manager.py#L94)
 
 **Implementation plan:**
 1. Add a `DexalotConfig` field `allow_insecure_rpc: bool = False`.
@@ -392,7 +392,7 @@ version, disable insecure `http://` RPC URLs in production, or pin certificates.
 making concurrency effectively serial for any burst of requests.
 
 **Affected files:**
-- [python/src/dexalot_sdk/utils/rate_limit.py:35-46](../python/src/dexalot_sdk/utils/rate_limit.py#L35)
+- [src/dexalot_sdk/utils/rate_limit.py:35-46](../src/dexalot_sdk/utils/rate_limit.py#L35)
 
 **Implementation plan:**
 Release the lock before sleeping. Calculate the required sleep time under the lock, update
@@ -431,7 +431,7 @@ effectively serialized via their calculated sleep times, not via the lock.
 balance cache miss.
 
 **Affected files:**
-- [python/src/dexalot_sdk/utils/cache.py:13-26](../python/src/dexalot_sdk/utils/cache.py#L13)
+- [src/dexalot_sdk/utils/cache.py:13-26](../src/dexalot_sdk/utils/cache.py#L13)
 
 **Implementation plan:**
 Amortize cleanup: only run it every N writes or every T seconds:
@@ -470,7 +470,7 @@ and both write to the cache (last-write wins). For expensive RPC calls this wast
 and can cause inconsistency.
 
 **Affected files:**
-- [python/src/dexalot_sdk/utils/cache.py:77-102](../python/src/dexalot_sdk/utils/cache.py#L77)
+- [src/dexalot_sdk/utils/cache.py:77-102](../src/dexalot_sdk/utils/cache.py#L77)
 
 **Implementation plan:**
 Use a per-key asyncio lock (or a "pending" future) to coalesce concurrent requests:
@@ -529,7 +529,7 @@ limit. With 50+ tokens this creates 50+ simultaneous RPC connections, overwhelmi
 rate limiter and the provider.
 
 **Affected files:**
-- [python/src/dexalot_sdk/core/transfer.py:391-447](../python/src/dexalot_sdk/core/transfer.py#L391)
+- [src/dexalot_sdk/core/transfer.py:391-447](../src/dexalot_sdk/core/transfer.py#L391)
 
 **Implementation plan:**
 Use `asyncio.Semaphore` to cap concurrency:
@@ -564,7 +564,7 @@ The pagination loop in `_get_all_portfolio_balances_cached` makes one sequential
 page (up to 10). Each page waits for the previous one to complete.
 
 **Affected files:**
-- [python/src/dexalot_sdk/core/transfer.py:537-562](../python/src/dexalot_sdk/core/transfer.py#L537)
+- [src/dexalot_sdk/core/transfer.py:537-562](../src/dexalot_sdk/core/transfer.py#L537)
 
 **Implementation plan:**
 Since the contract's `getBalances(address, page)` call doesn't require knowing the total count
@@ -613,7 +613,7 @@ writes when recovering an unhealthy provider). Under high concurrency all thread
 the same chain's provider queue behind a single lock.
 
 **Affected files:**
-- [python/src/dexalot_sdk/utils/provider_manager.py:127](../python/src/dexalot_sdk/utils/provider_manager.py#L127)
+- [src/dexalot_sdk/utils/provider_manager.py:127](../src/dexalot_sdk/utils/provider_manager.py#L127)
 
 **Implementation plan:**
 Short-term: Split selection logic into a fast-path that avoids locking when the current
@@ -658,7 +658,7 @@ other coroutine can mutate state in between. Tests added:
 the first wave of concurrent transactions, all callers contend on this single lock.
 
 **Affected files:**
-- [python/src/dexalot_sdk/utils/nonce_manager.py:21](../python/src/dexalot_sdk/utils/nonce_manager.py#L21)
+- [src/dexalot_sdk/utils/nonce_manager.py:21](../src/dexalot_sdk/utils/nonce_manager.py#L21)
 
 **Implementation plan:**
 Use `defaultdict` with a factory that creates locks, or use `setdefault` with a
@@ -698,10 +698,10 @@ Orderbook prices and quantities are divided using Python float arithmetic:
 significant precision.
 
 **Affected files:**
-- [python/src/dexalot_sdk/core/clob.py:227-230](../python/src/dexalot_sdk/core/clob.py#L227)
-- [python/src/dexalot_sdk/core/clob.py:233-236](../python/src/dexalot_sdk/core/clob.py#L233)
-- [python/src/dexalot_sdk/core/transfer.py:383-384](../python/src/dexalot_sdk/core/transfer.py#L383) — `_get_erc20_balance`
-- [python/src/dexalot_sdk/core/transfer.py:437](../python/src/dexalot_sdk/core/transfer.py#L437) — `_fetch_erc20_balances_list`
+- [src/dexalot_sdk/core/clob.py:227-230](../src/dexalot_sdk/core/clob.py#L227)
+- [src/dexalot_sdk/core/clob.py:233-236](../src/dexalot_sdk/core/clob.py#L233)
+- [src/dexalot_sdk/core/transfer.py:383-384](../src/dexalot_sdk/core/transfer.py#L383) — `_get_erc20_balance`
+- [src/dexalot_sdk/core/transfer.py:437](../src/dexalot_sdk/core/transfer.py#L437) — `_fetch_erc20_balances_list`
 
 **Implementation plan:**
 Use `Utils.unit_conversion` (which already uses `Decimal`) consistently:
@@ -736,7 +736,7 @@ For `async def` decorated methods, this returns a coroutine object — the `with
 block exits immediately (timing near-zero). The actual async execution time is not measured.
 
 **Affected files:**
-- [python/src/dexalot_sdk/utils/observability.py:304-323](../python/src/dexalot_sdk/utils/observability.py#L304)
+- [src/dexalot_sdk/utils/observability.py:304-323](../src/dexalot_sdk/utils/observability.py#L304)
 
 **Implementation plan:**
 Detect async functions and provide an async wrapper:
@@ -790,7 +790,7 @@ correctness, and external elapsed-time measurement. All 631 unit tests pass.
 pins. A major-version bump in any of them can silently break the SDK.
 
 **Affected files:**
-- [python/pyproject.toml:12-17](../python/pyproject.toml#L12)
+- [pyproject.toml:12-17](../pyproject.toml#L12)
 
 **Implementation plan:**
 1. Run `uv pip compile` or `pip-compile` to generate a `requirements.lock` or

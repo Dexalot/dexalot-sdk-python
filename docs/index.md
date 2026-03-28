@@ -12,7 +12,8 @@ from dexalot_sdk import DexalotClient
 
 async def main():
     async with DexalotClient() as client:
-        result = await client.get_trading_pairs()
+        await client.initialize_client()
+        result = await client.get_clob_pairs()
         if result.success:
             for pair in result.data:
                 print(pair["pair"])
@@ -45,7 +46,7 @@ pip install dexalot-sdk
 
 ## Key features
 
-- **No exceptions** — all methods return `Result(success, data, error)`; never raises
+- **Result-first async API** — async operational methods return `Result(success, data, error)` for expected failures
 - **Async-first** — built on `asyncio`; context-manager lifecycle (`async with`)
 - **4-tier cache** — static, semi-static, balance, and orderbook tiers with configurable TTLs
 - **WebSocket events** — subscribe to live order, trade, and balance updates
