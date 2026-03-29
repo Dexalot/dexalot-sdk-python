@@ -205,6 +205,8 @@ class CLOBClient(DexalotBaseClient):
         if not pair_result.success:
             return cast(Result[dict[Any, Any]], pair_result)
 
+        pair = self._normalize_user_pair(pair)
+
         if pair not in self.pairs:
             pairs_result = await self.get_clob_pairs()
             if not pairs_result.success:
@@ -307,6 +309,8 @@ class CLOBClient(DexalotBaseClient):
         order_params_result = validate_order_params(pair, amount, price, order_type)
         if not order_params_result.success:
             return cast(Result[dict[Any, Any]], order_params_result)
+
+        pair = self._normalize_user_pair(pair)
 
         if not await self._ensure_pair_exists(pair):
             return Result.fail(f"Pair {pair} not found.")
@@ -753,6 +757,7 @@ class CLOBClient(DexalotBaseClient):
             pair_result = validate_pair_format(pair, "pair")
             if not pair_result.success:
                 return cast(Result[list[Any]], pair_result)
+            pair = self._normalize_user_pair(pair)
 
         endpoint = ENDPOINT_SIGNED_ORDERS
         url = f"{self.api_base_url}{endpoint}"
@@ -1054,7 +1059,12 @@ class CLOBClient(DexalotBaseClient):
         required_balances: dict[str, float] = {}  # token -> amount
 
         for order in orders:
-            pair = order["pair"]
+            pair_raw = order["pair"]
+            pr = validate_pair_format(pair_raw, "pair")
+            if not pr.success:
+                return None, None, None, pr.error or "Invalid pair"
+            pair = self._normalize_user_pair(pair_raw)
+            order["pair"] = pair
             if not await self._ensure_pair_exists(pair):
                 return None, None, None, f"Pair {pair} not found."
 
@@ -1345,6 +1355,29 @@ class CLOBClient(DexalotBaseClient):
             error_msg = self._sanitize_error(e, "cancelling list orders by client ID")
             return Result.fail(error_msg)
 
+    def _resolve_cancel_add_pair_from_replacement(
+        self,
+        raw_pair: str | None,
+        inferred_pair: str | None,
+        order_id: object,
+    ) -> Result[str]:
+        if raw_pair:
+            pr = validate_pair_format(raw_pair, "pair")
+            if not pr.success:
+                return Result.fail(pr.error or "Invalid pair")
+            norm_rep = self._normalize_user_pair(raw_pair)
+            norm_inf = self._normalize_user_pair(inferred_pair) if inferred_pair else None
+            if inferred_pair and norm_rep != norm_inf:
+                return Result.fail(
+                    f"Replacement pair '{raw_pair}' does not match existing order pair '{inferred_pair}'."
+                )
+            return Result.ok(norm_rep)
+        if not inferred_pair:
+            return Result.fail(
+                f"Replacement for order '{order_id}' requires pair because it could not be inferred."
+            )
+        return Result.ok(inferred_pair)
+
     @track_method("clob")
     async def cancel_add_list(
         self, replacements: list[dict], wait_for_receipt: bool = True
@@ -1399,15 +1432,13 @@ class CLOBClient(DexalotBaseClient):
 
                 existing_order = await self._format_order_data(resolved["order_data"])
                 inferred_pair = existing_order.get("pair")
-                pair = rep.get("pair") or inferred_pair
-                if not pair:
-                    return Result.fail(
-                        f"Replacement for order '{rep['order_id']}' requires pair because it could not be inferred."
-                    )
-                if rep.get("pair") and inferred_pair and rep["pair"] != inferred_pair:
-                    return Result.fail(
-                        f"Replacement pair '{rep['pair']}' does not match existing order pair '{inferred_pair}'."
-                    )
+                pair_res = self._resolve_cancel_add_pair_from_replacement(
+                    rep.get("pair"), inferred_pair, rep["order_id"]
+                )
+                if not pair_res.success:
+                    return Result.fail(pair_res.error or "")
+                pair = pair_res.data
+                assert pair is not None
                 if not await self._ensure_pair_exists(pair):
                     return Result.fail(f"Pair {pair} not found.")
 
@@ -1534,6 +1565,12 @@ class CLOBClient(DexalotBaseClient):
             elif "/" in topic and topic.count("/") == 1:
                 orderbook_pair = topic
         if orderbook_pair:
+            pr_ob = validate_pair_format(orderbook_pair, "pair")
+            if not pr_ob.success:
+                raise ValueError(
+                    pr_ob.error or f"Invalid trading pair in WebSocket topic: {orderbook_pair}"
+                )
+            orderbook_pair = self._normalize_user_pair(orderbook_pair)
             if not await self._ensure_pair_exists(orderbook_pair):
                 raise ValueError(f"Trading pair not found for WebSocket: {orderbook_pair}")
             pd = self.pairs.get(orderbook_pair, {})

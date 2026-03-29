@@ -84,6 +84,8 @@ class TransferClient(DexalotBaseClient):
             if not validate_result.success:
                 return cast(Result[dict[Any, Any]], validate_result)
 
+            token = self._normalize_user_token(token)
+
             # Always fetch token data from API (cache decorator handles TTL)
             token_url = f"{self.api_base_url}{ENDPOINT_TRADING_TOKENS}"
             async with await self._make_http_request("get", token_url) as response:
@@ -172,6 +174,8 @@ class TransferClient(DexalotBaseClient):
         token_result = validate_token_symbol(token, "token")
         if not token_result.success:
             return cast(Result[dict[Any, Any]], token_result)
+
+        token = self._normalize_user_token(token)
 
         # Validate chain exists
         if not isinstance(chain, str) or not chain.strip():
@@ -555,6 +559,8 @@ class TransferClient(DexalotBaseClient):
         if not token_result.success:
             return cast(Result[dict[Any, Any]], token_result)
 
+        token = self._normalize_user_token(token)
+
         if not query_address:
             return Result.fail("Address required (pass as param or set signer)")
 
@@ -773,6 +779,8 @@ class TransferClient(DexalotBaseClient):
         transfer_params_result = validate_transfer_params(token, amount, to_address)
         if not transfer_params_result.success:
             return cast(Result[str], transfer_params_result)
+
+        token = self._normalize_user_token(token)
 
         contract = self.portfolio_sub_contract
         if not contract:
@@ -1009,6 +1017,8 @@ class TransferClient(DexalotBaseClient):
         if not validation_result.success:
             return Result.fail(validation_result.error or "Invalid deposit parameters")
 
+        token = self._normalize_user_token(token)
+
         w3 = self.w3_connected_chain
         contract = self.portfolio_main_avax_contract
 
@@ -1100,6 +1110,8 @@ class TransferClient(DexalotBaseClient):
         token_result = validate_token_symbol(token, "token")
         if not token_result.success:
             return cast(Result[str], token_result)
+
+        token = self._normalize_user_token(token)
 
         # Validate amount
         amount_result = validate_positive_float(amount, "amount")
@@ -1206,6 +1218,16 @@ class TransferClient(DexalotBaseClient):
         if not w3 or not contract:
             return Result.fail("L1 Provider or Portfolio Contract not initialized.")
 
+        token_result = validate_token_symbol(token, "token")
+        if not token_result.success:
+            return cast(Result[float], token_result)
+
+        amount_result = validate_positive_float(amount, "amount")
+        if not amount_result.success:
+            return cast(Result[float], amount_result)
+
+        token = self._normalize_user_token(token)
+
         try:
             src_chain_id = self.chain_config[canonical_source_chain]["chain_id"]
             decimals = self._get_token_decimals(token, src_chain_id)
@@ -1253,6 +1275,8 @@ class TransferClient(DexalotBaseClient):
         transfer_params_result = validate_transfer_params(token, amount, to_address)
         if not transfer_params_result.success:
             return cast(Result[str], transfer_params_result)
+
+        token = self._normalize_user_token(token)
         from_addr = cast(str, cast(Any, self.account).address)
 
         w3 = self.w3_l1

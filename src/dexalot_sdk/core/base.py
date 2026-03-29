@@ -669,6 +669,16 @@ class DexalotBaseClient:
             f"Available chains: {available}"
         )
 
+    def _normalize_user_token(self, token: str) -> str:
+        from ..utils.token_normalization import normalize_token_symbol_for_sdk
+
+        return normalize_token_symbol_for_sdk(token)
+
+    def _normalize_user_pair(self, pair: str) -> str:
+        from ..utils.token_normalization import normalize_trading_pair_for_sdk
+
+        return normalize_trading_pair_for_sdk(pair)
+
     def resolve_chain_reference(
         self, chain_reference: str | int, include_dexalot_l1: bool = False
     ) -> Result[ResolvedChain]:

@@ -387,6 +387,9 @@ class SwapClient(DexalotBaseClient):
         if not swap_params_result.success:
             return cast(Result[dict[Any, Any]], swap_params_result)
 
+        from_token = self._normalize_user_token(from_token)
+        to_token = self._normalize_user_token(to_token)
+
         # Validate chain_id if provided
         if chain_id is not None:
             chain_id_result = validate_chain_identifier(chain_id, "chain_id")
@@ -421,6 +424,9 @@ class SwapClient(DexalotBaseClient):
         swap_params_result = validate_swap_params(from_token, to_token, amount)
         if not swap_params_result.success:
             return cast(Result[dict[Any, Any]], swap_params_result)
+
+        from_token = self._normalize_user_token(from_token)
+        to_token = self._normalize_user_token(to_token)
 
         # Validate chain_id if provided
         if chain_id is not None:

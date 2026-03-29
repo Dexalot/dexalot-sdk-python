@@ -1452,6 +1452,16 @@ class TestTransferClient:
         assert not result.success
         assert "not known" in result.error
 
+    async def test_get_deposit_bridge_fee_rejects_invalid_token(self, client):
+        result = await client.get_deposit_bridge_fee("", 1.0, "Avalanche")
+        assert not result.success
+        assert "token" in (result.error or "").lower()
+
+    async def test_get_deposit_bridge_fee_rejects_non_positive_amount(self, client):
+        result = await client.get_deposit_bridge_fee("AVAX", 0.0, "Avalanche")
+        assert not result.success
+        assert "amount" in (result.error or "").lower()
+
     async def test_build_and_send_tx_retry_disabled(self, client):
         """Test _build_and_send_tx when retry is disabled."""
         client.config.retry_enabled = False

@@ -127,3 +127,4 @@ All paths relative to `src/dexalot_sdk/`.
 | Error sanitizer | `utils/error_sanitizer.py` |
 | Observability | `utils/observability.py` |
 | Input validation | `utils/input_validators.py` |
+| Token/pair normalization | `utils/token_normalization.py`, `data/token_aliases.json` |

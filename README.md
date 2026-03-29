@@ -24,6 +24,7 @@
 ### Utilities
 
 - **`utils/input_validators.py`**: Validate SDK method input parameters (amounts, addresses, pairs, etc.)
+- **`utils/token_normalization.py`**: Normalize user token symbols and `BASE/QUOTE` pairs (strip, ASCII uppercase, optional aliases from `data/token_aliases.json`)
 - **`utils/cache.py`**: TTL-based caching utilities (`MemoryCache`, `ttl_cached`, `async_ttl_cached`)
 - **`utils/observability.py`**: Structured logging and operation tracking
 - **`utils/result.py`**: Standardized `Result[T]` type for consistent error handling
@@ -33,6 +34,10 @@
 - **`utils/provider_manager.py`**: RPC provider failover with health tracking
 - **`utils/error_sanitizer.py`**: Error message sanitization to prevent information leakage
 - **`utils/websocket_manager.py`**: Persistent WebSocket connection manager with reconnection and heartbeat
+
+### Token and pair inputs
+
+User-facing methods accept common symbol variants: surrounding whitespace is ignored, symbols are folded to ASCII uppercase, and a small alias map (for example **ETHER** → **ETH**, **BITCOIN** → **BTC**) is applied after format validation. Trading pairs are normalized per leg (`eth/usdc` → `ETH/USDC`). Examples in this repo use canonical symbols; callers may pass mixed case or aliases interchangeably.
 
 ## Installation
 

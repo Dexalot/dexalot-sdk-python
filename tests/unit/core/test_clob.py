@@ -943,13 +943,13 @@ class TestCLOBClient:
 
     async def test_add_limit_order_list(self, client):
         """Test add_limit_order_list."""
-        orders = [{"pair": "P", "side": "BUY", "amount": 1.0, "price": 10.0}]
+        orders = [{"pair": "ZZ/USDC", "side": "BUY", "amount": 1.0, "price": 10.0}]
 
         # Ensure pair exists
         client.pairs = {
-            "P": {
+            "ZZ/USDC": {
                 "tradePairId": b"TPID",
-                "pair": "P",
+                "pair": "ZZ/USDC",
                 "base_decimals": 18,
                 "quote_decimals": 6,
                 "quote": "USDC",
@@ -1272,15 +1272,15 @@ class TestCLOBClient:
         client.pairs = {}
         client._ensure_pair_exists = AsyncMock(return_value=False)
         res = await client.add_limit_order_list(
-            [{"pair": "INVALID", "side": "BUY", "amount": 1, "price": 1}]
+            [{"pair": "XX/YY", "side": "BUY", "amount": 1, "price": 1}]
         )
         assert not res.success
         assert "not found" in res.error
 
         # cancel_add_list pair not found
-        self._stub_resolved_order(client, pair="INVALID", trade_pair_id=b"ID")
+        self._stub_resolved_order(client, pair="XX/YY", trade_pair_id=b"ID")
         res = await client.cancel_add_list(
-            [{"order_id": "1", "pair": "INVALID", "amount": 1, "price": 1, "side": "BUY"}]
+            [{"order_id": "1", "pair": "XX/YY", "amount": 1, "price": 1, "side": "BUY"}]
         )
         assert not res.success
         assert "not found" in res.error
@@ -1291,7 +1291,12 @@ class TestCLOBClient:
 
         # Ensure pair exists so it tries to fetch orderbook
         client.pairs = {
-            "P": {"pair": "P", "base_decimals": 18, "quote_decimals": 6, "tradePairId": b"ID"}
+            "ZZ/USDC": {
+                "pair": "ZZ/USDC",
+                "base_decimals": 18,
+                "quote_decimals": 6,
+                "tradePairId": b"ID",
+            }
         }
 
         result = await client.get_clob_pairs()
@@ -1498,8 +1503,8 @@ class TestCLOBClient:
         """Test exception handling in all methods."""
         client.trade_pairs_contract = MagicMock()
         client.pairs = {
-            "P": {
-                "pair": "P",
+            "ZZ/USDC": {
+                "pair": "ZZ/USDC",
                 "base_decimals": 18,
                 "quote_decimals": 6,
                 "tradePairId": b"ID",
@@ -1513,7 +1518,7 @@ class TestCLOBClient:
 
         client.get_portfolio_balance = AsyncMock(return_value=Result.ok({"available": 1000.0}))
         client._send_trade_tx = AsyncMock(side_effect=Exception("Err"))
-        self._stub_resolved_order(client, id_type="internal", pair="P", trade_pair_id=b"ID")
+        self._stub_resolved_order(client, id_type="internal", pair="ZZ/USDC", trade_pair_id=b"ID")
 
         result = await client.cancel_order("0x01")
         assert not result.success
@@ -1552,7 +1557,7 @@ class TestCLOBClient:
         client._ensure_pair_exists = AsyncMock(return_value=True)
         # _send_trade_tx is already side_effect=Exception("Err")
         result = await client.add_limit_order_list(
-            [{"pair": "P", "side": "BUY", "amount": 1, "price": 1}]
+            [{"pair": "ZZ/USDC", "side": "BUY", "amount": 1, "price": 1}]
         )
         assert not result.success
         assert "placing batch orders" in result.error.lower()
@@ -1583,7 +1588,7 @@ class TestCLOBClient:
             except AttributeError:
                 pass
         result = await client.cancel_add_list(
-            [{"order_id": "1", "pair": "P", "amount": 1, "price": 1, "side": "BUY"}]
+            [{"order_id": "1", "pair": "ZZ/USDC", "amount": 1, "price": 1, "side": "BUY"}]
         )
         assert not result.success
 
@@ -1786,8 +1791,8 @@ class TestCLOBClient:
         client.account = MagicMock()
         client.account.address = "0xUser"
         client.pairs = {
-            "P": {
-                "pair": "P",
+            "ZZ/USDC": {
+                "pair": "ZZ/USDC",
                 "base_decimals": 18,
                 "quote_decimals": 6,
                 "tradePairId": b"ID",
@@ -1802,11 +1807,13 @@ class TestCLOBClient:
         client._send_trade_tx = AsyncMock(return_value=("0xTxHash", MagicMock(status=1)))
 
         # SELL side
-        await client.add_limit_order_list([{"pair": "P", "side": "SELL", "amount": 1, "price": 1}])
+        await client.add_limit_order_list(
+            [{"pair": "ZZ/USDC", "side": "SELL", "amount": 1, "price": 1}]
+        )
 
         # Invalid side
         result = await client.add_limit_order_list(
-            [{"pair": "P", "side": "INVALID", "amount": 1, "price": 1}]
+            [{"pair": "ZZ/USDC", "side": "INVALID", "amount": 1, "price": 1}]
         )
         assert not result.success
         assert "Invalid side" in result.error
@@ -1815,14 +1822,14 @@ class TestCLOBClient:
 
         client.get_portfolio_balance = AsyncMock(return_value=Result.fail("Error"))
         result = await client.add_limit_order_list(
-            [{"pair": "P", "side": "BUY", "amount": 1, "price": 1}]
+            [{"pair": "ZZ/USDC", "side": "BUY", "amount": 1, "price": 1}]
         )
         assert not result.success
         assert "Error checking balance" in result.error
 
         client.get_portfolio_balance = AsyncMock(return_value=Result.ok({"available": 0.0}))
         result = await client.add_limit_order_list(
-            [{"pair": "P", "side": "BUY", "amount": 1, "price": 1}]
+            [{"pair": "ZZ/USDC", "side": "BUY", "amount": 1, "price": 1}]
         )
         assert not result.success
         assert "Insufficient" in result.error
@@ -1832,7 +1839,7 @@ class TestCLOBClient:
         client.get_portfolio_balance = AsyncMock(return_value=Result.ok({"available": 1000.0}))
         client._send_trade_tx.side_effect = Exception("Gas Err")
         result = await client.add_limit_order_list(
-            [{"pair": "P", "side": "BUY", "amount": 1, "price": 1}]
+            [{"pair": "ZZ/USDC", "side": "BUY", "amount": 1, "price": 1}]
         )
         assert not result.success
 
@@ -2109,19 +2116,24 @@ class TestCLOBClient:
 
         def side_effect_get_clob_pairs():
             client.pairs = {
-                "P": {"pair": "P", "tradePairId": b"ID", "quote_decimals": 6, "base_decimals": 18}
+                "ZZ/USDC": {
+                    "pair": "ZZ/USDC",
+                    "tradePairId": b"ID",
+                    "quote_decimals": 6,
+                    "base_decimals": 18,
+                }
             }
 
         client.get_clob_pairs.side_effect = side_effect_get_clob_pairs
         order_data = (b"ID", b"CID", b"ID", 100, 10, 10, 0, 0, "0xUser", 0, 0, 0, 3)
         res = await client._format_order_data(order_data)
-        assert res["pair"] == "P"
+        assert res["pair"] == "ZZ/USDC"
 
     async def test_clob_batch_rounding(self, client):
         """Test rounding logic in batch orders."""
         client.pairs = {
-            "P": {
-                "pair": "P",
+            "ZZ/USDC": {
+                "pair": "ZZ/USDC",
                 "base_decimals": 18,
                 "quote_decimals": 6,
                 "tradePairId": b"ID",
@@ -2138,14 +2150,14 @@ class TestCLOBClient:
         client._ensure_pair_exists = AsyncMock(return_value=True)
 
         await client.add_limit_order_list(
-            [{"pair": "P", "side": "BUY", "amount": 1.1234, "price": 10.5678}]
+            [{"pair": "ZZ/USDC", "side": "BUY", "amount": 1.1234, "price": 10.5678}]
         )
         call_args = client.trade_pairs_contract.functions.addOrderList.call_args[0][0]
         assert call_args[0][2] == 10570000
 
         client._send_trade_tx.side_effect = Exception("Transaction reverted")
         result = await client.add_limit_order_list(
-            [{"pair": "P", "side": "BUY", "amount": 1, "price": 1}]
+            [{"pair": "ZZ/USDC", "side": "BUY", "amount": 1, "price": 1}]
         )
         assert not result.success
         assert "Transaction reverted" in result.error
@@ -2158,7 +2170,7 @@ class TestCLOBClient:
         assert not result.success
         client._send_trade_tx.side_effect = None
 
-        client.get_order = AsyncMock(return_value={"pair": "P"})
+        client.get_order = AsyncMock(return_value={"pair": "ZZ/USDC"})
         await client.replace_order(b"\x01" * 32, 1, 1)
 
         client._send_trade_tx.side_effect = Exception("Err")
@@ -2220,8 +2232,8 @@ class TestCLOBClient:
         client.account = MagicMock()
         client.account.address = "0xUser"
         client.pairs = {
-            "P": {
-                "pair": "P",
+            "ZZ/USDC": {
+                "pair": "ZZ/USDC",
                 "base_decimals": 18,
                 "quote_decimals": 6,
                 "tradePairId": b"ID",
@@ -2236,9 +2248,15 @@ class TestCLOBClient:
 
         replacements = [
             # Int ID, SELL side, Needs rounding
-            {"order_id": 12345, "pair": "P", "side": "SELL", "amount": 1.1234, "price": 10.5678},
+            {
+                "order_id": 12345,
+                "pair": "ZZ/USDC",
+                "side": "SELL",
+                "amount": 1.1234,
+                "price": 10.5678,
+            },
             # Bytes ID
-            {"order_id": b"\x01" * 32, "pair": "P", "side": "BUY", "amount": 1, "price": 1},
+            {"order_id": b"\x01" * 32, "pair": "ZZ/USDC", "side": "BUY", "amount": 1, "price": 1},
         ]
 
         client._resolve_order_reference = AsyncMock(
@@ -2313,9 +2331,9 @@ class TestCLOBClient:
 
         # 4. Invalid Side
         replacements_invalid = [
-            {"order_id": "1", "pair": "P", "side": "INVALID", "amount": 1, "price": 1}
+            {"order_id": "1", "pair": "ZZ/USDC", "side": "INVALID", "amount": 1, "price": 1}
         ]
-        self._stub_resolved_order(client, pair="P", trade_pair_id=b"ID")
+        self._stub_resolved_order(client, pair="ZZ/USDC", trade_pair_id=b"ID")
         result = await client.cancel_add_list(replacements_invalid)
         assert not result.success
         assert "Invalid side" in result.error
@@ -2540,12 +2558,12 @@ class TestCLOBClient:
 
     async def test_add_limit_order_list_balance_errors(self, client):
         """Test add_limit_order_list balance error handling."""
-        orders = [{"pair": "P", "side": "BUY", "amount": 1.0, "price": 10.0}]
+        orders = [{"pair": "ZZ/USDC", "side": "BUY", "amount": 1.0, "price": 10.0}]
 
         client.pairs = {
-            "P": {
+            "ZZ/USDC": {
                 "tradePairId": b"TPID",
-                "pair": "P",
+                "pair": "ZZ/USDC",
                 "base_decimals": 18,
                 "quote_decimals": 6,
                 "quote": "USDC",
@@ -2873,6 +2891,12 @@ class TestCLOBClient:
         assert not result.success
         assert "Invalid pair" in result.error
 
+    def test_resolve_cancel_add_pair_uses_inferred_when_omitted(self, client):
+        """_resolve_cancel_add_pair_from_replacement returns inferred pair when caller omits pair."""
+        res = client._resolve_cancel_add_pair_from_replacement(None, "AVAX/USDC", "1")
+        assert res.success
+        assert res.data == "AVAX/USDC"
+
     async def test_get_open_orders_invalid_pair_format(self, client):
         """get_open_orders rejects pairs that fail validate_pair_format before making any API call."""
         client.account = MagicMock()
@@ -3062,8 +3086,8 @@ class TestCLOBClient:
         assert "requires pair" in result.error
 
         client.pairs = {
-            "P": {
-                "pair": "P",
+            "ZZ/USDC": {
+                "pair": "ZZ/USDC",
                 "tradePairId": b"PAIR",
                 "base_decimals": 18,
                 "quote_decimals": 6,
@@ -3098,7 +3122,7 @@ class TestCLOBClient:
             )
         )
         result = await client.cancel_add_list(
-            [{"order_id": "0x01", "pair": "OTHER", "amount": 1, "price": 1, "side": "BUY"}]
+            [{"order_id": "0x01", "pair": "OTHER/USDC", "amount": 1, "price": 1, "side": "BUY"}]
         )
         assert not result.success
         assert "does not match existing order pair" in result.error
@@ -3181,6 +3205,35 @@ class TestCLOBClient:
         with patch("dexalot_sdk.core.clob.WebSocketManager"):
             with pytest.raises(ValueError, match="Trading pair not found"):
                 await client.subscribe_to_events("AVAX/USDC", lambda msg: None)
+
+    async def test_subscribe_to_events_invalid_pair_topic_raises(self, client):
+        """subscribe_to_events raises ValueError when slash topic fails pair format validation."""
+        client.config.ws_manager_enabled = True
+        with patch("dexalot_sdk.core.clob.WebSocketManager"):
+            with pytest.raises(ValueError, match="Invalid pair"):
+                await client.subscribe_to_events("FOO/@BAR", lambda msg: None)
+
+    async def test_add_limit_order_list_invalid_pair_format(self, client):
+        """add_limit_order_list returns error when an order pair fails validate_pair_format."""
+        client.get_portfolio_balance = AsyncMock()
+        res = await client.add_limit_order_list(
+            [{"pair": "BAD", "side": "BUY", "amount": 1, "price": 1}]
+        )
+        assert not res.success
+        assert "Invalid pair" in (res.error or "")
+
+    async def test_cancel_add_list_invalid_pair_format(self, client):
+        """cancel_add_list fails when replacement pair string is not BASE/QUOTE."""
+
+        client.account = MagicMock()
+        client.account.address = VALID_ADDRESS
+        client.trade_pairs_contract = MagicMock()
+        self._stub_resolved_order(client, pair="ZZ/USDC", trade_pair_id=b"ID")
+        res = await client.cancel_add_list(
+            [{"order_id": "0x01", "pair": "BAD", "amount": 1, "price": 1, "side": "BUY"}]
+        )
+        assert not res.success
+        assert "Invalid pair" in (res.error or "")
 
 
 class TestWebSocketManager:

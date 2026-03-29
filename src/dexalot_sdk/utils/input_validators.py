@@ -120,8 +120,9 @@ def validate_pair_format(pair: object, param_name: str = "pair") -> Result[None]
     if not parts[0].strip() or not parts[1].strip():
         return Result.fail(f"Invalid {param_name}: both tokens must be non-empty, got '{pair}'")
 
+    pair_trimmed = f"{parts[0].strip()}/{parts[1].strip()}"
     # Finally validate format with regex
-    if not _PAIR_PATTERN.match(pair):
+    if not _PAIR_PATTERN.match(pair_trimmed):
         return Result.fail(
             f"Invalid {param_name}: must match format TOKEN/TOKEN (e.g., 'AVAX/USDC'), got '{pair}'"
         )
@@ -204,7 +205,8 @@ def validate_token_symbol(token: object, param_name: str = "token") -> Result[No
     if not isinstance(token, str):
         return Result.fail(f"Invalid {param_name}: must be string, got {type(token).__name__}")
 
-    if not token.strip():
+    token = token.strip()
+    if not token:
         return Result.fail(f"Invalid {param_name}: cannot be empty")
 
     # Token symbols should be alphanumeric with possible special characters
