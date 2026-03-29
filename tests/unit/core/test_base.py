@@ -3,7 +3,7 @@ from unittest.mock import AsyncMock, MagicMock, mock_open, patch
 
 import pytest
 
-from dexalot_sdk.core.base import DexalotBaseClient
+from dexalot_sdk.core.base import DexalotBaseClient, _load_chain_alias_registry
 
 
 class TestDexalotBaseClient:
@@ -59,6 +59,185 @@ class TestDexalotBaseClient:
             client.account.address == "0x19E7E376E7C213B7E7e7e46cc70A5dD086DAff2A"
         )  # Address for key 0x1111...1111 (64 hex chars)
         assert client.error_codes == {"E001": "Some Error"}
+
+    @pytest.mark.parametrize(
+        ("payload", "message"),
+        [
+            ({}, "top-level 'connected_chains' list"),
+            ({"connected_chains": [123]}, "connected chain alias entry must be an object"),
+            ({"connected_chains": [{}]}, "non-empty 'connected_chain'"),
+            (
+                {"connected_chains": [{"connected_chain": "avalanche", "generic_aliases": "bad"}]},
+                "list of strings",
+            ),
+            ({"connected_chains": []}, "top-level 'dexalot_chain' object"),
+            (
+                {"connected_chains": [], "dexalot_chain": []},
+                "top-level 'dexalot_chain' object",
+            ),
+            (
+                {"connected_chains": [], "dexalot_chain": {"generic_aliases": ["dexalot l1"]}},
+                "dexalot_chain.canonical_name",
+            ),
+            (
+                {
+                    "connected_chains": [],
+                    "dexalot_chain": {"canonical_name": "Dexalot L1", "generic_aliases": "bad"},
+                },
+                "list of strings",
+            ),
+        ],
+    )
+    def test_load_chain_alias_registry_validation_errors(self, payload, message):
+        _load_chain_alias_registry.cache_clear()
+        with patch("builtins.open", mock_open(read_data="{}")):
+            with patch("json.load", return_value=payload):
+                with pytest.raises(ValueError, match=message):
+                    _load_chain_alias_registry()
+        _load_chain_alias_registry.cache_clear()
+
+    def test_chain_resolution_helper_branches(self, client):
+        registry = {
+            "connected_chains": [
+                {
+                    "connected_chain": "avalanche",
+                    "generic_aliases": {"avalanche"},
+                    "testnet_aliases": {"fuji"},
+                    "mainnet_aliases": {"avax mainnet"},
+                }
+            ],
+            "dexalot_chain": {
+                "canonical_name": "Dexalot L1",
+                "generic_aliases": {"dexalot chain"},
+                "testnet_aliases": {"dexalot testnet"},
+                "mainnet_aliases": {"dexalot mainnet"},
+            },
+        }
+        client.chain_config = {
+            "Avalanche": {"chain_id": 43114},
+            "Fuji": {"chain_id": 43113},
+            "Ethereum": {"chain_id": 1},
+            "Sepolia": {"chain_id": 11155111},
+            "Arbitrum One": {"chain_id": 42161},
+            "Arbitrum Sepolia": {"chain_id": 421614},
+            "BSC": {"chain_id": 56},
+            "BSC Testnet": {"chain_id": 97},
+            "Base": {"chain_id": 8453},
+            "Base Sepolia": {"chain_id": 84532},
+            "Monad Testnet": {"chain_id": 10143},
+            "Mystery": {"chain_id": 999999},
+        }
+        client.subnet_chain_id = 432204
+
+        assert client._infer_chain_family("Ethereum", 1) == "ethereum"
+        assert client._infer_chain_family("Arbitrum One", 42161) == "arbitrum"
+        assert client._infer_chain_family("BSC", 56) == "bsc"
+        assert client._infer_chain_family("Base", 8453) == "base"
+        assert client._infer_chain_family("Monad Testnet", 10143) == "monad"
+        assert client._infer_chain_family("Mystery", 999999) is None
+
+        assert client._infer_chain_environment_kind("Sepolia", None) == "testnet"
+        assert client._infer_chain_environment_kind("Ethereum Mainnet", None) == "mainnet"
+        assert client._describe_environment_kind("mainnet") == "mainnet"
+        assert client._describe_environment_kind(None) == "current environment"
+
+        with patch("dexalot_sdk.core.base._load_chain_alias_registry", return_value=registry):
+            matched = client._match_alias_groups("avax mainnet")
+            assert ("avalanche", "mainnet") in matched
+            matched = client._match_alias_groups("fuji")
+            assert ("avalanche", "testnet") in matched
+
+            candidates = [
+                client._get_resolvable_chains()[0],
+                client._get_resolvable_chains()[1],
+            ]
+        client.chain_id = None
+        assert client._prefer_active_chain(candidates, "Avalanche") is None
+        client.chain_id = 43113
+        preferred = client._prefer_active_chain(candidates, "Avalanche")
+        assert preferred is not None
+        assert preferred.data is not None
+        assert preferred.data.canonical_name == "Fuji"
+
+        assert client._mismatch_error("Avalanche", candidates, [("base", None)]) is None
+
+    def test_resolve_chain_reference_edge_cases(self, client):
+        registry = {
+            "connected_chains": [
+                {
+                    "connected_chain": "avalanche",
+                    "generic_aliases": {"avax"},
+                    "testnet_aliases": {"fuji"},
+                    "mainnet_aliases": {"avax mainnet"},
+                }
+            ],
+            "dexalot_chain": {
+                "canonical_name": "Dexalot L1",
+                "generic_aliases": {"dexalot chain"},
+                "testnet_aliases": set(),
+                "mainnet_aliases": set(),
+            },
+        }
+        client.chain_config = {}
+        result = client.resolve_chain_reference("   ")
+        assert not result.success
+        assert "non-empty" in result.error
+
+        result = client.resolve_chain_reference("Avalanche")
+        assert not result.success
+        assert "No connected chains" in result.error
+
+        client.chain_config = {"Avalanche": {"chain_id": 43114}, "Fuji": {"chain_id": 43113}}
+        client.chain_id = None
+        with patch("dexalot_sdk.core.base._load_chain_alias_registry", return_value=registry):
+            result = client.resolve_chain_reference("AVAX")
+        assert not result.success
+        assert "ambiguous" in result.error
+
+    def test_resolve_chain_reference_special_chain(self, client):
+        registry = {
+            "connected_chains": [],
+            "dexalot_chain": {
+                "canonical_name": "Dexalot L1",
+                "generic_aliases": {"dexalot chain"},
+                "testnet_aliases": {"dexalot testnet"},
+                "mainnet_aliases": {"dexalot mainnet"},
+            },
+        }
+        client.chain_config = {"Avalanche": {"chain_id": 43114}}
+        client.subnet_chain_id = 432204
+
+        with patch("dexalot_sdk.core.base._load_chain_alias_registry", return_value=registry):
+            result = client.resolve_chain_reference("Dexalot Chain", include_dexalot_l1=True)
+
+        assert result.success
+        assert result.data is not None
+        assert result.data.canonical_name == "Dexalot L1"
+
+        with patch("dexalot_sdk.core.base._load_chain_alias_registry", return_value=registry):
+            result = client.resolve_chain_reference("Dexalot Testnet", include_dexalot_l1=True)
+
+        assert result.success
+        assert result.data is not None
+        assert result.data.canonical_name == "Dexalot L1"
+
+    def test_resolve_special_chain_returns_none_when_canonical_chain_missing(self, client):
+        registry = {
+            "connected_chains": [],
+            "dexalot_chain": {
+                "canonical_name": "Dexalot L1",
+                "generic_aliases": {"dexalot chain"},
+                "testnet_aliases": {"dexalot testnet"},
+                "mainnet_aliases": {"dexalot mainnet"},
+            },
+        }
+        client.chain_config = {"Avalanche": {"chain_id": 43114}}
+        chains = client._get_resolvable_chains(include_dexalot_l1=False)
+
+        with patch("dexalot_sdk.core.base._load_chain_alias_registry", return_value=registry):
+            result = client._resolve_special_chain("dexalot chain", chains, "Dexalot Chain")
+
+        assert result is None
 
     async def test_parse_revert_reason(self, client):
         """Test revert reason parsing."""

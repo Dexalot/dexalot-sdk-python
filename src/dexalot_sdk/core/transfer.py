@@ -136,12 +136,23 @@ class TransferClient(DexalotBaseClient):
             ``balance``, and ``type`` fields on success, or an error message
             on failure.
         """
+        if not isinstance(chain, str) or not chain.strip():
+            return Result.fail(
+                f"Invalid chain: must be non-empty string, got {type(chain).__name__}"
+            )
+
+        resolved_chain = self.resolve_chain_reference(chain, include_dexalot_l1=True)
+        if not resolved_chain.success or resolved_chain.data is None:
+            return Result.fail(resolved_chain.error or f"Could not resolve chain '{chain}'.")
+
         resolved_address = address or (
             cast(str, cast(Any, self.account).address) if self.account else None
         )
         return cast(
             Result[dict[Any, Any]],
-            await self._get_chain_wallet_balance_cached(chain, token, resolved_address),
+            await self._get_chain_wallet_balance_cached(
+                resolved_chain.data.canonical_name, token, resolved_address
+            ),
         )
 
     @async_ttl_cached(_BALANCE_CACHE)
@@ -223,12 +234,23 @@ class TransferClient(DexalotBaseClient):
             ``chain_balances`` (list of token balance entries) on success, or an
             error message on failure.
         """
+        if not isinstance(chain, str) or not chain.strip():
+            return Result.fail(
+                f"Invalid chain: must be non-empty string, got {type(chain).__name__}"
+            )
+
+        resolved_chain = self.resolve_chain_reference(chain, include_dexalot_l1=True)
+        if not resolved_chain.success or resolved_chain.data is None:
+            return Result.fail(resolved_chain.error or f"Could not resolve chain '{chain}'.")
+
         resolved_address = address or (
             cast(str, cast(Any, self.account).address) if self.account else None
         )
         return cast(
             Result[dict[Any, Any]],
-            await self._get_chain_wallet_balances_cached(chain, resolved_address),
+            await self._get_chain_wallet_balances_cached(
+                resolved_chain.data.canonical_name, resolved_address
+            ),
         )
 
     @async_ttl_cached(_BALANCE_CACHE)
@@ -968,8 +990,22 @@ class TransferClient(DexalotBaseClient):
             Result containing a confirmation message with the transaction hash on
             success, or an error message on failure.
         """
+        if not self.account:
+            return Result.fail("Private key not configured.")
+        if not isinstance(source_chain, str) or not source_chain.strip():
+            return Result.fail(
+                f"Invalid source_chain: must be non-empty string, got {type(source_chain).__name__}"
+            )
+
         # Validate parameters
-        validation_result = self._validate_deposit_params(token, amount, source_chain)
+        resolved_source_chain = self.resolve_chain_reference(source_chain)
+        if not resolved_source_chain.success or resolved_source_chain.data is None:
+            return Result.fail(
+                resolved_source_chain.error or f"Could not resolve source chain '{source_chain}'."
+            )
+
+        canonical_source_chain = resolved_source_chain.data.canonical_name
+        validation_result = self._validate_deposit_params(token, amount, canonical_source_chain)
         if not validation_result.success:
             return Result.fail(validation_result.error or "Invalid deposit parameters")
 
@@ -989,7 +1025,7 @@ class TransferClient(DexalotBaseClient):
             decimals = decimals_result.data
 
             amount_wei = int(amount * (10**decimals))
-            bridge_id = self._get_bridge_id(source_chain, use_layerzero)
+            bridge_id = self._get_bridge_id(canonical_source_chain, use_layerzero)
             symbol_bytes32 = Utils.to_bytes32(token)
 
             # Get bridge fee (default to 0 if calculation fails)
@@ -1076,7 +1112,15 @@ class TransferClient(DexalotBaseClient):
                 f"Invalid destination_chain: must be non-empty string, got {type(destination_chain).__name__}"
             )
 
-        chain_config = self.chain_config.get(destination_chain)
+        resolved_destination_chain = self.resolve_chain_reference(destination_chain)
+        if not resolved_destination_chain.success or resolved_destination_chain.data is None:
+            return Result.fail(
+                resolved_destination_chain.error
+                or f"Could not resolve destination chain '{destination_chain}'."
+            )
+
+        canonical_destination_chain = resolved_destination_chain.data.canonical_name
+        chain_config = self.chain_config.get(canonical_destination_chain)
         if not chain_config:
             return Result.fail(
                 f"Destination chain '{destination_chain}' not known. Available: {list(self.chain_config.keys())}"
@@ -1093,11 +1137,12 @@ class TransferClient(DexalotBaseClient):
             decimals = self._get_token_decimals(token, dest_chain_id)
             if decimals is None:
                 return Result.fail(
-                    f"Token {token} not supported on destination chain {destination_chain} (ID {dest_chain_id})."
+                    f"Token {token} not supported on destination chain "
+                    f"{canonical_destination_chain} (ID {dest_chain_id})."
                 )
 
             amount_wei = int(amount * (10**decimals))
-            bridge_id = self._get_bridge_id(destination_chain, use_layerzero)
+            bridge_id = self._get_bridge_id(canonical_destination_chain, use_layerzero)
             symbol_bytes32 = Utils.to_bytes32(token)
 
             # Check allowance if needed (subnet token)
@@ -1145,7 +1190,14 @@ class TransferClient(DexalotBaseClient):
             Result containing the bridge fee in native token units (``float``,
             denominated in ETH/AVAX) on success, or an error message on failure.
         """
-        if source_chain not in self.chain_config:
+        resolved_source_chain = self.resolve_chain_reference(source_chain)
+        if not resolved_source_chain.success or resolved_source_chain.data is None:
+            return Result.fail(
+                resolved_source_chain.error or f"Could not resolve source chain '{source_chain}'."
+            )
+
+        canonical_source_chain = resolved_source_chain.data.canonical_name
+        if canonical_source_chain not in self.chain_config:
             return Result.fail(f"Source chain '{source_chain}' not known.")
 
         w3 = self.w3_connected_chain
@@ -1155,16 +1207,19 @@ class TransferClient(DexalotBaseClient):
             return Result.fail("L1 Provider or Portfolio Contract not initialized.")
 
         try:
-            src_chain_id = self.chain_config[source_chain]["chain_id"]
+            src_chain_id = self.chain_config[canonical_source_chain]["chain_id"]
             decimals = self._get_token_decimals(token, src_chain_id)
             if decimals is None:
                 return Result.fail(
-                    f"Token {token} not supported on source chain {source_chain} (ID {src_chain_id})."
+                    f"Token {token} not supported on source chain "
+                    f"{canonical_source_chain} (ID {src_chain_id})."
                 )
 
             amount_wei = int(amount * (10**decimals))
             symbol_bytes32 = Utils.to_bytes32(token)
-            bridge_id = self._get_bridge_id(source_chain, False)  # Assuming default for fee check
+            bridge_id = self._get_bridge_id(
+                canonical_source_chain, False
+            )  # Assuming default for fee check
 
             bridge_fee = await self._get_bridge_fee_internal(
                 w3, contract, bridge_id, symbol_bytes32, amount_wei

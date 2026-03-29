@@ -77,26 +77,21 @@ class TestSwapClient:
         # Invalid
         result = await client.get_swap_pairs("Invalid")
         assert not result.success
-        assert "Could not resolve" in result.error
+        assert "Could not resolve" in result.error or "not recognized" in result.error
 
-        # For chain_id 999, mock API to return error
-        def side_effect_999(url, params=None, **kwargs):
-            mock_resp = AsyncMock()
-
-            # Make raise_for_status raise an exception when called
-            def raise_error():
-                raise Exception("Chain not found")
-
-            mock_resp.raise_for_status = raise_error
-            mock_cm = AsyncMock()
-            mock_cm.__aenter__.return_value = mock_resp
-            return mock_cm
-
-        # Set side_effect for the 999 test
-        client._mock_session.get.side_effect = side_effect_999
         result = await client.get_swap_pairs(999)
         assert not result.success
-        assert "No swap pairs found" in result.error or "Failed to fetch RFQ pairs" in result.error
+        assert "Could not resolve" in result.error or "not recognized" in result.error
+
+    async def test_get_swap_pairs_resolves_environment_relative_aliases(self, client):
+        client.chain_config = {"Fuji": {"chain_id": 43113}}
+        client.rfq_pairs = {43113: {"AVAX/USDC": {}}}
+        client.chain_id = 43113
+
+        result = await client.get_swap_pairs("Avalanche C Chain")
+
+        assert result.success
+        assert result.data == {"AVAX/USDC": {}}
 
     async def test_get_swap_pairs_rehydrates_cached_state(self, client):
         """Cached RFQ pair results should still rebuild ``client.rfq_pairs``."""
@@ -598,12 +593,9 @@ class TestSwapClient:
         client._mock_session.get.reset_mock()
         client._mock_session.get.return_value = mock_cm
         client.rfq_pairs[43114] = {"A/B": {}}
-        await client.get_swap_soft_quote("A", "B", 1, chain_id="invalid")
-        # Should be "43114" as code uses _resolve_chain_id which returns None if invalid
-        # And then defaults to 43114 in _get_swap_quote_base
-
-        call_args = client._mock_session.get.call_args
-        assert call_args[1]["params"]["chainid"] == "43114"
+        result = await client.get_swap_soft_quote("A", "B", 1, chain_id="invalid")
+        assert not result.success
+        assert "Could not resolve" in result.error or "not recognized" in result.error
 
         # We need chain_id=43114 but NOT in chain_config map?
         # Or chain_id=43114 and chain_config has it but we want to test fallback?
@@ -951,6 +943,11 @@ class TestSwapClient:
         result = await client.get_swap_pairs("")  # Empty string
         assert not result.success
         assert "Invalid chain_identifier" in result.error
+
+    def test_resolve_chain_id_result_none(self, client):
+        result = client._resolve_chain_id_result(None)
+        assert not result.success
+        assert "required" in result.error
 
     async def test_get_swap_firm_quote_invalid_params(self, client):
         """Test get_swap_firm_quote with invalid params (coverage for lines 179, 185)."""

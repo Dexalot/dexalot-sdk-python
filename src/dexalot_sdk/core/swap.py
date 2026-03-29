@@ -1,7 +1,6 @@
 from typing import Any, cast
 
 from ..constants import (
-    CHAIN_ID_AVAX_MAINNET,
     DEFAULT_TAKER_ADDRESS,
     ENDPOINT_RFQ_FIRM_QUOTE,
     ENDPOINT_RFQ_PAIR_PRICE,
@@ -59,12 +58,13 @@ class SwapClient(DexalotBaseClient):
         if not chain_id_result.success:
             return cast(Result[dict[Any, Any]], chain_id_result)
 
-        chain_id = self._resolve_chain_id(chain_identifier)
-
-        if not chain_id:
+        resolved_chain_result = self._resolve_chain_id_result(chain_identifier)
+        if not resolved_chain_result.success or resolved_chain_result.data is None:
             return Result.fail(
-                f"Could not resolve chain identifier '{chain_identifier}' to a Chain ID."
+                resolved_chain_result.error
+                or f"Could not resolve chain identifier '{chain_identifier}' to a Chain ID."
             )
+        chain_id = resolved_chain_result.data
 
         # Ensure RFQ pairs are loaded (will use cache if available)
         # Since _fetch_rfq_pairs is internal, we'll fetch directly here
@@ -237,7 +237,14 @@ class SwapClient(DexalotBaseClient):
             Result containing a normalised quote dict on success, or an error
             message on failure.
         """
-        chain_id_int = self._resolve_chain_id(chain_id) or CHAIN_ID_AVAX_MAINNET
+        chain_identifier = chain_id if chain_id is not None else self.chain_id
+        resolved_chain_result = self._resolve_chain_id_result(chain_identifier)
+        if not resolved_chain_result.success or resolved_chain_result.data is None:
+            return Result.fail(
+                resolved_chain_result.error
+                or f"Could not resolve chain identifier '{chain_identifier}' to a Chain ID."
+            )
+        chain_id_int = resolved_chain_result.data
 
         target_pair, trade_side, is_base = await self._resolve_pair(
             from_token, to_token, chain_id_int
@@ -293,13 +300,29 @@ class SwapClient(DexalotBaseClient):
 
     def _resolve_chain_id(self, chain_identifier):
         """Resolve chain identifier (int or str) to Chain ID (int)."""
-        try:
-            return int(chain_identifier)
-        except (ValueError, TypeError):
-            for name, config in self.chain_config.items():
-                if name.lower() == str(chain_identifier).lower():
-                    return config.get("chain_id")
+        resolved_chain = self.resolve_chain_reference(chain_identifier)
+        if resolved_chain.success and resolved_chain.data is not None:
+            return resolved_chain.data.chain_id
+
         return None
+
+    def _resolve_chain_id_result(self, chain_identifier) -> Result[int]:
+        """Resolve chain identifier and preserve user-facing error messages."""
+        if chain_identifier is None:
+            return Result.fail("Chain identifier is required.")
+
+        resolved_chain = self.resolve_chain_reference(chain_identifier)
+        if (
+            resolved_chain.success
+            and resolved_chain.data is not None
+            and resolved_chain.data.chain_id
+        ):
+            return Result.ok(resolved_chain.data.chain_id)
+
+        return Result.fail(
+            resolved_chain.error
+            or f"Could not resolve chain identifier '{chain_identifier}' to a Chain ID."
+        )
 
     async def _resolve_pair(self, from_token, to_token, chain_id):
         """

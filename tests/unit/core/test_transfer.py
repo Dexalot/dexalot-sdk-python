@@ -235,6 +235,31 @@ class TestTransferClient:
         assert info.data["balance"] == "25.0"
         assert info.data["type"] == "Native"
 
+    async def test_resolve_chain_reference_uses_active_environment_for_generic_avalanche_alias(
+        self, client
+    ):
+        client.chain_id = 43113
+        client.chain_config = {"Fuji": {"chain_id": 43113, "native_symbol": "AVAX"}}
+
+        resolved = client.resolve_chain_reference("Avalanche C Chain")
+
+        assert resolved.success
+        assert resolved.data is not None
+        assert resolved.data.canonical_name == "Fuji"
+        assert resolved.data.chain_id == 43113
+
+    async def test_get_chain_wallet_balance_resolves_alias_to_connected_testnet(self, client):
+        client.chain_id = 43113
+        client.chain_config = {"Fuji": {"chain_id": 43113, "native_symbol": "AVAX"}}
+        client.connected_chain_providers = {"Fuji": self.create_w3()}
+        client.connected_chain_providers["Fuji"].eth.get_balance.return_value = 7 * 10**18
+
+        info = await client.get_chain_wallet_balance("Avalanche C Chain", "AVAX")
+
+        assert info.success
+        assert info.data["chain"] == "Fuji"
+        assert info.data["balance"] == "7.0"
+
     async def test_get_chain_wallet_balance_connected_chain_erc20(self, client):
         mock_contract = MagicMock()
         mock_contract.functions.balanceOf.return_value.call = AsyncMock(return_value=1000 * 10**6)
@@ -322,6 +347,15 @@ class TestTransferClient:
         info = await client.get_chain_wallet_balances("Dexalot L1")
         assert not info.success
         assert "Address required" in info.error
+
+    async def test_get_chain_wallet_balances_invalid_and_not_connected_paths(self, client):
+        result = await client.get_chain_wallet_balances("")
+        assert not result.success
+        assert "Invalid chain" in result.error
+
+        result = await client._get_chain_wallet_balances_cached("UnknownChain", VALID_ADDRESS)
+        assert not result.success
+        assert "not connected" in result.error
 
     async def test_get_chain_wallet_balances_connected_chain(self, client):
         # Test connected-chain path with native and ERC20 balances
@@ -587,7 +621,7 @@ class TestTransferClient:
         # Invalid chain
         result = await client.withdraw("USDC", 10, "INVALID")
         assert not result.success
-        assert "not known" in result.error
+        assert "not recognized" in result.error or "not known" in result.error
 
         # Contract not initialized
         client.portfolio_sub_contract = None
@@ -612,6 +646,32 @@ class TestTransferClient:
             side_effect=Exception("Gas Err")
         )
         result = await client.withdraw("A", 1, "Avalanche")
+
+    async def test_withdraw_rejects_explicit_wrong_environment_alias(self, client):
+        client.chain_id = 43113
+        client.chain_config = {"Fuji": {"chain_id": 43113, "native_symbol": "AVAX"}}
+        client.token_data = {
+            "USDC": {"Fuji": {"chain_id": 43113, "evmdecimals": 6, "address": "0xUSDC"}}
+        }
+
+        result = await client.withdraw("USDC", 1, "Avalanche Mainnet")
+
+        assert not result.success
+        assert "refers to mainnet" in result.error
+        assert "Fuji" in result.error
+
+    async def test_withdraw_missing_canonical_destination_after_resolution(self, client):
+        from dexalot_sdk.utils.result import Result
+
+        with patch.object(
+            client,
+            "resolve_chain_reference",
+            return_value=Result.ok(MagicMock(canonical_name="MissingChain", chain_id=123)),
+        ):
+            result = await client.withdraw("USDC", 1, "MissingChain")
+
+        assert not result.success
+        assert "not known" in result.error
 
     async def test_deposit_allowance(self, client):
         from dexalot_sdk.utils.result import Result
@@ -1006,7 +1066,7 @@ class TestTransferClient:
 
         result = await client.get_deposit_bridge_fee("A", 1, "INVALID")
         assert not result.success
-        assert "not known" in result.error
+        assert "not recognized" in result.error or "not known" in result.error
 
     async def test_transfer_missing_coverage_2(self, client):
         """Test additional error paths."""
@@ -1109,7 +1169,7 @@ class TestTransferClient:
 
         result = await client.deposit("USDC", 1, "INVALID_CHAIN")
         assert not result.success
-        assert "not known" in result.error
+        assert "not recognized" in result.error or "not known" in result.error
 
         client.chain_config = {"Avalanche": {"chain_id": 43114}}
         client.chain_id = 43114
@@ -1379,6 +1439,19 @@ class TestTransferClient:
         assert not result.success
         assert "not initialized" in result.error
 
+    async def test_get_deposit_bridge_fee_missing_canonical_source_after_resolution(self, client):
+        from dexalot_sdk.utils.result import Result
+
+        with patch.object(
+            client,
+            "resolve_chain_reference",
+            return_value=Result.ok(MagicMock(canonical_name="MissingChain", chain_id=123)),
+        ):
+            result = await client.get_deposit_bridge_fee("AVAX", 1, "MissingChain")
+
+        assert not result.success
+        assert "not known" in result.error
+
     async def test_build_and_send_tx_retry_disabled(self, client):
         """Test _build_and_send_tx when retry is disabled."""
         client.config.retry_enabled = False
@@ -1642,6 +1715,17 @@ class TestTransferClient:
         assert not result.success
         assert "Invalid chain" in result.error
 
+    async def test_get_chain_wallet_balance_cached_invalid_chain_and_not_connected(self, client):
+        result = await client._get_chain_wallet_balance_cached("", "AVAX", VALID_ADDRESS)
+        assert not result.success
+        assert "Invalid chain" in result.error
+
+        result = await client._get_chain_wallet_balance_cached(
+            "UnknownChain", "AVAX", VALID_ADDRESS
+        )
+        assert not result.success
+        assert "not connected" in result.error
+
     async def test_transfer_portfolio_invalid_params(self, client):
         """transfer_portfolio rejects invalid token via validate_transfer_params before any on-chain call."""
         client.account = MagicMock()
@@ -1674,6 +1758,21 @@ class TestTransferClient:
         result = await client.deposit("USDC", 1.0, "")  # Empty chain
         assert not result.success
         assert "Invalid source_chain" in result.error
+
+    def test_validate_deposit_params_error_paths(self, client):
+        client.account = None
+        result = client._validate_deposit_params("USDC", 1.0, "Avalanche")
+        assert not result.success
+        assert "Private key not configured." == result.error
+
+        client.account = MagicMock()
+        result = client._validate_deposit_params("USDC", 1.0, "")
+        assert not result.success
+        assert "Invalid source_chain" in result.error
+
+        result = client._validate_deposit_params("USDC", 1.0, "UnknownChain")
+        assert not result.success
+        assert "not known" in result.error
 
     async def test_get_l1_token_info_not_found(self, client):
         """_get_l1_token_info returns None when the token is absent from token_data."""

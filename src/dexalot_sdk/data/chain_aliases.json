@@ -1,0 +1,145 @@
+{
+  "version": 1,
+  "dexalot_chain": {
+    "canonical_name": "Dexalot L1",
+    "generic_aliases": [
+      "dexalot l1",
+      "dexalot subnet",
+      "dexalot l1 subnet",
+      "dexalot",
+      "dexalot chain"
+    ],
+    "testnet_aliases": [
+      "dexalot testnet",
+      "dexalot fuji testnet"
+    ],
+    "mainnet_aliases": [
+      "dexalot mainnet"
+    ]
+  },
+  "connected_chains": [
+    {
+      "connected_chain": "avalanche",
+      "generic_aliases": [
+        "avalanche",
+        "avalanche chain",
+        "avalanche c chain",
+        "avalanche cchain",
+        "avax chain",
+        "avax c chain",
+        "avax cchain"
+      ],
+      "testnet_aliases": [
+        "fuji",
+        "avalanche fuji",
+        "avalanche fuji testnet",
+        "avalanche testnet",
+        "avax fuji",
+        "avax fuji testnet",
+        "avax testnet"
+      ],
+      "mainnet_aliases": [
+        "avalanche mainnet",
+        "avax mainnet"
+      ]
+    },
+    {
+      "connected_chain": "ethereum",
+      "generic_aliases": [
+        "ethereum",
+        "eth",
+        "ethereum l1",
+        "eth l1",
+        "ethereum main chain"
+      ],
+      "testnet_aliases": [
+        "ethereum testnet",
+        "ethereum sepolia",
+        "eth testnet",
+        "eth sepolia",
+        "sepolia"
+      ],
+      "mainnet_aliases": [
+        "ethereum mainnet",
+        "eth mainnet"
+      ]
+    },
+    {
+      "connected_chain": "arbitrum",
+      "generic_aliases": [
+        "arbitrum",
+        "arb",
+        "arbitrum one",
+        "arbitrum l2",
+        "arb one"
+      ],
+      "testnet_aliases": [
+        "arbitrum testnet",
+        "arbitrum sepolia",
+        "arb testnet",
+        "arb sepolia"
+      ],
+      "mainnet_aliases": [
+        "arbitrum mainnet",
+        "arbitrum one mainnet",
+        "arb mainnet"
+      ]
+    },
+    {
+      "connected_chain": "bsc",
+      "generic_aliases": [
+        "bsc",
+        "binance smart chain",
+        "binance chain",
+        "bnb",
+        "bnb chain"
+      ],
+      "testnet_aliases": [
+        "bsc testnet",
+        "binance testnet",
+        "binance smart chain testnet",
+        "bnb testnet",
+        "chapel",
+        "bsc chapel",
+        "bnb chain testnet"
+      ],
+      "mainnet_aliases": [
+        "bsc mainnet",
+        "binance mainnet",
+        "binance smart chain mainnet",
+        "bnb mainnet"
+      ]
+    },
+    {
+      "connected_chain": "base",
+      "generic_aliases": [
+        "base",
+        "coinbase base",
+        "base l2"
+      ],
+      "testnet_aliases": [
+        "base testnet",
+        "base sepolia",
+        "base testnet sepolia",
+        "base l2 testnet",
+        "base l2 sepolia"
+      ],
+      "mainnet_aliases": [
+        "base mainnet"
+      ]
+    },
+    {
+      "connected_chain": "monad",
+      "generic_aliases": [
+        "monad"
+      ],
+      "testnet_aliases": [
+        "monad testnet",
+        "monad tesnet"
+      ],
+      "mainnet_aliases": [
+        "monad mainnet"
+      ]
+    }
+  ]
+}

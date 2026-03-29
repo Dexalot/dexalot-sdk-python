@@ -3,7 +3,10 @@ import copy
 import json
 import logging
 import os
+import re
 import sys
+from dataclasses import dataclass
+from functools import lru_cache
 from typing import Any, cast
 
 import aiohttp
@@ -48,6 +51,87 @@ _STATIC_CACHE = MemoryCache(ttl_seconds=3600, max_size=128)  # 1 hour
 _SEMI_STATIC_CACHE = MemoryCache(ttl_seconds=900, max_size=256)  # 15 minutes
 _BALANCE_CACHE = MemoryCache(ttl_seconds=10, max_size=512)  # 10 seconds
 _ORDERBOOK_CACHE = MemoryCache(ttl_seconds=1, max_size=256)  # 1 second
+
+_TESTNET_CHAIN_IDS = frozenset({CHAIN_ID_AVAX_FUJI, 97, 84532, 10143, 11155111, 421614})
+_MAINNET_CHAIN_IDS = frozenset({CHAIN_ID_AVAX_MAINNET, 1, 56, 8453, 42161})
+
+
+@dataclass(frozen=True)
+class ResolvedChain:
+    canonical_name: str
+    chain_id: int | None
+    family: str | None
+    environment_kind: str | None
+    matched_alias: str
+
+
+def _normalize_chain_alias_value(chain_reference: str | int) -> str:
+    normalized = re.sub(r"[-_/]+", " ", str(chain_reference).strip().lower())
+    normalized = re.sub(r"[^a-z0-9\s]", " ", normalized)
+    return re.sub(r"\s+", " ", normalized).strip()
+
+
+@lru_cache(maxsize=1)
+def _load_chain_alias_registry() -> dict[str, Any]:
+    """Load and validate chain aliases from the JSON registry."""
+    registry_path = os.path.join(
+        os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+        "data",
+        "chain_aliases.json",
+    )
+    with open(registry_path) as f:
+        registry = json.load(f)
+
+    connected_chains = registry.get("connected_chains")
+    if not isinstance(connected_chains, list):
+        raise ValueError("chain_aliases.json must contain a top-level 'connected_chains' list.")
+
+    normalized_connected_chains: list[dict[str, Any]] = []
+    for entry in connected_chains:
+        if not isinstance(entry, dict):
+            raise ValueError("Each connected chain alias entry must be an object.")
+
+        connected_chain = entry.get("connected_chain")
+        if not isinstance(connected_chain, str) or not connected_chain.strip():
+            raise ValueError(
+                "Each connected chain alias entry requires a non-empty 'connected_chain'."
+            )
+
+        normalized_entry: dict[str, Any] = {"connected_chain": connected_chain.strip().lower()}
+        for key in ("generic_aliases", "testnet_aliases", "mainnet_aliases"):
+            aliases = entry.get(key, [])
+            if not isinstance(aliases, list) or not all(
+                isinstance(alias, str) for alias in aliases
+            ):
+                raise ValueError(
+                    f"Connected chain '{connected_chain}' field '{key}' must be a list of strings."
+                )
+            normalized_entry[key] = frozenset(
+                _normalize_chain_alias_value(alias) for alias in aliases if alias.strip()
+            )
+        normalized_connected_chains.append(normalized_entry)
+
+    dexalot_chain = registry.get("dexalot_chain")
+    if not isinstance(dexalot_chain, dict):
+        raise ValueError("chain_aliases.json must contain a top-level 'dexalot_chain' object.")
+
+    canonical_name = dexalot_chain.get("canonical_name")
+    if not isinstance(canonical_name, str) or not canonical_name.strip():
+        raise ValueError("chain_aliases.json field 'dexalot_chain.canonical_name' is required.")
+
+    normalized_dexalot_chain: dict[str, Any] = {"canonical_name": canonical_name}
+    for key in ("generic_aliases", "testnet_aliases", "mainnet_aliases"):
+        aliases = dexalot_chain.get(key, [])
+        if not isinstance(aliases, list) or not all(isinstance(alias, str) for alias in aliases):
+            raise ValueError(f"Dexalot chain field '{key}' must be a list of strings.")
+        normalized_dexalot_chain[key] = frozenset(
+            _normalize_chain_alias_value(alias) for alias in aliases if alias.strip()
+        )
+
+    return {
+        "connected_chains": normalized_connected_chains,
+        "dexalot_chain": normalized_dexalot_chain,
+    }
 
 
 class DexalotBaseClient:
@@ -351,6 +435,279 @@ class DexalotBaseClient:
             f"account={account_info}"
             ")"
         )
+
+    @staticmethod
+    def _normalize_chain_alias(chain_reference: str | int) -> str:
+        """Normalize chain aliases by collapsing separators and case differences."""
+        return _normalize_chain_alias_value(chain_reference)
+
+    def _infer_chain_family(self, canonical_name: str, chain_id: int | None) -> str | None:
+        normalized = self._normalize_chain_alias(canonical_name)
+        if chain_id in {self.CHAIN_ID_AVAX_FUJI, self.CHAIN_ID_AVAX_MAINNET} or any(
+            token in normalized for token in ("avalanche", "avax", "fuji")
+        ):
+            return "avalanche"
+        if chain_id in {1, 11155111} or any(
+            token in normalized for token in ("ethereum", "eth", "sepolia")
+        ):
+            return "ethereum"
+        if chain_id in {42161, 421614} or any(token in normalized for token in ("arbitrum", "arb")):
+            return "arbitrum"
+        if chain_id in {56, 97} or any(
+            token in normalized for token in ("bsc", "binance", "bnb", "chapel")
+        ):
+            return "bsc"
+        if chain_id in {8453, 84532} or any(
+            token in normalized for token in ("base", "coinbase", "sepolia")
+        ):
+            return "base"
+        if chain_id == 10143 or "monad" in normalized:
+            return "monad"
+        return None
+
+    def _infer_chain_environment_kind(
+        self, canonical_name: str, chain_id: int | None
+    ) -> str | None:
+        normalized = self._normalize_chain_alias(canonical_name)
+        if chain_id in _TESTNET_CHAIN_IDS:
+            return "testnet"
+        if chain_id in _MAINNET_CHAIN_IDS:
+            return "mainnet"
+        if any(token in normalized for token in ("testnet", "fuji", "chapel", "sepolia")):
+            return "testnet"
+        if "mainnet" in normalized:
+            return "mainnet"
+        return None
+
+    def _get_resolvable_chains(self, include_dexalot_l1: bool = False) -> list[ResolvedChain]:
+        chains: list[ResolvedChain] = []
+        if include_dexalot_l1:
+            chains.append(
+                ResolvedChain(
+                    canonical_name="Dexalot L1",
+                    chain_id=self.subnet_chain_id,
+                    family=None,
+                    environment_kind=None,
+                    matched_alias="Dexalot L1",
+                )
+            )
+
+        for canonical_name, config in self.chain_config.items():
+            chain_id = config.get("chain_id")
+            chains.append(
+                ResolvedChain(
+                    canonical_name=canonical_name,
+                    chain_id=chain_id,
+                    family=self._infer_chain_family(canonical_name, chain_id),
+                    environment_kind=self._infer_chain_environment_kind(canonical_name, chain_id),
+                    matched_alias=canonical_name,
+                )
+            )
+        return chains
+
+    @staticmethod
+    def _describe_environment_kind(environment_kind: str | None) -> str:
+        if environment_kind == "testnet":
+            return "testnet"
+        if environment_kind == "mainnet":
+            return "mainnet"
+        return "current environment"
+
+    @staticmethod
+    def _chain_alias_groups() -> list[dict[str, Any]]:
+        return cast(list[dict[str, Any]], _load_chain_alias_registry()["connected_chains"])
+
+    @staticmethod
+    def _dexalot_chain_aliases() -> dict[str, Any]:
+        return cast(dict[str, Any], _load_chain_alias_registry()["dexalot_chain"])
+
+    @staticmethod
+    def _resolved_chain(chain: ResolvedChain, matched_alias: str | int) -> Result[ResolvedChain]:
+        return Result.ok(
+            ResolvedChain(
+                canonical_name=chain.canonical_name,
+                chain_id=chain.chain_id,
+                family=chain.family,
+                environment_kind=chain.environment_kind,
+                matched_alias=str(matched_alias),
+            )
+        )
+
+    def _resolve_special_chain(
+        self, normalized: str, chains: list[ResolvedChain], chain_reference: str | int
+    ) -> Result[ResolvedChain] | None:
+        dexalot_chain = self._dexalot_chain_aliases()
+        aliases = (
+            dexalot_chain["generic_aliases"]
+            | dexalot_chain["testnet_aliases"]
+            | dexalot_chain["mainnet_aliases"]
+        )
+        if normalized not in aliases:
+            return None
+        for chain in chains:
+            if chain.canonical_name == dexalot_chain["canonical_name"]:
+                return self._resolved_chain(chain, chain_reference)
+        return None
+
+    def _resolve_numeric_chain(
+        self, normalized: str, chains: list[ResolvedChain], chain_reference: str | int
+    ) -> Result[ResolvedChain] | None:
+        if not normalized.isdigit():
+            return None
+
+        for chain in chains:
+            if chain.chain_id is not None and str(chain.chain_id) == normalized:
+                return self._resolved_chain(chain, chain_reference)
+        return None
+
+    def _resolve_exact_chain(
+        self, normalized: str, chains: list[ResolvedChain], chain_reference: str | int
+    ) -> Result[ResolvedChain] | None:
+        exact_matches = [
+            chain
+            for chain in chains
+            if self._normalize_chain_alias(chain.canonical_name) == normalized
+        ]
+        if len(exact_matches) == 1:
+            return self._resolved_chain(exact_matches[0], chain_reference)
+        return None
+
+    def _match_alias_groups(self, normalized: str) -> list[tuple[str, str | None]]:
+        matched_groups: list[tuple[str, str | None]] = []
+        for family_entry in self._chain_alias_groups():
+            family = cast(str, family_entry["connected_chain"])
+            if normalized in family_entry["generic_aliases"]:
+                matched_groups.append((family, None))
+            if normalized in family_entry["testnet_aliases"]:
+                matched_groups.append((family, "testnet"))
+            if normalized in family_entry["mainnet_aliases"]:
+                matched_groups.append((family, "mainnet"))
+        return matched_groups
+
+    @staticmethod
+    def _dedupe_chains(chains: list[ResolvedChain]) -> list[ResolvedChain]:
+        return list({chain.canonical_name: chain for chain in chains}.values())
+
+    def _candidate_chains(
+        self, chains: list[ResolvedChain], matched_groups: list[tuple[str, str | None]]
+    ) -> list[ResolvedChain]:
+        candidates = [
+            chain
+            for chain in chains
+            for family, requested_environment in matched_groups
+            if chain.family == family
+            and (requested_environment is None or chain.environment_kind == requested_environment)
+        ]
+        return self._dedupe_chains(candidates)
+
+    def _prefer_active_chain(
+        self, candidates: list[ResolvedChain], chain_reference: str | int
+    ) -> Result[ResolvedChain] | None:
+        if len(candidates) == 1:
+            return self._resolved_chain(candidates[0], chain_reference)
+
+        if self.chain_id is None:
+            return None
+
+        for chain in candidates:
+            if chain.chain_id == self.chain_id:
+                return self._resolved_chain(chain, chain_reference)
+        return None
+
+    @staticmethod
+    def _available_chain_names(chains: list[ResolvedChain]) -> list[str]:
+        return sorted(chain.canonical_name for chain in chains)
+
+    def _unknown_chain_error(
+        self, chain_reference: str | int, chains: list[ResolvedChain]
+    ) -> Result[ResolvedChain]:
+        available = self._available_chain_names(chains)
+        return Result.fail(
+            f"Chain '{chain_reference}' is not recognized in the current Dexalot "
+            f"environment. Available chains: {available}"
+        )
+
+    def _mismatch_error(
+        self,
+        chain_reference: str | int,
+        chains: list[ResolvedChain],
+        matched_groups: list[tuple[str, str | None]],
+    ) -> Result[ResolvedChain] | None:
+        requested_families = {family for family, _ in matched_groups}
+        same_family = [chain for chain in chains if chain.family in requested_families]
+        explicit_environment = next(
+            (
+                environment_kind
+                for _, environment_kind in matched_groups
+                if environment_kind is not None
+            ),
+            None,
+        )
+        if not same_family or explicit_environment is None:
+            return None
+
+        connected = sorted(chain.canonical_name for chain in same_family)
+        connected_envs = sorted(
+            {
+                self._describe_environment_kind(chain.environment_kind)
+                for chain in same_family
+                if chain.environment_kind is not None
+            }
+        )
+        connected_env_text = ", ".join(connected_envs) or "current environment"
+        return Result.fail(
+            f"Chain '{chain_reference}' refers to {explicit_environment}, but this client is "
+            f"connected to {connected_env_text}. Try one of: {connected}"
+        )
+
+    def _ambiguous_chain_error(
+        self, chain_reference: str | int, chains: list[ResolvedChain]
+    ) -> Result[ResolvedChain]:
+        available = self._available_chain_names(chains)
+        return Result.fail(
+            f"Chain '{chain_reference}' is ambiguous in the current Dexalot environment. "
+            f"Available chains: {available}"
+        )
+
+    def resolve_chain_reference(
+        self, chain_reference: str | int, include_dexalot_l1: bool = False
+    ) -> Result[ResolvedChain]:
+        """Resolve a human-friendly chain alias to the canonical connected chain."""
+        normalized = self._normalize_chain_alias(chain_reference)
+        if not normalized:
+            return Result.fail("Chain reference must be a non-empty string or chain ID.")
+
+        chains = self._get_resolvable_chains(include_dexalot_l1=include_dexalot_l1)
+        if not chains:
+            return Result.fail("No connected chains are available for resolution.")
+
+        if include_dexalot_l1:
+            special_chain = self._resolve_special_chain(normalized, chains, chain_reference)
+            if special_chain is not None:
+                return special_chain
+
+        numeric_chain = self._resolve_numeric_chain(normalized, chains, chain_reference)
+        if numeric_chain is not None:
+            return numeric_chain
+
+        exact_chain = self._resolve_exact_chain(normalized, chains, chain_reference)
+        if exact_chain is not None:
+            return exact_chain
+
+        matched_groups = self._match_alias_groups(normalized)
+        if not matched_groups:
+            return self._unknown_chain_error(chain_reference, chains)
+
+        candidates = self._candidate_chains(chains, matched_groups)
+        preferred_chain = self._prefer_active_chain(candidates, chain_reference)
+        if preferred_chain is not None:
+            return preferred_chain
+
+        mismatch_error = self._mismatch_error(chain_reference, chains, matched_groups)
+        if mismatch_error is not None:
+            return mismatch_error
+
+        return self._ambiguous_chain_error(chain_reference, chains)
 
     def _parse_revert_reason(self, error_msg):
         """Parses the revert reason from an exception message and returns a descriptive error."""
