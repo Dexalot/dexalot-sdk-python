@@ -678,7 +678,7 @@ class TransferClient(DexalotBaseClient):
             return Result.fail(error_msg)
 
     @track_method("transfer")
-    async def add_gas(self, amount: float, wait_for_receipt: bool = True) -> Result[str]:
+    async def add_gas(self, amount: float, wait_for_receipt: bool = True) -> Result[dict]:
         """Withdraw ALOT from the Dexalot portfolio to the L1 wallet (add gas).
 
         Calls ``withdrawNative`` on the ``PortfolioSub`` contract, moving
@@ -711,13 +711,13 @@ class TransferClient(DexalotBaseClient):
                 contract.functions.withdrawNative(from_addr, amount_wei),
                 wait_for_receipt=wait_for_receipt,
             )
-            return Result.ok(f"Add Gas transaction sent: {tx_hash}")
+            return Result.ok({"tx_hash": tx_hash, "operation": "add_gas"})
         except Exception as e:
             error_msg = self._sanitize_error(e, "adding gas")
             return Result.fail(error_msg)
 
     @track_method("transfer")
-    async def remove_gas(self, amount: float, wait_for_receipt: bool = True) -> Result[str]:
+    async def remove_gas(self, amount: float, wait_for_receipt: bool = True) -> Result[dict]:
         """Deposit ALOT from the L1 wallet into the Dexalot portfolio (remove gas).
 
         Calls ``depositNative`` on the ``PortfolioSub`` contract, converting
@@ -750,7 +750,7 @@ class TransferClient(DexalotBaseClient):
                 value=amount_wei,
                 wait_for_receipt=wait_for_receipt,
             )
-            return Result.ok(f"Remove Gas transaction sent: {tx_hash}")
+            return Result.ok({"tx_hash": tx_hash, "operation": "remove_gas"})
         except Exception as e:
             error_msg = self._sanitize_error(e, "removing gas")
             return Result.fail(error_msg)
@@ -758,7 +758,7 @@ class TransferClient(DexalotBaseClient):
     @track_method("transfer")
     async def transfer_portfolio(
         self, token: str, amount: float, to_address: str, wait_for_receipt: bool = True
-    ) -> Result[str]:
+    ) -> Result[dict]:
         """Transfer a token from the current portfolio to another address's portfolio on Dexalot L1.
 
         Args:
@@ -778,7 +778,7 @@ class TransferClient(DexalotBaseClient):
         # Validate transfer parameters
         transfer_params_result = validate_transfer_params(token, amount, to_address)
         if not transfer_params_result.success:
-            return cast(Result[str], transfer_params_result)
+            return cast(Result[dict], transfer_params_result)
 
         token = self._normalize_user_token(token)
 
@@ -815,7 +815,7 @@ class TransferClient(DexalotBaseClient):
                 contract.functions.transferToken(to_address, symbol_bytes32, amount_wei),
                 wait_for_receipt=wait_for_receipt,
             )
-            return Result.ok(f"Transfer transaction sent: {tx_hash}")
+            return Result.ok({"tx_hash": tx_hash, "operation": "transfer_portfolio"})
 
         except Exception as e:
             error_msg = self._sanitize_error(e, "transferring portfolio asset")
@@ -976,7 +976,7 @@ class TransferClient(DexalotBaseClient):
         source_chain: str,
         use_layerzero: bool = False,
         wait_for_receipt: bool = True,
-    ) -> Result[str]:
+    ) -> Result[dict]:
         """Deposit a token from a connected chain into the Dexalot portfolio.
 
         For AVAX, calls ``depositNative``; for ERC20 tokens, approves the
@@ -1067,7 +1067,7 @@ class TransferClient(DexalotBaseClient):
                     wait_for_receipt=wait_for_receipt,
                 )
 
-            return Result.ok(f"Deposit transaction sent: {tx_hash}")
+            return Result.ok({"tx_hash": tx_hash, "operation": "deposit"})
 
         except Exception as e:
             error_msg = self._sanitize_error(e, "depositing")
@@ -1081,7 +1081,7 @@ class TransferClient(DexalotBaseClient):
         destination_chain: str,
         use_layerzero: bool = False,
         wait_for_receipt: bool = True,
-    ) -> Result[str]:
+    ) -> Result[dict]:
         """Withdraw a token from the Dexalot portfolio to a connected chain wallet.
 
         Calls the ``PortfolioSub`` contract's withdraw function on Dexalot L1.
@@ -1109,14 +1109,14 @@ class TransferClient(DexalotBaseClient):
         # Validate token symbol
         token_result = validate_token_symbol(token, "token")
         if not token_result.success:
-            return cast(Result[str], token_result)
+            return cast(Result[dict], token_result)
 
         token = self._normalize_user_token(token)
 
         # Validate amount
         amount_result = validate_positive_float(amount, "amount")
         if not amount_result.success:
-            return cast(Result[str], amount_result)
+            return cast(Result[dict], amount_result)
 
         # Validate destination_chain exists
         if not isinstance(destination_chain, str) or not destination_chain.strip():
@@ -1176,7 +1176,7 @@ class TransferClient(DexalotBaseClient):
                 subnet_token_info,
                 wait_for_receipt=wait_for_receipt,
             )
-            return Result.ok(f"Withdraw transaction sent: {tx_hash}")
+            return Result.ok({"tx_hash": tx_hash, "operation": "withdraw"})
 
         except Exception as e:
             error_msg = self._sanitize_error(e, "withdrawing")

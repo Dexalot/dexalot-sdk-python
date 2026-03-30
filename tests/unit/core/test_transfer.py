@@ -488,13 +488,15 @@ class TestTransferClient:
         )
         res = await client.add_gas(1.0)
         assert res.success
-        assert "Add Gas transaction sent" in res.data
+        assert res.data["tx_hash"] == "0x74785f68617368"
+        assert res.data["operation"] == "add_gas"
 
     async def test_remove_gas(self, client):
         client.portfolio_sub_contract.functions.depositNative.return_value.fn_name = "depositNative"
         res = await client.remove_gas(1.0)
         assert res.success
-        assert "Remove Gas transaction sent" in res.data
+        assert res.data["tx_hash"] == "0x74785f68617368"
+        assert res.data["operation"] == "remove_gas"
 
     async def test_transfer_portfolio(self, client):
         from dexalot_sdk.utils.result import Result
@@ -502,7 +504,8 @@ class TestTransferClient:
         client.get_portfolio_balance = AsyncMock(return_value=Result.ok({"available": 10.0}))
         res = await client.transfer_portfolio("USDC", 1.0, VALID_RECIPIENT)
         assert res.success
-        assert "Transfer transaction sent" in res.data
+        assert res.data["tx_hash"] == "0x74785f68617368"
+        assert res.data["operation"] == "transfer_portfolio"
         call_args = client.portfolio_sub_contract.functions.transferToken.call_args
         assert call_args[0][1] == Utils.to_bytes32("USDC")
         assert call_args[0][2] == 1000000
@@ -569,7 +572,8 @@ class TestTransferClient:
         )
         res = await client.deposit("USDC", 10.0, "Avalanche")
         assert res.success
-        assert "Deposit transaction sent" in res.data
+        assert res.data["tx_hash"] == "0x74785f68617368"
+        assert res.data["operation"] == "deposit"
 
         # Verify args
         call_args = client.portfolio_main_avax_contract.functions.depositToken.call_args
@@ -588,7 +592,8 @@ class TestTransferClient:
 
         res = await client.deposit("AVAX", 1.0, "Avalanche")
         assert res.success
-        assert "Deposit transaction sent" in res.data
+        assert res.data["tx_hash"] == "0x74785f68617368"
+        assert res.data["operation"] == "deposit"
 
         # Verify call
         client.portfolio_main_avax_contract.functions.depositNative.assert_called()
@@ -600,7 +605,8 @@ class TestTransferClient:
         client.w3_l1.eth.contract.return_value = mock_token
         res = await client.withdraw("USDC", 5.0, "Avalanche")
         assert res.success
-        assert "Withdraw transaction sent" in res.data
+        assert res.data["tx_hash"] == "0x74785f68617368"
+        assert res.data["operation"] == "withdraw"
 
         # Verify args
         call_args = client.portfolio_sub_contract.functions.withdrawToken.call_args
@@ -691,7 +697,8 @@ class TestTransferClient:
         )
         res = await client.deposit("USDC", 10.0, "Avalanche")
         assert res.success
-        assert "Deposit transaction sent" in res.data
+        assert res.data["tx_hash"] == "0x74785f68617368"
+        assert res.data["operation"] == "deposit"
         mock_token.functions.approve.assert_called()
 
     async def test_withdraw_allowance(self, client):
@@ -705,7 +712,8 @@ class TestTransferClient:
         client.w3_l1.eth.contract.return_value = mock_token
         res = await client.withdraw("USDC", 5.0, "Avalanche")
         assert res.success
-        assert "Withdraw transaction sent" in res.data
+        assert res.data["tx_hash"] == "0x74785f68617368"
+        assert res.data["operation"] == "withdraw"
         mock_token.functions.approve.assert_called()
 
     async def test_all_chain_wallet_balances_zero_address(self, client):
@@ -1239,7 +1247,8 @@ class TestTransferClient:
 
         res = await client.deposit("ONLY_SUBNET", 1, "Avalanche")
         assert res.success
-        assert "Deposit transaction sent" in res.data
+        assert res.data["operation"] == "deposit"
+        assert "tx_hash" in res.data
 
         client.token_data = {
             "USDC": {"Avalanche": {"chain_id": 43114, "evmdecimals": 6, "address": "0xUSDC"}}

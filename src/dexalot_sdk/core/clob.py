@@ -562,7 +562,7 @@ class CLOBClient(DexalotBaseClient):
     @track_method("clob")
     async def cancel_order(
         self, order_id: str | bytes, wait_for_receipt: bool = True
-    ) -> Result[str]:
+    ) -> Result[dict]:
         """Cancel a single open order by its Internal ID or Client Order ID.
 
         Resolves the provided order reference deterministically before executing
@@ -586,7 +586,7 @@ class CLOBClient(DexalotBaseClient):
         # Validate order_id format
         order_id_result = validate_order_id_format(order_id, "order_id")
         if not order_id_result.success:
-            return cast(Result[str], order_id_result)
+            return cast(Result[dict], order_id_result)
 
         contract = self.trade_pairs_contract
 
@@ -605,10 +605,8 @@ class CLOBClient(DexalotBaseClient):
                 function_call = contract.functions.cancelOrderByClientId(
                     resolved["client_order_id_bytes"]
                 )
-                result_label = "Client ID"
             else:
                 function_call = contract.functions.cancelOrder(resolved["internal_id_bytes"])
-                result_label = "Internal ID"
 
             tx_hash_hex, receipt = await self._send_trade_tx(
                 function_call,
@@ -621,14 +619,14 @@ class CLOBClient(DexalotBaseClient):
                 != 1
             ):
                 return Result.fail("Transaction reverted")
-            return Result.ok(f"Cancel transaction sent ({result_label}): {tx_hash_hex}")
+            return Result.ok({"tx_hash": tx_hash_hex, "operation": "cancel_order"})
 
         except Exception as e:
             error_msg = self._sanitize_error(e, "cancelling order")
             return Result.fail(error_msg)
 
     @track_method("clob")
-    async def cancel_all_orders(self) -> Result[str]:
+    async def cancel_all_orders(self) -> Result[dict]:
         """Cancel all open orders for the current account in a single transaction.
 
         Fetches open orders via ``get_open_orders()`` then delegates to
@@ -657,7 +655,7 @@ class CLOBClient(DexalotBaseClient):
         if not order_ids:
             return Result.fail("No valid order IDs found.")
 
-        return cast(Result[str], await self.cancel_list_orders(order_ids))
+        return cast(Result[dict], await self.cancel_list_orders(order_ids))
 
     def _get_auth_headers(self) -> dict[str, str]:
         """Generates authentication headers for signed endpoints.
@@ -1162,7 +1160,7 @@ class CLOBClient(DexalotBaseClient):
     @track_method("clob")
     async def cancel_list_orders(
         self, order_ids: list, wait_for_receipt: bool = True
-    ) -> Result[str]:
+    ) -> Result[dict]:
         """Cancel multiple orders by Internal ID in a single on-chain transaction.
 
         Args:
@@ -1197,7 +1195,7 @@ class CLOBClient(DexalotBaseClient):
                 != 1
             ):
                 return Result.fail("Transaction reverted")
-            return Result.ok(f"Cancel List transaction sent: {tx_hash_hex}")
+            return Result.ok({"tx_hash": tx_hash_hex, "operation": "cancel_list_orders"})
 
         except Exception as e:
             error_msg = self._sanitize_error(e, "cancelling list orders")
@@ -1210,7 +1208,7 @@ class CLOBClient(DexalotBaseClient):
         new_price: float,
         new_amount: float,
         wait_for_receipt: bool = True,
-    ) -> Result[str]:
+    ) -> Result[dict]:
         """Cancel an existing order and replace it atomically with new price and quantity.
 
         Uses the contract's ``cancelReplaceOrder`` function.  Fetches the
@@ -1272,7 +1270,7 @@ class CLOBClient(DexalotBaseClient):
                 != 1
             ):
                 return Result.fail("Transaction reverted")
-            return Result.ok(f"Replace Order transaction sent: {tx_hash_hex}")
+            return Result.ok({"tx_hash": tx_hash_hex, "operation": "replace_order"})
         except Exception as e:
             error_msg = self._sanitize_error(e, "replacing order")
             return Result.fail(error_msg)
@@ -1280,14 +1278,14 @@ class CLOBClient(DexalotBaseClient):
     @track_method("clob")
     async def cancel_order_by_client_id(
         self, client_order_id: str | bytes, wait_for_receipt: bool = True
-    ) -> Result[str]:
+    ) -> Result[dict]:
         """Cancel a single open order by its Client Order ID only."""
         if not self.account:
             return Result.fail("Private key not configured.")
 
         client_order_id_result = validate_order_id_format(client_order_id, "client_order_id")
         if not client_order_id_result.success:
-            return cast(Result[str], client_order_id_result)
+            return cast(Result[dict], client_order_id_result)
 
         contract = self.trade_pairs_contract
         if not contract:
@@ -1306,7 +1304,7 @@ class CLOBClient(DexalotBaseClient):
                 != 1
             ):
                 return Result.fail("Transaction reverted")
-            return Result.ok(f"Cancel transaction sent (Client ID): {tx_hash_hex}")
+            return Result.ok({"tx_hash": tx_hash_hex, "operation": "cancel_order_by_client_id"})
         except Exception as e:
             error_msg = self._sanitize_error(e, "cancelling order by client ID")
             return Result.fail(error_msg)
@@ -1314,7 +1312,7 @@ class CLOBClient(DexalotBaseClient):
     @track_method("clob")
     async def cancel_list_orders_by_client_id(
         self, client_order_ids: list, wait_for_receipt: bool = True
-    ) -> Result[str]:
+    ) -> Result[dict]:
         """Cancel multiple orders by Client Order ID in a single on-chain transaction.
 
         Args:
@@ -1349,7 +1347,9 @@ class CLOBClient(DexalotBaseClient):
                 != 1
             ):
                 return Result.fail("Transaction reverted")
-            return Result.ok(f"Cancel List By Client ID transaction sent: {tx_hash_hex}")
+            return Result.ok(
+                {"tx_hash": tx_hash_hex, "operation": "cancel_list_orders_by_client_id"}
+            )
 
         except Exception as e:
             error_msg = self._sanitize_error(e, "cancelling list orders by client ID")

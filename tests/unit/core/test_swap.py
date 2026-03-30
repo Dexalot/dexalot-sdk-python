@@ -365,7 +365,8 @@ class TestSwapClient:
 
         res = await client.execute_rfq_swap(quote)
         assert res.success
-        assert "Swap transaction confirmed" in res.data
+        assert res.data["tx_hash"] == "0xHash"
+        assert res.data["operation"] == "execute_rfq_swap"
 
         # Verify contract call
         # simpleSwap((tuple), signature)
@@ -443,7 +444,8 @@ class TestSwapClient:
 
         res = await client.execute_rfq_swap(quote)
         assert res.success
-        assert "Swap transaction confirmed" in res.data
+        assert res.data["tx_hash"] == "0xHash"
+        assert res.data["operation"] == "execute_rfq_swap"
 
         # Verify contract call uses transformed field names
         expected_tuple = (
@@ -660,7 +662,8 @@ class TestSwapClient:
 
         res = await client.execute_rfq_swap(quote)
         assert res.success
-        assert "Swap transaction confirmed" in res.data
+        assert res.data["tx_hash"] == "0xHash"
+        assert res.data["operation"] == "execute_rfq_swap"
 
     async def test_swap_errors(self, client):
         """Test swap client errors and edge cases."""
@@ -741,7 +744,8 @@ class TestSwapClient:
 
         result = await client.execute_rfq_swap(successful_quote)
         assert result.success
-        assert "Swap transaction confirmed" in result.data
+        assert result.data["tx_hash"] == "0xHash"
+        assert result.data["operation"] == "execute_rfq_swap"
 
         quote = {
             "success": True,
@@ -782,7 +786,8 @@ class TestSwapClient:
 
         res = await client.execute_rfq_swap(quote)
         assert res.success
-        assert "Swap transaction confirmed" in res.data
+        assert res.data["tx_hash"] == "0xHash"
+        assert res.data["operation"] == "execute_rfq_swap"
 
         from aiohttp import ClientError
 
@@ -900,7 +905,8 @@ class TestSwapClient:
 
         res = await client.execute_rfq_swap(quote)
         assert res.success
-        assert "Swap transaction confirmed" in res.data
+        assert res.data["tx_hash"] == "0xHash"
+        assert res.data["operation"] == "execute_rfq_swap"
 
         mock_contract.functions.simpleSwap.return_value.estimate_gas.assert_called_once()
 
@@ -1194,7 +1200,8 @@ class TestSwapClient:
 
         res = await client.execute_rfq_swap(quote, wait_for_receipt=False)
         assert res.success
-        assert "Swap transaction sent" in res.data
+        assert res.data["tx_hash"] == "0xHash"
+        assert res.data["operation"] == "execute_rfq_swap"
 
     async def test_estimate_swap_gas_no_account_raises(self, client):
         """_estimate_swap_gas raises ValueError when account is None."""

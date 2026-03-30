@@ -439,7 +439,7 @@ class SwapClient(DexalotBaseClient):
         return await self._get_swap_quote_base(from_token, to_token, amount, chain_id, firm=False)
 
     @track_method("swap")
-    async def execute_rfq_swap(self, quote: dict, wait_for_receipt: bool = True) -> Result[str]:
+    async def execute_rfq_swap(self, quote: dict, wait_for_receipt: bool = True) -> Result[dict]:
         """Execute a SimpleSwap using a firm quote from ``get_swap_firm_quote()``.
 
         Signs the quote with the current account's private key and submits the
@@ -547,9 +547,9 @@ class SwapClient(DexalotBaseClient):
                 )
                 if receipt_status != 1:
                     return Result.fail("Transaction reverted")
-                return Result.ok(f"Swap transaction confirmed: {w3.to_hex(tx_hash)}")
+                return Result.ok({"tx_hash": w3.to_hex(tx_hash), "operation": "execute_rfq_swap"})
 
-            return Result.ok(f"Swap transaction sent: {w3.to_hex(tx_hash)}")
+            return Result.ok({"tx_hash": w3.to_hex(tx_hash), "operation": "execute_rfq_swap"})
 
         except Exception as e:
             error_msg = self._sanitize_error(e, "executing swap")

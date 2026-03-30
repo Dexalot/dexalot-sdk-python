@@ -628,8 +628,8 @@ class TestCLOBClient:
             "0x1234567890123456789012345678901234567890123456789012345678901234"
         )
         assert res.success
-        assert "Cancel transaction sent" in res.data
-        assert "0xTxHash" in res.data
+        assert res.data["tx_hash"] == "0xTxHash"
+        assert res.data["operation"] == "cancel_order"
 
     async def test_replace_order(self, client):
         """Test replace_order."""
@@ -652,8 +652,8 @@ class TestCLOBClient:
 
         res = await client.replace_order("0x01", 10.0, 1.0)
         assert res.success
-        assert "Replace Order transaction sent" in res.data
-        assert "0xTxHash" in res.data
+        assert res.data["tx_hash"] == "0xTxHash"
+        assert res.data["operation"] == "replace_order"
 
         # Verify args to cancelReplaceOrder
         # Inspections should be on the contract function call itself
@@ -911,13 +911,12 @@ class TestCLOBClient:
 
         # Mock cancel_list_orders
         client.cancel_list_orders = AsyncMock(
-            return_value=Result.ok("Cancel List transaction sent: 0xTxHash")
+            return_value=Result.ok({"tx_hash": "0xTxHash", "operation": "cancel_list_orders"})
         )
 
         res = await client.cancel_all_orders()
         assert res.success
-        assert "Cancel List transaction sent" in res.data
-        assert "0xTxHash" in res.data
+        assert res.data["tx_hash"] == "0xTxHash"
 
         # Verify args
         client.cancel_list_orders.assert_called_once_with(
@@ -1017,7 +1016,8 @@ class TestCLOBClient:
         client._send_trade_tx = AsyncMock(return_value=("0xTxHash", mock_receipt))
         res = await client.cancel_list_orders(["0x01", "0x02"])
         assert res.success
-        assert "Cancel List transaction sent" in res.data
+        assert res.data["tx_hash"] == "0xTxHash"
+        assert res.data["operation"] == "cancel_list_orders"
 
     async def test_cancel_list_orders_by_client_id(self, client):
         """Test cancel_list_orders_by_client_id."""
@@ -1027,8 +1027,8 @@ class TestCLOBClient:
 
         res = await client.cancel_list_orders_by_client_id(["C1", "C2"])
         assert res.success
-        assert "Cancel List By Client ID transaction sent" in res.data
-        assert "0xTxHash" in res.data
+        assert res.data["tx_hash"] == "0xTxHash"
+        assert res.data["operation"] == "cancel_list_orders_by_client_id"
 
         # Verify args
         client.trade_pairs_contract.functions.cancelOrderListByClientIds.assert_called_once()
@@ -1910,7 +1910,7 @@ class TestCLOBClient:
         client._send_trade_tx.return_value = ("0xTxHash", MagicMock(status=1))
         res = await client.cancel_order(VALID_ORDER_ID)  # Not likely internal
         assert res.success
-        assert "Cancel transaction sent" in res.data
+        assert res.data["operation"] == "cancel_order"
         client._send_trade_tx.side_effect = None
 
         mock_resp = AsyncMock()
@@ -2409,7 +2409,7 @@ class TestCLOBClient:
         )
         res = await client.cancel_order(internal_id)
         assert res.success
-        assert "Cancel transaction sent (Internal ID)" in res.data
+        assert res.data["operation"] == "cancel_order"
 
         client._send_trade_tx.side_effect = Exception("Internal Fail")
 
@@ -2429,7 +2429,7 @@ class TestCLOBClient:
 
         res = await client.cancel_order(client_id)
         assert res.success
-        assert "Cancel transaction sent (Client ID)" in res.data
+        assert res.data["operation"] == "cancel_order"
         client._send_trade_tx.side_effect = None
 
     async def test_clob_critical_coverage(self, client):
@@ -2442,7 +2442,7 @@ class TestCLOBClient:
         res = await client.cancel_order(VALID_ORDER_ID)
         assert res.success
         # The order ID format determines which path is taken (Internal vs Client ID)
-        assert "Cancel transaction sent" in res.data
+        assert res.data["operation"] == "cancel_order"
 
         client.w3_l1.eth.chain_id = AsyncMock(return_value=43114)
         client.w3_l1.eth.get_transaction_count = AsyncMock(return_value=1)
@@ -3036,7 +3036,8 @@ class TestCLOBClient:
         client._send_trade_tx = AsyncMock(return_value=("0xbeef", None))
         result = await client.cancel_order_by_client_id("client-id", wait_for_receipt=False)
         assert result.success
-        assert result.data == "Cancel transaction sent (Client ID): 0xbeef"
+        assert result.data["tx_hash"] == "0xbeef"
+        assert result.data["operation"] == "cancel_order_by_client_id"
 
         result = client._get_order_id_bytes("ab" * 32)
         assert result == bytes.fromhex("ab" * 32)
