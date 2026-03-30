@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "dexalot-sdk"
-version = "0.4.0"
+version = "0.5.0"
 description = "Dexalot Python SDK - Core library for Dexalot interaction"
 readme = "README.md"
 requires-python = ">=3.12,<3.14"
@@ -25,6 +25,7 @@ dev = [
     "pytest-cov",
     "ruff",
 ]
+
 docs = [
     "mkdocstrings[python]>=0.29",
     "zensical>=0.0.29",
