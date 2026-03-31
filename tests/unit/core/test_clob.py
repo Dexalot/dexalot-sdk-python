@@ -846,7 +846,7 @@ class TestCLOBClient:
         assert res2.data[0]["internal_order_id"] == "0x1"
 
     async def test_get_open_orders_field_transformation(self, client):
-        """Test get_open_orders transforms API field names to camelCase."""
+        """Test get_open_orders transforms raw API fields to canonical SDK shape."""
         # Mock API response with lowercase field names (as API returns)
         mock_orders = [
             {
@@ -877,17 +877,22 @@ class TestCLOBClient:
         assert res.success
         assert len(res.data) == 1
 
-        # Verify transformation: lowercase fields should be mapped to SDK convention
         order = res.data[0]
-        assert order["internal_order_id"] == "0x123"  # Transformed from id
-        assert order["client_order_id"] == "0xabc"  # Transformed from clientordid
-        assert order["tradePairId"] == "0xdef"  # Transformed from tradepairid
-        assert order["filledQuantity"] == 0.5  # Transformed from filledquantity
-        assert order["totalAmount"] == 150  # Transformed from totalamount
-        assert order["totalFee"] == 0.1  # Transformed from totalfee
-        # Original fields should still be present
-        assert "clientordid" in order
-        assert "tradepairid" in order
+        assert order["internal_order_id"] == "0x123"
+        assert order["client_order_id"] == "0xabc"
+        assert order["pair"] == "AVAX/USDC"
+        assert order["side"] == "BUY"
+        assert order["type"] == "LIMIT"
+        assert order["price"] == 100.0
+        assert order["quantity"] == 1.5
+        assert order["filledQuantity"] == 0.5
+        assert order["status"] == 0
+        # Raw API fields are stripped — only canonical fields remain
+        assert "id" not in order
+        assert "clientordid" not in order
+        assert "tradepairid" not in order
+        assert "totalamount" not in order
+        assert "tx" not in order
 
     async def test_get_open_orders_exception(self, client):
         """Test get_open_orders exception handling (lines 361-363)."""
@@ -931,15 +936,19 @@ class TestCLOBClient:
         assert res.data == []
 
     async def test_get_open_orders_prefers_camelcase_over_lowercase(self, client):
-        """Test that transformation prefers existing camelCase fields over lowercase."""
+        """Test that transformation prefers camelCase over lowercase API variants."""
         # Order with both camelCase and lowercase versions
         mock_orders = [
             {
                 "id": "0x123",
                 "clientOrderId": "0xcamel",  # camelCase exists
                 "clientordid": "0xlower",  # lowercase also exists
-                "tradePairId": "0xdef",
-                "tradepairid": "0xlowerdef",
+                "pair": "AVAX/USDC",
+                "side": 0,
+                "type": 1,
+                "price": "10",
+                "quantity": "1",
+                "status": 0,
             }
         ]
 
@@ -954,75 +963,77 @@ class TestCLOBClient:
         res = await client.get_open_orders()
         assert res.success
         order = res.data[0]
-        # clientOrderId should be promoted to client_order_id; lowercase is ignored
+        # camelCase clientOrderId wins over lowercase clientordid
         assert order["client_order_id"] == "0xcamel"
-        assert order["tradePairId"] == "0xdef"
 
     async def test_transform_order_from_api_snake_case(self, client):
-        """Test _transform_order_from_api handles snake_case field names."""
+        """Test _transform_order_from_api resolves snake_case field names."""
         order = {
-            "id": "0x123",  # API uses "id", SDK maps to "internal_order_id"
+            "id": "0x123",
             "client_order_id": "0xabc",
-            "trade_pair_id": "0xdef",
             "filled_quantity": 0.5,
-            "total_amount": 150,
-            "total_fee": 0.1,
-            "tx_hash": "0xtx",
-        }
-        transformed = client._transform_order_from_api(order)
-
-        assert transformed["internal_order_id"] == "0x123"  # from "id"
-        assert transformed["client_order_id"] == "0xabc"
-        assert transformed["tradePairId"] == "0xdef"
-        assert transformed["filledQuantity"] == 0.5
-        assert transformed["totalAmount"] == 150
-        assert transformed["totalFee"] == 0.1
-        assert transformed["txHash"] == "0xtx"
-
-    async def test_transform_order_from_api_all_variations(self, client):
-        """Test _transform_order_from_api handles all field name variations."""
-        # Test lowercase variations
-        order_lower = {
-            "id": "0x1",
-            "clientordid": "0xabc",
-            "tradepairid": "0xdef",
-            "filledquantity": 0.5,
-            "totalamount": 150,
-            "totalfee": 0.1,
-            "txhash": "0xtx",
-        }
-        transformed = client._transform_order_from_api(order_lower)
-        assert transformed["internal_order_id"] == "0x1"  # from "id"
-        assert transformed["client_order_id"] == "0xabc"  # from "clientordid"
-        assert transformed["tradePairId"] == "0xdef"
-        assert transformed["filledQuantity"] == 0.5
-        assert transformed["totalAmount"] == 150
-        assert transformed["totalFee"] == 0.1
-        assert transformed["txHash"] == "0xtx"
-
-    async def test_transform_order_from_api_no_transformation_needed(self, client):
-        """Test _transform_order_from_api when fields are already in SDK convention."""
-        order = {
-            "internal_order_id": "0x123",
-            "client_order_id": "0xabc",
-            "tradePairId": "0xdef",
-            "filledQuantity": 0.5,
-            "totalAmount": 150,
-            "totalFee": 0.1,
-            "txHash": "0xtx",
+            "pair": "AVAX/USDC",
+            "side": "BUY",
+            "type": "LIMIT",
+            "price": 12.0,
+            "quantity": 0.8,
+            "status": 0,
         }
         transformed = client._transform_order_from_api(order)
 
         assert transformed["internal_order_id"] == "0x123"
         assert transformed["client_order_id"] == "0xabc"
-        assert transformed["tradePairId"] == "0xdef"
+        assert transformed["pair"] == "AVAX/USDC"
         assert transformed["filledQuantity"] == 0.5
-        assert transformed["totalAmount"] == 150
-        assert transformed["totalFee"] == 0.1
-        assert transformed["txHash"] == "0xtx"
+        assert transformed["side"] == "BUY"
+        assert transformed["type"] == "LIMIT"
+        # Raw API fields are not preserved
+        assert "id" not in transformed
+
+    async def test_transform_order_from_api_all_variations(self, client):
+        """Test _transform_order_from_api resolves all raw API field name variations."""
+        order_lower = {
+            "id": "0x1",
+            "clientordid": "0xabc",
+            "filledquantity": 0.5,
+            "pair": "ETH/USDC",
+            "side": 0,
+            "type": 1,
+            "price": "100",
+            "quantity": "1.5",
+            "status": 0,
+        }
+        transformed = client._transform_order_from_api(order_lower)
+        assert transformed["internal_order_id"] == "0x1"
+        assert transformed["client_order_id"] == "0xabc"
+        assert transformed["filledQuantity"] == 0.5
+        assert transformed["side"] == "BUY"
+        assert transformed["type"] == "LIMIT"
+        assert transformed["price"] == 100.0
+        assert transformed["quantity"] == 1.5
+        # Raw API fields are not preserved
+        assert "id" not in transformed
+        assert "clientordid" not in transformed
+
+    async def test_transform_order_from_api_no_transformation_needed(self, client):
+        """Test _transform_order_from_api passes through canonical fields unchanged."""
+        order = {
+            "internal_order_id": "0x123",
+            "client_order_id": "0xabc",
+            "pair": "AVAX/USDC",
+            "side": "BUY",
+            "type": "LIMIT",
+            "price": 12.0,
+            "quantity": 0.8,
+            "filledQuantity": 0.5,
+            "status": 0,
+        }
+        transformed = client._transform_order_from_api(order)
+
+        assert transformed == order
 
     async def test_transform_order_from_api_missing_optional_fields(self, client):
-        """Test _transform_order_from_api handles missing optional fields."""
+        """Test _transform_order_from_api sets missing optional fields to None."""
         order = {
             "id": "0x123",
             "price": 100,
@@ -1033,11 +1044,52 @@ class TestCLOBClient:
         }
         transformed = client._transform_order_from_api(order)
 
-        assert transformed["internal_order_id"] == "0x123"  # from "id"
-        assert transformed["price"] == 100
-        # Optional fields not present should not be added
-        assert "client_order_id" not in transformed
-        assert "filledQuantity" not in transformed
+        assert transformed["internal_order_id"] == "0x123"
+        assert transformed["price"] == 100.0
+        assert transformed["side"] == "BUY"
+        assert transformed["type"] == "LIMIT"
+        assert transformed["client_order_id"] is None
+        assert transformed["filledQuantity"] is None
+        assert transformed["pair"] is None
+
+    async def test_transform_order_from_api_normalizes_side_and_type(self, client):
+        """Test int-to-string normalization for side and type enums."""
+        buy_limit = client._transform_order_from_api({"side": 0, "type": 1})
+        assert buy_limit["side"] == "BUY"
+        assert buy_limit["type"] == "LIMIT"
+
+        sell_market = client._transform_order_from_api({"side": 1, "type": 0})
+        assert sell_market["side"] == "SELL"
+        assert sell_market["type"] == "MARKET"
+
+        # String values pass through unchanged
+        already_str = client._transform_order_from_api({"side": "BUY", "type": "LIMIT"})
+        assert already_str["side"] == "BUY"
+        assert already_str["type"] == "LIMIT"
+
+    async def test_transform_order_from_api_coerces_string_numbers(self, client):
+        """Test that numeric strings from the REST API are coerced to float."""
+        order = {
+            "id": "0x1",
+            "price": "12",
+            "quantity": "0.8",
+            "filledquantity": "0.3",
+        }
+        transformed = client._transform_order_from_api(order)
+
+        assert transformed["price"] == 12.0
+        assert transformed["quantity"] == 0.8
+        assert transformed["filledQuantity"] == 0.3
+        assert isinstance(transformed["price"], float)
+        assert isinstance(transformed["quantity"], float)
+        assert isinstance(transformed["filledQuantity"], float)
+
+    async def test_transform_order_from_api_unconvertible_number(self, client):
+        """Test that unconvertible numeric values become None."""
+        order = {"price": "not-a-number", "quantity": {}}
+        transformed = client._transform_order_from_api(order)
+        assert transformed["price"] is None
+        assert transformed["quantity"] is None
 
     async def test_cancel_all_orders(self, client):
         """Test cancel_all_orders."""

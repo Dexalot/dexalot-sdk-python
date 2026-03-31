@@ -703,55 +703,70 @@ class CLOBClient(DexalotBaseClient):
 
     @track_method("clob")
     def _transform_order_from_api(self, order: dict) -> dict:
-        """Transform API order response to the SDK naming convention.
+        """Transform API order response to match :meth:`_format_order_data` output.
 
-        Maps various API field names to the canonical SDK field names used by
-        _format_order_data() for contract responses.
+        Extracts only canonical SDK fields, normalizing field names, side/type
+        enums, and numeric string values.  Raw API fields (``id``,
+        ``clientordid``, ``tx``, ``traderaddress``, etc.) are dropped so that
+        consumers see exactly two clearly-labelled identifiers
+        (``internal_order_id`` and ``client_order_id``).
 
         Args:
-            order: Raw order dict from API response
+            order: Raw order dict from API response.
 
         Returns:
-            Transformed order dict with standardized field names
+            Clean order dict with only canonical fields.
         """
-        transformed = dict(order)  # Start with all original fields
+        # Resolve internal order ID from any API variation
+        internal_order_id = order.get("internal_order_id") or order.get("id")
 
-        # Normalize internal order ID: API field "id" → "internal_order_id"
-        if "id" in order and "internal_order_id" not in order:
-            transformed["internal_order_id"] = order["id"]
+        # Resolve client order ID from any API variation (prefer camelCase)
+        client_order_id = (
+            order.get("client_order_id") or order.get("clientOrderId") or order.get("clientordid")
+        )
 
-        # Normalize client order ID variations → "client_order_id"
-        if "clientordid" in order and "client_order_id" not in order:
-            transformed["client_order_id"] = order["clientordid"]
-        if "clientOrderId" in order and "client_order_id" not in order:
-            transformed["client_order_id"] = order["clientOrderId"]
+        # Normalize side: API returns int (0=BUY, 1=SELL)
+        side_raw = order.get("side")
+        if isinstance(side_raw, int):
+            side: Any = "BUY" if side_raw == 0 else "SELL"
+        else:
+            side = side_raw
 
-        if "tradepairid" in order and "tradePairId" not in order:
-            transformed["tradePairId"] = order["tradepairid"]
-        if "trade_pair_id" in order and "tradePairId" not in order:
-            transformed["tradePairId"] = order["trade_pair_id"]
+        # Normalize type: API returns int (0=MARKET, 1=LIMIT)
+        type_raw = order.get("type")
+        if isinstance(type_raw, int):
+            order_type: Any = "MARKET" if type_raw == 0 else "LIMIT"
+        else:
+            order_type = type_raw
 
-        if "filledquantity" in order and "filledQuantity" not in order:
-            transformed["filledQuantity"] = order["filledquantity"]
-        if "filled_quantity" in order and "filledQuantity" not in order:
-            transformed["filledQuantity"] = order["filled_quantity"]
+        # Coerce numeric strings to float
+        def _to_num(val: object) -> float | None:
+            if val is None:
+                return None
+            try:
+                return float(val)  # type: ignore[arg-type]
+            except (ValueError, TypeError):
+                return None
 
-        if "totalamount" in order and "totalAmount" not in order:
-            transformed["totalAmount"] = order["totalamount"]
-        if "total_amount" in order and "totalAmount" not in order:
-            transformed["totalAmount"] = order["total_amount"]
+        # Resolve filledQuantity from any API variation
+        filled_qty = (
+            order.get("filledQuantity")
+            or order.get("quantityfilled")
+            or order.get("filledquantity")
+            or order.get("filled_quantity")
+        )
 
-        if "totalfee" in order and "totalFee" not in order:
-            transformed["totalFee"] = order["totalfee"]
-        if "total_fee" in order and "totalFee" not in order:
-            transformed["totalFee"] = order["total_fee"]
-
-        if "txhash" in order and "txHash" not in order:
-            transformed["txHash"] = order["txhash"]
-        if "tx_hash" in order and "txHash" not in order:
-            transformed["txHash"] = order["tx_hash"]
-
-        return transformed
+        return {
+            "internal_order_id": internal_order_id,
+            "client_order_id": client_order_id,
+            "pair": order.get("pair"),
+            "side": side,
+            "type": order_type,
+            "price": _to_num(order.get("price")),
+            "quantity": _to_num(order.get("quantity")),
+            "filledQuantity": _to_num(filled_qty),
+            "status": order.get("status"),
+        }
 
     async def get_open_orders(self, pair: str | None = None) -> Result[list]:
         """Fetch open orders for the current account from the REST API.
