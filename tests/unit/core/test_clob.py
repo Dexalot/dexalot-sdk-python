@@ -617,6 +617,151 @@ class TestCLOBClient:
         assert not result.success
         assert "required for LIMIT orders" in result.error
 
+    async def test_add_order_caller_provided_client_order_id(self, client):
+        """Caller-provided client_order_id is used verbatim; invalid hex is rejected."""
+        client.pairs = {
+            "AVAX/USDC": {
+                "pair": "AVAX/USDC",
+                "base": "AVAX",
+                "quote": "USDC",
+                "base_decimals": 18,
+                "quote_decimals": 6,
+                "tradePairId": b"TPID",
+            }
+        }
+        from dexalot_sdk.utils.result import Result
+
+        client.get_portfolio_balance = AsyncMock(return_value=Result.ok({"available": 1000.0}))
+        mock_receipt = MagicMock()
+        mock_receipt.status = 1
+        client._send_trade_tx = AsyncMock(return_value=("0xTxHash", mock_receipt))
+
+        provided_id = "0x" + "cc" * 32
+        res = await client.add_order("AVAX/USDC", "BUY", 1.0, 10.0, client_order_id=provided_id)
+        assert res.success
+        assert res.data["client_order_id"] == provided_id
+
+        # Invalid hex prefix with non-hex chars is rejected before the transaction
+        bad_res = await client.add_order(
+            "AVAX/USDC", "BUY", 1.0, 10.0, client_order_id="0x" + "z" * 64
+        )
+        assert not bad_res.success
+
+    async def test_add_limit_order_list_caller_provided_client_order_id(self, client):
+        """Per-order caller-provided client_order_id is used; invalid hex is rejected."""
+        client.pairs = {
+            "AVAX/USDC": {
+                "pair": "AVAX/USDC",
+                "base": "AVAX",
+                "quote": "USDC",
+                "base_decimals": 18,
+                "quote_decimals": 6,
+                "tradePairId": b"TPID",
+            }
+        }
+        mock_receipt = MagicMock()
+        mock_receipt.status = 1
+        client._send_trade_tx = AsyncMock(return_value=("0xTxHash", mock_receipt))
+        client.get_portfolio_balance = AsyncMock(return_value={"available": 100.0})
+
+        provided_id = "0x" + "dd" * 32
+        orders = [
+            {
+                "pair": "AVAX/USDC",
+                "side": "BUY",
+                "amount": 1.0,
+                "price": 10.0,
+                "client_order_id": provided_id,
+            }
+        ]
+        res = await client.add_limit_order_list(orders)
+        assert res.success
+        assert res.data["client_order_ids"][0] == provided_id
+
+        # Invalid hex per-order is rejected
+        bad_orders = [
+            {
+                "pair": "AVAX/USDC",
+                "side": "BUY",
+                "amount": 1.0,
+                "price": 10.0,
+                "client_order_id": "0x" + "z" * 64,
+            }
+        ]
+        bad_res = await client.add_limit_order_list(bad_orders)
+        assert not bad_res.success
+
+    async def test_replace_order_caller_provided_client_order_id(self, client):
+        """Caller-provided client_order_id is used for the replacement order."""
+        client.pairs = {
+            "AVAX/USDC": {
+                "pair": "AVAX/USDC",
+                "base": "AVAX",
+                "quote": "USDC",
+                "base_decimals": 18,
+                "quote_decimals": 6,
+                "tradePairId": b"TPID",
+            }
+        }
+        self._stub_resolved_order(client, pair="AVAX/USDC", trade_pair_id=b"TPID")
+        mock_receipt = MagicMock()
+        mock_receipt.status = 1
+        client._send_trade_tx = AsyncMock(return_value=("0xTxHash", mock_receipt))
+
+        provided_id = "0x" + "ee" * 32
+        res = await client.replace_order("0x01", 10.0, 1.0, client_order_id=provided_id)
+        assert res.success
+        assert res.data["client_order_id"] == provided_id
+
+        # Invalid hex is rejected
+        bad_res = await client.replace_order("0x01", 10.0, 1.0, client_order_id="0x" + "z" * 64)
+        assert not bad_res.success
+
+    async def test_cancel_add_list_caller_provided_client_order_id(self, client):
+        """Per-replacement caller-provided client_order_id is used."""
+        client.pairs = {
+            "AVAX/USDC": {
+                "pair": "AVAX/USDC",
+                "base_decimals": 18,
+                "quote_decimals": 6,
+                "tradePairId": b"TPID",
+                "quote": "USDC",
+                "base": "AVAX",
+            }
+        }
+        self._stub_resolved_order(client, pair="AVAX/USDC", trade_pair_id=b"TPID")
+        client._ensure_pair_exists = AsyncMock(return_value=True)
+        client._send_trade_tx = AsyncMock(return_value=("0xTxHash", MagicMock(status=1)))
+
+        provided_id = "0x" + "ff" * 32
+        replacements = [
+            {
+                "order_id": "0x01",
+                "amount": 1.0,
+                "price": 11.0,
+                "pair": "AVAX/USDC",
+                "side": "BUY",
+                "client_order_id": provided_id,
+            }
+        ]
+        res = await client.cancel_add_list(replacements)
+        assert res.success
+        assert res.data["client_order_ids"][0] == provided_id
+
+        # Invalid hex is rejected
+        bad_replacements = [
+            {
+                "order_id": "0x01",
+                "amount": 1.0,
+                "price": 11.0,
+                "pair": "AVAX/USDC",
+                "side": "BUY",
+                "client_order_id": "0x" + "z" * 64,
+            }
+        ]
+        bad_res = await client.cancel_add_list(bad_replacements)
+        assert not bad_res.success
+
     async def test_cancel_order(self, client):
         """Test cancel_order."""
         self._stub_resolved_order(client, id_type="internal")
@@ -629,7 +774,10 @@ class TestCLOBClient:
         )
         assert res.success
         assert res.data["tx_hash"] == "0xTxHash"
-        assert res.data["operation"] == "cancel_order"
+        assert "cancelled_client_order_id" in res.data
+        assert "cancelled_internal_order_id" in res.data
+        assert res.data["cancelled_client_order_id"].startswith("0x")
+        assert res.data["cancelled_internal_order_id"].startswith("0x")
 
     async def test_replace_order(self, client):
         """Test replace_order."""
@@ -653,8 +801,9 @@ class TestCLOBClient:
         res = await client.replace_order("0x01", 10.0, 1.0)
         assert res.success
         assert res.data["tx_hash"] == "0xTxHash"
-        assert "client_order_id" in res.data
         assert res.data["client_order_id"].startswith("0x")
+        assert res.data["cancelled_client_order_id"].startswith("0x")
+        assert res.data["cancelled_internal_order_id"].startswith("0x")
 
         # Verify args to cancelReplaceOrder
         # Inspections should be on the contract function call itself
@@ -678,7 +827,8 @@ class TestCLOBClient:
 
         res = await client.get_open_orders()
         assert res.success
-        assert res.data == mock_orders
+        assert res.data[0]["internal_order_id"] == "0x1"
+        assert res.data[1]["internal_order_id"] == "0x2"
 
         # Verify signature header logic
         args, kwargs = client._mock_session.get.call_args
@@ -693,7 +843,7 @@ class TestCLOBClient:
 
         res2 = await client.get_open_orders()
         assert res2.success
-        assert res2.data == [{"id": "0x1"}]
+        assert res2.data[0]["internal_order_id"] == "0x1"
 
     async def test_get_open_orders_field_transformation(self, client):
         """Test get_open_orders transforms API field names to camelCase."""
@@ -727,10 +877,10 @@ class TestCLOBClient:
         assert res.success
         assert len(res.data) == 1
 
-        # Verify transformation: lowercase fields should be mapped to camelCase
+        # Verify transformation: lowercase fields should be mapped to SDK convention
         order = res.data[0]
-        assert order["id"] == "0x123"
-        assert order["clientOrderId"] == "0xabc"  # Transformed from clientordid
+        assert order["internal_order_id"] == "0x123"  # Transformed from id
+        assert order["client_order_id"] == "0xabc"  # Transformed from clientordid
         assert order["tradePairId"] == "0xdef"  # Transformed from tradepairid
         assert order["filledQuantity"] == 0.5  # Transformed from filledquantity
         assert order["totalAmount"] == 150  # Transformed from totalamount
@@ -763,8 +913,8 @@ class TestCLOBClient:
         res = await client.get_open_orders()
         assert res.success
         assert len(res.data) == 1
-        assert res.data[0]["id"] == "0x1"
-        assert res.data[0]["clientOrderId"] == "0xabc"
+        assert res.data[0]["internal_order_id"] == "0x1"
+        assert res.data[0]["client_order_id"] == "0xabc"
 
     async def test_get_open_orders_empty_response(self, client):
         """Test get_open_orders handles empty response."""
@@ -804,14 +954,14 @@ class TestCLOBClient:
         res = await client.get_open_orders()
         assert res.success
         order = res.data[0]
-        # Should use existing camelCase, not transform from lowercase
-        assert order["clientOrderId"] == "0xcamel"
+        # clientOrderId should be promoted to client_order_id; lowercase is ignored
+        assert order["client_order_id"] == "0xcamel"
         assert order["tradePairId"] == "0xdef"
 
     async def test_transform_order_from_api_snake_case(self, client):
         """Test _transform_order_from_api handles snake_case field names."""
         order = {
-            "id": "0x123",
+            "id": "0x123",  # API uses "id", SDK maps to "internal_order_id"
             "client_order_id": "0xabc",
             "trade_pair_id": "0xdef",
             "filled_quantity": 0.5,
@@ -821,14 +971,13 @@ class TestCLOBClient:
         }
         transformed = client._transform_order_from_api(order)
 
-        assert transformed["clientOrderId"] == "0xabc"
+        assert transformed["internal_order_id"] == "0x123"  # from "id"
+        assert transformed["client_order_id"] == "0xabc"
         assert transformed["tradePairId"] == "0xdef"
         assert transformed["filledQuantity"] == 0.5
         assert transformed["totalAmount"] == 150
         assert transformed["totalFee"] == 0.1
         assert transformed["txHash"] == "0xtx"
-        # Original fields should still be present
-        assert "client_order_id" in transformed
 
     async def test_transform_order_from_api_all_variations(self, client):
         """Test _transform_order_from_api handles all field name variations."""
@@ -843,7 +992,8 @@ class TestCLOBClient:
             "txhash": "0xtx",
         }
         transformed = client._transform_order_from_api(order_lower)
-        assert transformed["clientOrderId"] == "0xabc"
+        assert transformed["internal_order_id"] == "0x1"  # from "id"
+        assert transformed["client_order_id"] == "0xabc"  # from "clientordid"
         assert transformed["tradePairId"] == "0xdef"
         assert transformed["filledQuantity"] == 0.5
         assert transformed["totalAmount"] == 150
@@ -851,10 +1001,10 @@ class TestCLOBClient:
         assert transformed["txHash"] == "0xtx"
 
     async def test_transform_order_from_api_no_transformation_needed(self, client):
-        """Test _transform_order_from_api when fields are already camelCase."""
+        """Test _transform_order_from_api when fields are already in SDK convention."""
         order = {
-            "id": "0x123",
-            "clientOrderId": "0xabc",
+            "internal_order_id": "0x123",
+            "client_order_id": "0xabc",
             "tradePairId": "0xdef",
             "filledQuantity": 0.5,
             "totalAmount": 150,
@@ -863,8 +1013,8 @@ class TestCLOBClient:
         }
         transformed = client._transform_order_from_api(order)
 
-        # Should remain unchanged
-        assert transformed["clientOrderId"] == "0xabc"
+        assert transformed["internal_order_id"] == "0x123"
+        assert transformed["client_order_id"] == "0xabc"
         assert transformed["tradePairId"] == "0xdef"
         assert transformed["filledQuantity"] == 0.5
         assert transformed["totalAmount"] == 150
@@ -883,11 +1033,10 @@ class TestCLOBClient:
         }
         transformed = client._transform_order_from_api(order)
 
-        # Should not error, just return order as-is
-        assert transformed["id"] == "0x123"
+        assert transformed["internal_order_id"] == "0x123"  # from "id"
         assert transformed["price"] == 100
         # Optional fields not present should not be added
-        assert "clientOrderId" not in transformed
+        assert "client_order_id" not in transformed
         assert "filledQuantity" not in transformed
 
     async def test_cancel_all_orders(self, client):
@@ -899,11 +1048,11 @@ class TestCLOBClient:
             return_value=Result.ok(
                 [
                     {
-                        "id": "0x0000000000000000000000000000000000000000000000000000000000000001",
+                        "internal_order_id": "0x0000000000000000000000000000000000000000000000000000000000000001",
                         "client_order_id": "C1",
                     },
                     {
-                        "id": "0x0000000000000000000000000000000000000000000000000000000000000002",
+                        "internal_order_id": "0x0000000000000000000000000000000000000000000000000000000000000002",
                         "client_order_id": "C2",
                     },
                 ]
@@ -912,7 +1061,15 @@ class TestCLOBClient:
 
         # Mock cancel_list_orders
         client.cancel_list_orders = AsyncMock(
-            return_value=Result.ok({"tx_hash": "0xTxHash", "operation": "cancel_list_orders"})
+            return_value=Result.ok(
+                {
+                    "tx_hash": "0xTxHash",
+                    "cancelled_internal_order_ids": [
+                        "0x0000000000000000000000000000000000000000000000000000000000000001",
+                        "0x0000000000000000000000000000000000000000000000000000000000000002",
+                    ],
+                }
+            )
         )
 
         res = await client.cancel_all_orders()
@@ -1000,9 +1157,12 @@ class TestCLOBClient:
         res = await client.cancel_add_list(replacements)
         assert res.success
         assert res.data["tx_hash"] == "0xTxHash"
-        assert "client_order_ids" in res.data
         assert len(res.data["client_order_ids"]) == 1
         assert res.data["client_order_ids"][0].startswith("0x")
+        assert len(res.data["cancelled_client_order_ids"]) == 1
+        assert res.data["cancelled_client_order_ids"][0].startswith("0x")
+        assert len(res.data["cancelled_internal_order_ids"]) == 1
+        assert res.data["cancelled_internal_order_ids"][0].startswith("0x")
 
         # Verify args
         client.trade_pairs_contract.functions.cancelAddList.assert_called_once()
@@ -1020,7 +1180,7 @@ class TestCLOBClient:
         res = await client.cancel_list_orders(["0x01", "0x02"])
         assert res.success
         assert res.data["tx_hash"] == "0xTxHash"
-        assert res.data["operation"] == "cancel_list_orders"
+        assert "cancelled_internal_order_ids" in res.data
 
     async def test_cancel_list_orders_by_client_id(self, client):
         """Test cancel_list_orders_by_client_id."""
@@ -1031,7 +1191,7 @@ class TestCLOBClient:
         res = await client.cancel_list_orders_by_client_id(["C1", "C2"])
         assert res.success
         assert res.data["tx_hash"] == "0xTxHash"
-        assert res.data["operation"] == "cancel_list_orders_by_client_id"
+        assert "cancelled_client_order_ids" in res.data
 
         # Verify args
         client.trade_pairs_contract.functions.cancelOrderListByClientIds.assert_called_once()
@@ -1208,9 +1368,10 @@ class TestCLOBClient:
         res = await client.cancel_add_list(replacements, wait_for_receipt=False)
         assert res.success
         assert res.data["tx_hash"] == "0xTxHash"
-        assert "client_order_ids" in res.data
         assert len(res.data["client_order_ids"]) == 1
         assert res.data["client_order_ids"][0].startswith("0x")
+        assert len(res.data["cancelled_client_order_ids"]) == 1
+        assert len(res.data["cancelled_internal_order_ids"]) == 1
 
     async def test_get_order_by_client_id(self, client):
         """Test get_order_by_client_id."""
@@ -1916,7 +2077,8 @@ class TestCLOBClient:
         client._send_trade_tx.return_value = ("0xTxHash", MagicMock(status=1))
         res = await client.cancel_order(VALID_ORDER_ID)  # Not likely internal
         assert res.success
-        assert res.data["operation"] == "cancel_order"
+        assert "cancelled_client_order_id" in res.data
+        assert "cancelled_internal_order_id" in res.data
         client._send_trade_tx.side_effect = None
 
         mock_resp = AsyncMock()
@@ -2415,7 +2577,8 @@ class TestCLOBClient:
         )
         res = await client.cancel_order(internal_id)
         assert res.success
-        assert res.data["operation"] == "cancel_order"
+        assert res.data["cancelled_client_order_id"] == "0x" + "aa" * 32
+        assert res.data["cancelled_internal_order_id"] == internal_id
 
         client._send_trade_tx.side_effect = Exception("Internal Fail")
 
@@ -2435,7 +2598,8 @@ class TestCLOBClient:
 
         res = await client.cancel_order(client_id)
         assert res.success
-        assert res.data["operation"] == "cancel_order"
+        assert res.data["cancelled_client_order_id"] == client_id
+        assert res.data["cancelled_internal_order_id"] == "0x" + "01".rjust(64, "0")
         client._send_trade_tx.side_effect = None
 
     async def test_clob_critical_coverage(self, client):
@@ -2447,8 +2611,8 @@ class TestCLOBClient:
 
         res = await client.cancel_order(VALID_ORDER_ID)
         assert res.success
-        # The order ID format determines which path is taken (Internal vs Client ID)
-        assert res.data["operation"] == "cancel_order"
+        assert "cancelled_client_order_id" in res.data
+        assert "cancelled_internal_order_id" in res.data
 
         client.w3_l1.eth.chain_id = AsyncMock(return_value=43114)
         client.w3_l1.eth.get_transaction_count = AsyncMock(return_value=1)
@@ -3043,7 +3207,7 @@ class TestCLOBClient:
         result = await client.cancel_order_by_client_id("client-id", wait_for_receipt=False)
         assert result.success
         assert result.data["tx_hash"] == "0xbeef"
-        assert result.data["operation"] == "cancel_order_by_client_id"
+        assert "cancelled_client_order_id" in result.data
 
         result = client._get_order_id_bytes("ab" * 32)
         assert result == bytes.fromhex("ab" * 32)
