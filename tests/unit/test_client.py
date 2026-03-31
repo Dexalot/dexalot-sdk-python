@@ -1,7 +1,7 @@
 import os
 from unittest.mock import patch
 
-from dexalot_sdk import DexalotClient
+from dexalot_sdk import DexalotClient, get_version
 
 
 def test_dexalot_client_initialization():
@@ -38,6 +38,13 @@ def test_get_revert_reason():
             error_msg = Exception("execution reverted: Some Reason")
             reason = client.get_revert_reason(error_msg)
             assert "Some Reason" in reason
+
+
+def test_get_version():
+    """get_version returns the package version string."""
+    version = get_version()
+    assert isinstance(version, str)
+    assert len(version) > 0
 
 
 def test_configure_logging():
