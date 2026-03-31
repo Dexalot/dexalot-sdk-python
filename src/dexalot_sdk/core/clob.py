@@ -1223,8 +1223,10 @@ class CLOBClient(DexalotBaseClient):
                 confirmed on-chain.
 
         Returns:
-            Result containing a confirmation message with the transaction hash on
-            success, or an error message on failure.
+            Result containing ``{"tx_hash": str, "client_order_id": str}`` on
+            success, where ``client_order_id`` is the new order's identifier
+            (required for subsequent cancel or replace operations), or an error
+            message on failure.
         """
         if not self.account:
             return Result.fail("Private key not configured.")
@@ -1270,7 +1272,9 @@ class CLOBClient(DexalotBaseClient):
                 != 1
             ):
                 return Result.fail("Transaction reverted")
-            return Result.ok({"tx_hash": tx_hash_hex, "operation": "replace_order"})
+            return Result.ok(
+                {"tx_hash": tx_hash_hex, "client_order_id": "0x" + new_client_order_id.hex()}
+            )
         except Exception as e:
             error_msg = self._sanitize_error(e, "replacing order")
             return Result.fail(error_msg)
@@ -1397,8 +1401,10 @@ class CLOBClient(DexalotBaseClient):
                 confirmed on-chain.
 
         Returns:
-            Result containing ``{"tx_hash": str}`` on success, or an error
-            message on failure.
+            Result containing ``{"tx_hash": str, "client_order_ids": list[str]}`` on
+            success, where ``client_order_ids`` are the new orders' identifiers in
+            the same order as the input replacements (required for subsequent cancel
+            or replace operations), or an error message on failure.
         """
         if not self.account:
             return Result.fail("Private key not configured.")
@@ -1412,6 +1418,7 @@ class CLOBClient(DexalotBaseClient):
         try:
             order_ids = []
             new_orders = []
+            new_client_order_ids: list[str] = []
 
             import secrets
 
@@ -1470,6 +1477,7 @@ class CLOBClient(DexalotBaseClient):
                 price_wei = int(price * (10 ** pair_data["quote_decimals"]))
                 qty_wei = int(amount * (10 ** pair_data["base_decimals"]))
                 client_order_id = secrets.token_bytes(32)
+                new_client_order_ids.append("0x" + client_order_id.hex())
 
                 # Struct: (clientOrderId, tradePairId, price, quantity, traderaddress, side, type1, type2, stp)
                 new_orders.append(
@@ -1502,11 +1510,13 @@ class CLOBClient(DexalotBaseClient):
                     else 1
                 )
                 if receipt_status == 1:
-                    return Result.ok({"tx_hash": tx_hash_hex})
+                    return Result.ok(
+                        {"tx_hash": tx_hash_hex, "client_order_ids": new_client_order_ids}
+                    )
                 # Transaction reverted - _send_trade_tx should have raised, but handle just in case
                 return Result.fail("Transaction reverted")
 
-            return Result.ok({"tx_hash": tx_hash_hex})
+            return Result.ok({"tx_hash": tx_hash_hex, "client_order_ids": new_client_order_ids})
 
         except Exception as e:
             error_msg = self._sanitize_error(e, "cancel/add list")

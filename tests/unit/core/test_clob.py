@@ -653,7 +653,8 @@ class TestCLOBClient:
         res = await client.replace_order("0x01", 10.0, 1.0)
         assert res.success
         assert res.data["tx_hash"] == "0xTxHash"
-        assert res.data["operation"] == "replace_order"
+        assert "client_order_id" in res.data
+        assert res.data["client_order_id"].startswith("0x")
 
         # Verify args to cancelReplaceOrder
         # Inspections should be on the contract function call itself
@@ -998,8 +999,10 @@ class TestCLOBClient:
 
         res = await client.cancel_add_list(replacements)
         assert res.success
-        assert "tx_hash" in res.data
         assert res.data["tx_hash"] == "0xTxHash"
+        assert "client_order_ids" in res.data
+        assert len(res.data["client_order_ids"]) == 1
+        assert res.data["client_order_ids"][0].startswith("0x")
 
         # Verify args
         client.trade_pairs_contract.functions.cancelAddList.assert_called_once()
@@ -1204,7 +1207,10 @@ class TestCLOBClient:
         ]
         res = await client.cancel_add_list(replacements, wait_for_receipt=False)
         assert res.success
-        assert "0xTxHash" in res.data["tx_hash"]
+        assert res.data["tx_hash"] == "0xTxHash"
+        assert "client_order_ids" in res.data
+        assert len(res.data["client_order_ids"]) == 1
+        assert res.data["client_order_ids"][0].startswith("0x")
 
     async def test_get_order_by_client_id(self, client):
         """Test get_order_by_client_id."""
