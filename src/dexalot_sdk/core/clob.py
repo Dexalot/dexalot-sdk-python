@@ -281,6 +281,7 @@ class CLOBClient(DexalotBaseClient):
         price,
         order_type: str = "LIMIT",
         wait_for_receipt: bool = True,
+        client_order_id: str | None = None,
     ) -> Result[dict]:
         """Place a single limit or market order on the CLOB.
 
@@ -296,6 +297,9 @@ class CLOBClient(DexalotBaseClient):
             order_type: ``"LIMIT"`` (default) or ``"MARKET"``.
             wait_for_receipt: If ``True``, block until the transaction is
                 confirmed on-chain and return the receipt status.
+            client_order_id: Optional 32-byte hex string (``"0x"`` + 64 hex
+                chars) to use as the client order identifier.  When omitted,
+                a random ID is generated.
 
         Returns:
             Result containing ``{"status": str, "tx_hash": str, "client_order_id": str}``
@@ -348,15 +352,21 @@ class CLOBClient(DexalotBaseClient):
             price_wei = int(price * (10 ** pair_data["quote_decimals"])) if price else 0
             qty_wei = int(amount * (10 ** pair_data["base_decimals"]))
 
-            # Generate random Client Order ID
+            # Use caller-provided client_order_id or generate a random one
             import secrets
 
-            client_order_id = secrets.token_bytes(32)
+            if client_order_id is not None:
+                cid_result = validate_order_id_format(client_order_id, "client_order_id")
+                if not cid_result.success:
+                    return cast(Result[dict[Any, Any]], cid_result)
+                client_order_id_bytes = self._get_order_id_bytes(client_order_id)
+            else:
+                client_order_id_bytes = secrets.token_bytes(32)
 
             # Struct: (clientOrderId, tradePairId, price, quantity, traderaddress, side, type1, type2, stp)
             # Using dictionary for safety
             order_struct = {
-                "clientOrderId": client_order_id,
+                "clientOrderId": client_order_id_bytes,
                 "tradePairId": pair_data["tradePairId"],
                 "price": price_wei,
                 "quantity": qty_wei,
@@ -385,7 +395,7 @@ class CLOBClient(DexalotBaseClient):
                         {
                             "status": "Order Sent",
                             "tx_hash": tx_hash_hex,
-                            "client_order_id": w3.to_hex(client_order_id),
+                            "client_order_id": "0x" + client_order_id_bytes.hex(),
                         }
                     )
                 # Transaction reverted - _send_trade_tx should have raised, but handle just in case
@@ -395,7 +405,7 @@ class CLOBClient(DexalotBaseClient):
                 {
                     "status": "Order Sent",
                     "tx_hash": tx_hash_hex,
-                    "client_order_id": w3.to_hex(client_order_id),
+                    "client_order_id": "0x" + client_order_id_bytes.hex(),
                 }
             )
 
@@ -619,7 +629,13 @@ class CLOBClient(DexalotBaseClient):
                 != 1
             ):
                 return Result.fail("Transaction reverted")
-            return Result.ok({"tx_hash": tx_hash_hex, "operation": "cancel_order"})
+            return Result.ok(
+                {
+                    "tx_hash": tx_hash_hex,
+                    "cancelled_client_order_id": "0x" + resolved["client_order_id_bytes"].hex(),
+                    "cancelled_internal_order_id": "0x" + resolved["internal_id_bytes"].hex(),
+                }
+            )
 
         except Exception as e:
             error_msg = self._sanitize_error(e, "cancelling order")
@@ -645,12 +661,11 @@ class CLOBClient(DexalotBaseClient):
         if not open_orders:
             return Result.fail("No open orders to cancel.")
 
-        # Extract order IDs (internal IDs are needed for cancelListOrders)
-        # API returns 'id' which is usually the internal ID.
+        # Extract internal order IDs (needed for cancelListOrders)
         order_ids = []
         for order in open_orders:
-            if "id" in order:
-                order_ids.append(order["id"])
+            if "internal_order_id" in order:
+                order_ids.append(order["internal_order_id"])
 
         if not order_ids:
             return Result.fail("No valid order IDs found.")
@@ -688,10 +703,10 @@ class CLOBClient(DexalotBaseClient):
 
     @track_method("clob")
     def _transform_order_from_api(self, order: dict) -> dict:
-        """Transform API order response to match _format_order_data() convention.
+        """Transform API order response to the SDK naming convention.
 
-        Maps lowercase/snake_case API fields to camelCase SDK fields to match
-        the format used by _format_order_data() for contract responses.
+        Maps various API field names to the canonical SDK field names used by
+        _format_order_data() for contract responses.
 
         Args:
             order: Raw order dict from API response
@@ -701,11 +716,15 @@ class CLOBClient(DexalotBaseClient):
         """
         transformed = dict(order)  # Start with all original fields
 
-        # Map confirmed and potential field name mismatches
-        if "clientordid" in order and "clientOrderId" not in order:
-            transformed["clientOrderId"] = order["clientordid"]
-        if "client_order_id" in order and "clientOrderId" not in order:
-            transformed["clientOrderId"] = order["client_order_id"]
+        # Normalize internal order ID: API field "id" → "internal_order_id"
+        if "id" in order and "internal_order_id" not in order:
+            transformed["internal_order_id"] = order["id"]
+
+        # Normalize client order ID variations → "client_order_id"
+        if "clientordid" in order and "client_order_id" not in order:
+            transformed["client_order_id"] = order["clientordid"]
+        if "clientOrderId" in order and "client_order_id" not in order:
+            transformed["client_order_id"] = order["clientOrderId"]
 
         if "tradepairid" in order and "tradePairId" not in order:
             transformed["tradePairId"] = order["tradepairid"]
@@ -743,9 +762,10 @@ class CLOBClient(DexalotBaseClient):
 
         Returns:
             Result containing a list of order dicts on success, or an error
-            message on failure.  Each dict includes fields such as ``id``,
-            ``clientOrderId``, ``tradePairId``, ``price``, ``quantity``,
-            ``filledQuantity``, ``side``, and ``status``.
+            message on failure.  Each dict includes fields such as
+            ``internal_order_id``, ``client_order_id``, ``tradePairId``,
+            ``price``, ``quantity``, ``filledQuantity``, ``side``, and
+            ``status``.
         """
         if not self.account:
             return Result.fail("Private key not configured.")
@@ -804,10 +824,10 @@ class CLOBClient(DexalotBaseClient):
                 string, or ``bytes32``.
 
         Returns:
-            Result containing an order dict with ``id``, ``clientOrderId``,
-            ``tradePairId``, ``price``, ``quantity``, ``filledQuantity``,
-            ``side``, ``type``, ``status``, and ``pair`` on success, or an
-            error message on failure.
+            Result containing an order dict with ``internal_order_id``,
+            ``client_order_id``, ``tradePairId``, ``price``, ``quantity``,
+            ``filledQuantity``, ``side``, ``type``, ``status``, and ``pair``
+            on success, or an error message on failure.
         """
         if not self.account:
             return Result.fail("Private key not configured.")
@@ -914,8 +934,8 @@ class CLOBClient(DexalotBaseClient):
         if not w3_l1:
             return Result.fail("L1 provider not available.")
         result = {
-            "id": w3_l1.to_hex(order_data[0]),
-            "clientOrderId": w3_l1.to_hex(order_data[1]),
+            "internal_order_id": w3_l1.to_hex(order_data[0]),
+            "client_order_id": w3_l1.to_hex(order_data[1]),
             "tradePairId": w3_l1.to_hex(trade_pair_id),
             "price": order_data[3],
             "quantity": order_data[5],
@@ -996,7 +1016,9 @@ class CLOBClient(DexalotBaseClient):
             amount = round(amount, pair_data["base_display_decimals"])
         return price, amount
 
-    def _build_order_tuple(self, order, pair_data, side_enum, w3):
+    def _build_order_tuple(
+        self, order, pair_data, side_enum, w3, client_order_id_bytes: bytes | None = None
+    ):
         """Build order tuple for contract call."""
         import secrets
 
@@ -1004,14 +1026,15 @@ class CLOBClient(DexalotBaseClient):
 
         price_wei = int(price * (10 ** pair_data["quote_decimals"]))
         qty_wei = int(amount * (10 ** pair_data["base_decimals"]))
-        client_order_id = secrets.token_bytes(32)
-        client_order_id_hex = w3.to_hex(client_order_id)
+        if client_order_id_bytes is None:
+            client_order_id_bytes = secrets.token_bytes(32)
+        client_order_id_hex = "0x" + client_order_id_bytes.hex()
 
         # Struct: (clientOrderId, tradePairId, price, quantity, traderaddress, side, type1, type2, stp)
         assert self.account is not None
         trader = cast(str, cast(Any, self.account).address)
         order_tuple = (
-            client_order_id,
+            client_order_id_bytes,
             pair_data["tradePairId"],
             price_wei,
             qty_wei,
@@ -1080,8 +1103,16 @@ class CLOBClient(DexalotBaseClient):
 
             required_balances[req_token] = required_balances.get(req_token, 0) + req_amt
 
+            # Use caller-provided client_order_id or let _build_order_tuple generate one
+            cid_bytes: bytes | None = None
+            if raw_cid := order.get("client_order_id"):
+                cid_result = validate_order_id_format(raw_cid, "client_order_id")
+                if not cid_result.success:
+                    return None, None, None, cid_result.error or "Invalid client_order_id"
+                cid_bytes = self._get_order_id_bytes(raw_cid)
+
             order_tuple, client_order_id_hex = self._build_order_tuple(
-                order, pair_data, side_enum, w3
+                order, pair_data, side_enum, w3, client_order_id_bytes=cid_bytes
             )
             order_tuples.append(order_tuple)
             client_order_ids.append(client_order_id_hex)
@@ -1195,7 +1226,12 @@ class CLOBClient(DexalotBaseClient):
                 != 1
             ):
                 return Result.fail("Transaction reverted")
-            return Result.ok({"tx_hash": tx_hash_hex, "operation": "cancel_list_orders"})
+            return Result.ok(
+                {
+                    "tx_hash": tx_hash_hex,
+                    "cancelled_internal_order_ids": list(order_ids),
+                }
+            )
 
         except Exception as e:
             error_msg = self._sanitize_error(e, "cancelling list orders")
@@ -1208,6 +1244,7 @@ class CLOBClient(DexalotBaseClient):
         new_price: float,
         new_amount: float,
         wait_for_receipt: bool = True,
+        client_order_id: str | None = None,
     ) -> Result[dict]:
         """Cancel an existing order and replace it atomically with new price and quantity.
 
@@ -1216,17 +1253,19 @@ class CLOBClient(DexalotBaseClient):
 
         Args:
             order_id: Identifier of the order to replace (hex string, plain
-                string, or ``bytes32``).
+                string, or ``bytes32``).  Accepts either internal or client
+                order ID.
             new_price: New limit price in quote-token units.
             new_amount: New quantity in base-token units.
             wait_for_receipt: If ``True``, block until the transaction is
                 confirmed on-chain.
+            client_order_id: Optional 32-byte hex string for the replacement
+                order.  When omitted, a random ID is generated.
 
         Returns:
-            Result containing ``{"tx_hash": str, "client_order_id": str}`` on
-            success, where ``client_order_id`` is the new order's identifier
-            (required for subsequent cancel or replace operations), or an error
-            message on failure.
+            Result containing ``{"tx_hash": str, "cancelled_client_order_id": str,
+            "cancelled_internal_order_id": str, "client_order_id": str}`` on
+            success, or an error message on failure.
         """
         if not self.account:
             return Result.fail("Private key not configured.")
@@ -1257,11 +1296,17 @@ class CLOBClient(DexalotBaseClient):
 
             import secrets
 
-            new_client_order_id = secrets.token_bytes(32)
+            if client_order_id is not None:
+                cid_result = validate_order_id_format(client_order_id, "client_order_id")
+                if not cid_result.success:
+                    return cast(Result[dict], cid_result)
+                new_client_order_id_bytes = self._get_order_id_bytes(client_order_id)
+            else:
+                new_client_order_id_bytes = secrets.token_bytes(32)
 
             tx_hash_hex, receipt = await self._send_trade_tx(
                 contract.functions.cancelReplaceOrder(
-                    order_id_bytes, new_client_order_id, price_wei, qty_wei
+                    order_id_bytes, new_client_order_id_bytes, price_wei, qty_wei
                 ),
                 wait_for_receipt=wait_for_receipt,
             )
@@ -1273,7 +1318,12 @@ class CLOBClient(DexalotBaseClient):
             ):
                 return Result.fail("Transaction reverted")
             return Result.ok(
-                {"tx_hash": tx_hash_hex, "client_order_id": "0x" + new_client_order_id.hex()}
+                {
+                    "tx_hash": tx_hash_hex,
+                    "cancelled_client_order_id": "0x" + resolved["client_order_id_bytes"].hex(),
+                    "cancelled_internal_order_id": "0x" + resolved["internal_id_bytes"].hex(),
+                    "client_order_id": "0x" + new_client_order_id_bytes.hex(),
+                }
             )
         except Exception as e:
             error_msg = self._sanitize_error(e, "replacing order")
@@ -1308,7 +1358,12 @@ class CLOBClient(DexalotBaseClient):
                 != 1
             ):
                 return Result.fail("Transaction reverted")
-            return Result.ok({"tx_hash": tx_hash_hex, "operation": "cancel_order_by_client_id"})
+            return Result.ok(
+                {
+                    "tx_hash": tx_hash_hex,
+                    "cancelled_client_order_id": "0x" + client_order_id_bytes.hex(),
+                }
+            )
         except Exception as e:
             error_msg = self._sanitize_error(e, "cancelling order by client ID")
             return Result.fail(error_msg)
@@ -1352,7 +1407,10 @@ class CLOBClient(DexalotBaseClient):
             ):
                 return Result.fail("Transaction reverted")
             return Result.ok(
-                {"tx_hash": tx_hash_hex, "operation": "cancel_list_orders_by_client_id"}
+                {
+                    "tx_hash": tx_hash_hex,
+                    "cancelled_client_order_ids": list(client_order_ids),
+                }
             )
 
         except Exception as e:
@@ -1382,6 +1440,77 @@ class CLOBClient(DexalotBaseClient):
             )
         return Result.ok(inferred_pair)
 
+    async def _process_replacement(
+        self, rep: dict, from_addr: str, required_balances: dict[str, float]
+    ) -> Result[dict]:
+        """Resolve and build a single replacement entry for cancel_add_list."""
+        import secrets
+
+        resolved_result = await self._resolve_order_reference(rep["order_id"], allow_int=True)
+        if not resolved_result.success:
+            return Result.fail(
+                f"Could not resolve order '{rep['order_id']}' for cancel/add: {resolved_result.error}"
+            )
+        resolved = resolved_result.data
+        assert resolved is not None
+
+        existing_order = await self._format_order_data(resolved["order_data"])
+        pair_res = self._resolve_cancel_add_pair_from_replacement(
+            rep.get("pair"), existing_order.get("pair"), rep["order_id"]
+        )
+        if not pair_res.success:
+            return Result.fail(pair_res.error or "")
+        pair = pair_res.data
+        assert pair is not None
+        if not await self._ensure_pair_exists(pair):
+            return Result.fail(f"Pair {pair} not found.")
+
+        pair_data = self.pairs[pair]
+        side_clean = rep["side"].strip().upper()
+        if side_clean == "BUY":
+            side_enum, req_token, req_amt = 0, pair_data["quote"], rep["price"] * rep["amount"]
+        elif side_clean == "SELL":
+            side_enum, req_token, req_amt = 1, pair_data["base"], rep["amount"]
+        else:
+            return Result.fail(f"Invalid side '{rep['side']}'. Must be 'BUY' or 'SELL'.")
+
+        required_balances[req_token] = required_balances.get(req_token, 0) + req_amt
+
+        price, amount = rep["price"], rep["amount"]
+        if "quote_display_decimals" in pair_data and price:
+            price = round(price, pair_data["quote_display_decimals"])
+        if "base_display_decimals" in pair_data:
+            amount = round(amount, pair_data["base_display_decimals"])
+
+        if raw_cid := rep.get("client_order_id"):
+            cid_result = validate_order_id_format(raw_cid, "client_order_id")
+            if not cid_result.success:
+                return Result.fail(cid_result.error or "Invalid client_order_id")
+            client_order_id = self._get_order_id_bytes(raw_cid)
+        else:
+            client_order_id = secrets.token_bytes(32)
+
+        new_order_tuple = (
+            client_order_id,
+            pair_data["tradePairId"],
+            int(price * (10 ** pair_data["quote_decimals"])),
+            int(amount * (10 ** pair_data["base_decimals"])),
+            from_addr,
+            side_enum,
+            1,  # LIMIT
+            0,  # GTC
+            0,  # STP
+        )
+        return Result.ok(
+            {
+                "internal_id_bytes": resolved["internal_id_bytes"],
+                "cancelled_client_order_id": "0x" + resolved["client_order_id_bytes"].hex(),
+                "cancelled_internal_order_id": "0x" + resolved["internal_id_bytes"].hex(),
+                "new_client_order_id": "0x" + client_order_id.hex(),
+                "new_order_tuple": new_order_tuple,
+            }
+        )
+
     @track_method("clob")
     async def cancel_add_list(
         self, replacements: list[dict], wait_for_receipt: bool = True
@@ -1397,14 +1526,17 @@ class CLOBClient(DexalotBaseClient):
                 - ``side`` (str): ``"BUY"`` or ``"SELL"``.
                 - ``amount`` (float): New quantity in base-token units.
                 - ``price`` (float): New limit price in quote-token units.
+                - ``client_order_id`` (str, optional): 32-byte hex string for
+                  the new replacement order.  When omitted, a random ID is
+                  generated.
             wait_for_receipt: If ``True``, block until the transaction is
                 confirmed on-chain.
 
         Returns:
-            Result containing ``{"tx_hash": str, "client_order_ids": list[str]}`` on
-            success, where ``client_order_ids`` are the new orders' identifiers in
-            the same order as the input replacements (required for subsequent cancel
-            or replace operations), or an error message on failure.
+            Result containing ``{"tx_hash": str, "cancelled_client_order_ids":
+            list[str], "cancelled_internal_order_ids": list[str],
+            "client_order_ids": list[str]}`` on success, or an error message
+            on failure.
         """
         if not self.account:
             return Result.fail("Private key not configured.")
@@ -1419,80 +1551,21 @@ class CLOBClient(DexalotBaseClient):
             order_ids = []
             new_orders = []
             new_client_order_ids: list[str] = []
-
-            import secrets
-
-            # Balance Check Aggregation
-            required_balances: dict[str, float] = {}  # token -> amount
+            cancelled_client_order_ids: list[str] = []
+            cancelled_internal_order_ids: list[str] = []
+            required_balances: dict[str, float] = {}
 
             for rep in replacements:
-                resolved_result = await self._resolve_order_reference(
-                    rep["order_id"], allow_int=True
-                )
-                if not resolved_result.success:
-                    return Result.fail(
-                        f"Could not resolve order '{rep['order_id']}' for cancel/add: {resolved_result.error}"
-                    )
-                resolved = resolved_result.data
-                assert resolved is not None
-                order_ids.append(resolved["internal_id_bytes"])
-
-                existing_order = await self._format_order_data(resolved["order_data"])
-                inferred_pair = existing_order.get("pair")
-                pair_res = self._resolve_cancel_add_pair_from_replacement(
-                    rep.get("pair"), inferred_pair, rep["order_id"]
-                )
-                if not pair_res.success:
-                    return Result.fail(pair_res.error or "")
-                pair = pair_res.data
-                assert pair is not None
-                if not await self._ensure_pair_exists(pair):
-                    return Result.fail(f"Pair {pair} not found.")
-
-                pair_data = self.pairs[pair]
-
-                side_clean = rep["side"].strip().upper()
-                if side_clean == "BUY":
-                    side_enum = 0
-                    req_token = pair_data["quote"]
-                    req_amt = rep["price"] * rep["amount"]
-                elif side_clean == "SELL":
-                    side_enum = 1
-                    req_token = pair_data["base"]
-                    req_amt = rep["amount"]
-                else:
-                    return Result.fail(f"Invalid side '{rep['side']}'. Must be 'BUY' or 'SELL'.")
-
-                required_balances[req_token] = required_balances.get(req_token, 0) + req_amt
-
-                price = rep["price"]
-                amount = rep["amount"]
-
-                # Rounding to display decimals
-                if "quote_display_decimals" in pair_data and price:
-                    price = round(price, pair_data["quote_display_decimals"])
-                if "base_display_decimals" in pair_data:
-                    amount = round(amount, pair_data["base_display_decimals"])
-
-                price_wei = int(price * (10 ** pair_data["quote_decimals"]))
-                qty_wei = int(amount * (10 ** pair_data["base_decimals"]))
-                client_order_id = secrets.token_bytes(32)
-                new_client_order_ids.append("0x" + client_order_id.hex())
-
-                # Struct: (clientOrderId, tradePairId, price, quantity, traderaddress, side, type1, type2, stp)
-                new_orders.append(
-                    (
-                        client_order_id,
-                        pair_data["tradePairId"],
-                        price_wei,
-                        qty_wei,
-                        from_addr,
-                        side_enum,
-                        1,  # LIMIT
-                        0,  # GTC
-                        0,  # STP
-                    )
-                )
+                entry_result = await self._process_replacement(rep, from_addr, required_balances)
+                if not entry_result.success:
+                    return Result.fail(entry_result.error or "")
+                entry = entry_result.data
+                assert entry is not None
+                order_ids.append(entry["internal_id_bytes"])
+                cancelled_client_order_ids.append(entry["cancelled_client_order_id"])
+                cancelled_internal_order_ids.append(entry["cancelled_internal_order_id"])
+                new_client_order_ids.append(entry["new_client_order_id"])
+                new_orders.append(entry["new_order_tuple"])
 
             # given complexity, rely on contract revert for insufficient funds
 
@@ -1511,12 +1584,24 @@ class CLOBClient(DexalotBaseClient):
                 )
                 if receipt_status == 1:
                     return Result.ok(
-                        {"tx_hash": tx_hash_hex, "client_order_ids": new_client_order_ids}
+                        {
+                            "tx_hash": tx_hash_hex,
+                            "cancelled_client_order_ids": cancelled_client_order_ids,
+                            "cancelled_internal_order_ids": cancelled_internal_order_ids,
+                            "client_order_ids": new_client_order_ids,
+                        }
                     )
                 # Transaction reverted - _send_trade_tx should have raised, but handle just in case
                 return Result.fail("Transaction reverted")
 
-            return Result.ok({"tx_hash": tx_hash_hex, "client_order_ids": new_client_order_ids})
+            return Result.ok(
+                {
+                    "tx_hash": tx_hash_hex,
+                    "cancelled_client_order_ids": cancelled_client_order_ids,
+                    "cancelled_internal_order_ids": cancelled_internal_order_ids,
+                    "client_order_ids": new_client_order_ids,
+                }
+            )
 
         except Exception as e:
             error_msg = self._sanitize_error(e, "cancel/add list")
