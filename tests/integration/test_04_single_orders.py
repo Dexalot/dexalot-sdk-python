@@ -58,7 +58,7 @@ class TestSingleOrders:
         print("✅ Sell Order verified")
 
         # 3. Cancel Buy Order
-        buy_order_id = next(o["id"] for o in orders if o["side"] == 0)
+        buy_order_id = next(o["internal_order_id"] for o in orders if o["side"] == 0)
         res_cancel = await client.cancel_order(buy_order_id)
         if not res_cancel.success:
             pytest.skip(f"Failed to cancel buy order: {res_cancel.error}")
@@ -75,7 +75,7 @@ class TestSingleOrders:
         print("✅ Cancel verification passed")
 
         # 4. Cancel Sell Order
-        sell_order_id = orders[0]["id"]
+        sell_order_id = orders[0]["internal_order_id"]
         res_cancel_sell = await client.cancel_order(sell_order_id)
         if not res_cancel_sell.success:
             pytest.skip(f"Failed to cancel sell order: {res_cancel_sell.error}")

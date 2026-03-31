@@ -36,7 +36,7 @@ class TestReplaceOrder:
                 f"Failed to get initial order: {orders_result.error if not orders_result.success else 'No orders found'}"
             )
         orders = orders_result.data
-        order_id = orders[0]["id"]
+        order_id = orders[0]["internal_order_id"]
 
         # 2. Replace
         replacements = [
@@ -58,7 +58,7 @@ class TestReplaceOrder:
         print("✅ Replace verification passed")
 
         # 3. Cancel Replaced Order
-        replaced_order_id = orders[0]["id"]
+        replaced_order_id = orders[0]["internal_order_id"]
         res_cancel = await client.cancel_order(replaced_order_id)
         if not res_cancel.success:
             pytest.skip(f"Failed to cancel replaced order: {res_cancel.error}")

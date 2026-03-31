@@ -67,7 +67,7 @@ class TestBatchOrders:
             )
             replacements.append(
                 {
-                    "order_id": order["id"],
+                    "order_id": order["internal_order_id"],
                     "pair": pair,
                     "side": "BUY" if order["side"] == 0 else "SELL",
                     "amount": float(order["quantity"]),
@@ -92,7 +92,7 @@ class TestBatchOrders:
     async def _cancel_by_client_id(self, client, orders):
         """Cancel buy orders by client ID."""
         buy_orders = [o for o in orders if o["side"] == 0]
-        buy_cids = [o["clientordid"] for o in buy_orders]
+        buy_cids = [o["client_order_id"] for o in buy_orders]
 
         res_cancel_cid = await client.cancel_list_orders_by_client_id(buy_cids)
         res_cancel_cid_data = self._check_error_response(
@@ -113,7 +113,7 @@ class TestBatchOrders:
 
     async def _cancel_by_internal_id(self, client, orders):
         """Cancel remaining orders by internal ID."""
-        sell_ids = [o["id"] for o in orders]
+        sell_ids = [o["internal_order_id"] for o in orders]
         res_cancel_id = await client.cancel_list_orders(sell_ids)
         res_cancel_id_data = self._check_error_response(res_cancel_id, "cancel_list_orders")
         assert "transaction sent" in res_cancel_id_data
