@@ -158,15 +158,30 @@ async with DexalotClient(signer=signer) as client:
         order_type="LIMIT",
     )
     if result.success:
-        print("Order placed. Tx:", result.data["tx_hash"])
+        print("Tx:", result.data["tx_hash"])
+        print("Client order ID:", result.data["client_order_id"])  # save for cancel/replace
     else:
         print("Failed:", result.error)
+```
+
+You can optionally supply your own `client_order_id` (a 32-byte hex string or a UTF-8 string ≤ 32 bytes). When omitted, the SDK generates one randomly:
+
+```python
+result = await client.add_order(
+    pair="ALOT/USDC",
+    side="BUY",
+    amount=100.0,
+    price=0.15,
+    client_order_id="0x" + "ab" * 32,  # deterministic, idempotent
+)
 ```
 
 ### Cancel an order
 
 ```python
 result = await client.cancel_order(order_id="0xabc...")
+if result.success:
+    print("Cancelled. client_order_id:", result.data["cancelled_client_order_id"])
 ```
 
 ### Cancel all orders for a pair
@@ -187,10 +202,12 @@ orders = [
 result = await client.add_limit_order_list(orders)
 ```
 
-Cancel multiple orders by ID:
+Cancel multiple orders by internal order ID:
 
 ```python
 result = await client.cancel_list_orders(order_ids=["0xabc...", "0xdef..."])
+if result.success:
+    print("Cancelled:", result.data["cancelled_internal_order_ids"])
 ```
 
 Atomic cancel-and-replace (cancel list, then place new list):
@@ -199,14 +216,18 @@ Atomic cancel-and-replace (cancel list, then place new list):
 result = await client.cancel_add_list(
     replacements=[
         {
-            "order_id": "0xold...",
+            "order_id": "0xold...",   # internal_order_id or client_order_id
             "pair": "ALOT/USDC",
             "side": "BUY",
             "amount": 100.0,
             "price": 0.16,
+            # "client_order_id": "0x..."  # optional — generated if omitted
         }
     ],
 )
+if result.success:
+    print("New IDs:", result.data["client_order_ids"])
+    print("Cancelled client IDs:", result.data["cancelled_client_order_ids"])
 ```
 
 ### Query open orders
@@ -215,7 +236,7 @@ result = await client.cancel_add_list(
 result = await client.get_open_orders(pair="ALOT/USDC")
 if result.success:
     for order in result.data:
-        print(order["id"], order["price"], order["quantity"])
+        print(order["internal_order_id"], order["client_order_id"], order["price"], order["quantity"])
 ```
 
 ### Get a specific order

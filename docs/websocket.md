@@ -287,6 +287,8 @@ export interface WsTradeHistoryData {
 
 After subscribing to the traderEvents this is the captured order status update event based on the trader address provided in the signature.
 
+> **Note:** WebSocket event payloads are forwarded as-is from the Dexalot server and use the server's own field names (`orderId`, `clientOrderId`). These differ from the SDK's normalized REST API field names (`internal_order_id`, `client_order_id`) returned by `get_open_orders`, `get_order`, and related methods. The SDK does not transform WebSocket payloads.
+
 ```ts
 export interface OrderStatusUpdateEvent {
   version: number;
