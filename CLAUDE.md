@@ -1,6 +1,8 @@
 # Dexalot Python SDK — Claude Code Context
 
-Python SDK for the Dexalot DEX. Security and performance findings are tracked in `docs/python-sdk-remediation-plan.md` — do not replicate that content here.
+Python SDK for the Dexalot DEX.
+
+> **Release priority**: Focus on making **dexalot-sdk-python** and **dexalot-mcp-python** production-ready and released before investing in further **TypeScript** SDK or MCP changes. Treat TypeScript repos as secondary until those Python packages are in production.
 
 ---
 

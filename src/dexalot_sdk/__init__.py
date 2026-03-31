@@ -10,7 +10,7 @@ from .utils.secrets_vault import (
     secrets_vault_set,
 )
 
-__version__ = "0.5.3"
+__version__ = "0.5.4"
 
 
 def get_version() -> str:
