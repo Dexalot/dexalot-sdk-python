@@ -1481,7 +1481,13 @@ class CLOBClient(DexalotBaseClient):
             return Result.fail(f"Pair {pair} not found.")
 
         pair_data = self.pairs[pair]
-        side_clean = rep["side"].strip().upper()
+        raw_side = rep.get("side") or existing_order.get("side")
+        if not raw_side:
+            return Result.fail(
+                f"Replacement for order '{rep['order_id']}' requires side "
+                "because it could not be inferred from the existing order."
+            )
+        side_clean = raw_side.strip().upper()
         if side_clean == "BUY":
             side_enum, req_token, req_amt = 0, pair_data["quote"], rep["price"] * rep["amount"]
         elif side_clean == "SELL":

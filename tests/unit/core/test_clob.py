@@ -1224,6 +1224,87 @@ class TestCLOBClient:
         assert args[1][0][1] == b"TPID"
         assert args[1][0][2] == 11000000  # 11.0 * 10^6
 
+    async def test_cancel_add_list_infers_side_from_existing_order(self, client):
+        """cancel_add_list infers side from existing order when not provided."""
+        client.pairs = {
+            "AVAX/USDC": {
+                "pair": "AVAX/USDC",
+                "base_decimals": 18,
+                "quote_decimals": 6,
+                "tradePairId": b"TPID",
+                "quote": "USDC",
+                "base": "AVAX",
+            }
+        }
+
+        # No "side" key in replacement — should infer from existing order (side=0 → BUY)
+        replacements = [{"order_id": "0x01", "amount": 1.0, "price": 11.0, "pair": "AVAX/USDC"}]
+
+        self._stub_resolved_order(client, pair="AVAX/USDC", trade_pair_id=b"TPID", side=0)
+        client._ensure_pair_exists = AsyncMock(return_value=True)
+        client._send_trade_tx = AsyncMock(return_value=("0xTxHash", MagicMock(status=1)))
+
+        res = await client.cancel_add_list(replacements)
+        assert res.success
+        assert res.data["tx_hash"] == "0xTxHash"
+
+        # Verify the order tuple has side_enum=0 (BUY)
+        args = client.trade_pairs_contract.functions.cancelAddList.call_args[0]
+        new_order_tuple = args[1][0]
+        assert new_order_tuple[5] == 0  # side_enum position in the tuple
+
+    async def test_cancel_add_list_infers_side_sell(self, client):
+        """cancel_add_list infers SELL side from existing order."""
+        client.pairs = {
+            "AVAX/USDC": {
+                "pair": "AVAX/USDC",
+                "base_decimals": 18,
+                "quote_decimals": 6,
+                "tradePairId": b"TPID",
+                "quote": "USDC",
+                "base": "AVAX",
+            }
+        }
+
+        replacements = [{"order_id": "0x01", "amount": 2.0, "price": 15.0, "pair": "AVAX/USDC"}]
+
+        self._stub_resolved_order(client, pair="AVAX/USDC", trade_pair_id=b"TPID", side=1)
+        client._ensure_pair_exists = AsyncMock(return_value=True)
+        client._send_trade_tx = AsyncMock(return_value=("0xTxHash", MagicMock(status=1)))
+
+        res = await client.cancel_add_list(replacements)
+        assert res.success
+
+        args = client.trade_pairs_contract.functions.cancelAddList.call_args[0]
+        new_order_tuple = args[1][0]
+        assert new_order_tuple[5] == 1  # side_enum position = SELL
+
+    async def test_cancel_add_list_fails_when_side_not_inferable(self, client):
+        """cancel_add_list fails when side is missing from both replacement and existing order."""
+        client.pairs = {
+            "AVAX/USDC": {
+                "pair": "AVAX/USDC",
+                "base_decimals": 18,
+                "quote_decimals": 6,
+                "tradePairId": b"TPID",
+                "quote": "USDC",
+                "base": "AVAX",
+            }
+        }
+
+        replacements = [{"order_id": "0x01", "amount": 1.0, "price": 11.0, "pair": "AVAX/USDC"}]
+
+        self._stub_resolved_order(client, pair="AVAX/USDC", trade_pair_id=b"TPID")
+        # Patch _format_order_data to return an order without side
+        client._format_order_data = AsyncMock(
+            return_value={"pair": "AVAX/USDC", "price": 10.0, "quantity": 1.0}
+        )
+        client._ensure_pair_exists = AsyncMock(return_value=True)
+
+        res = await client.cancel_add_list(replacements)
+        assert not res.success
+        assert "requires side" in res.error
+
     async def test_cancel_list_orders(self, client):
         """Test cancel_list_orders."""
         mock_receipt = MagicMock()
