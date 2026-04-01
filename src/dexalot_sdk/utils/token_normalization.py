@@ -1,7 +1,7 @@
 """Normalize user-supplied token symbols and trading pairs for SDK and MCP use.
 
 Applies ASCII case-folding (uppercase), trims whitespace, and maps optional
-synonyms from ``data/token_aliases.json`` to canonical symbols.
+synonyms from ``data/token_aliases.json`` (canonical → list of aliases) to canonical symbols.
 """
 
 from __future__ import annotations
@@ -26,13 +26,18 @@ def _load_token_alias_map() -> dict[str, str]:
         raise ValueError("token_aliases.json must contain a top-level 'aliases' object.")
 
     out: dict[str, str] = {}
-    for key, value in raw.items():
-        if not isinstance(key, str) or not isinstance(value, str):
+    for canonical, aliases in raw.items():
+        if not isinstance(canonical, str) or not isinstance(aliases, list):
             continue
-        ku = key.strip().upper()
-        vu = value.strip().upper()
-        if ku and vu:
-            out[ku] = vu
+        cu = canonical.strip().upper()
+        if not cu:
+            continue
+        for alias in aliases:
+            if not isinstance(alias, str):
+                continue
+            au = alias.strip().upper()
+            if au:
+                out[au] = cu
     return out
 
 

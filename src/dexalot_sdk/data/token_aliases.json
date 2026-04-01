@@ -1,6 +1,6 @@
 {
   "aliases": {
-    "ETHER": "ETH",
-    "BITCOIN": "BTC"
+    "ETH": ["WETH", "ETHER"],
+    "BTC": ["BTC.B", "BITCOIN"]
   }
 }

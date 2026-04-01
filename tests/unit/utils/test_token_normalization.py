@@ -44,11 +44,21 @@ def test_aliases_rejects_non_object():
             tn.normalize_token_symbol_for_sdk("ETH")
 
 
-def test_aliases_skips_non_string_entries():
-    raw = {"aliases": {"ETH": "ETH", 1: "X", "OK": 2, "GOOD": "G"}}
+def test_aliases_skips_non_list_and_non_string_entries():
+    raw = {"aliases": {"ETH": ["WETH", 123], 1: ["X"], "OK": "not-a-list", "BTC": ["BITCOIN"]}}
     with patch("dexalot_sdk.utils.token_normalization.json.load", return_value=raw):
         tn._load_token_alias_map.cache_clear()
-        assert tn.normalize_token_symbol_for_sdk("GOOD") == "G"
+        assert tn.normalize_token_symbol_for_sdk("WETH") == "ETH"
+        assert tn.normalize_token_symbol_for_sdk("BITCOIN") == "BTC"
+        assert tn.normalize_token_symbol_for_sdk("OK") == "OK"  # non-list value skipped
+
+
+def test_aliases_skips_blank_canonical_key():
+    raw = {"aliases": {"  ": ["ghost"], "ETH": ["WETH"]}}
+    with patch("dexalot_sdk.utils.token_normalization.json.load", return_value=raw):
+        tn._load_token_alias_map.cache_clear()
+        assert tn.normalize_token_symbol_for_sdk("WETH") == "ETH"
+        assert tn.normalize_token_symbol_for_sdk("ghost") == "GHOST"  # no alias mapped
 
 
 def test_base_client_normalizers_delegate():
