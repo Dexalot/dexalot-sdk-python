@@ -1,7 +1,9 @@
 # dexalot_sdk - Dexalot Python SDK
 
 from .core.client import DexalotClient
+from .core.config import DexalotConfig
 from .utils.cache import MemoryCache
+from .utils.result import Result
 from .utils.secrets_vault import (
     generate_secrets_vault_key,
     secrets_vault_get,
@@ -10,7 +12,7 @@ from .utils.secrets_vault import (
     secrets_vault_set,
 )
 
-__version__ = "0.5.7"
+__version__ = "0.5.8"
 
 
 def get_version() -> str:
@@ -20,7 +22,9 @@ def get_version() -> str:
 
 __all__ = [
     "DexalotClient",
+    "DexalotConfig",
     "MemoryCache",
+    "Result",
     "get_version",
     "generate_secrets_vault_key",
     "secrets_vault_get",

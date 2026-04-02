@@ -431,7 +431,7 @@ wheels = [
 
 [[package]]
 name = "dexalot-sdk"
-version = "0.5.7"
+version = "0.5.8"
 source = { editable = "." }
 dependencies = [
     { name = "aiohttp" },
