@@ -57,7 +57,7 @@ class WebSocketManager:
         self._should_reconnect = False
 
         # Subscriptions: key -> (callback, is_private, meta)
-        # meta is None (legacy topics) or {"kind": "orderbook", "pair", "decimal"}
+        # meta is None (topic-list subscription) or {"kind": "orderbook", "pair", "decimal"}
         self._subscriptions: dict[str, tuple[Callable, bool, dict[str, Any] | None]] = {}
 
         # Reconnection state
@@ -321,7 +321,6 @@ class WebSocketManager:
                             self.logger.error(f"Error in orderbook callback for {pair}: {e}")
                 return
 
-            # Legacy: messages with a "topic" field
             topic = data.get("topic")
             if topic:
                 if topic in self._subscriptions:
@@ -331,7 +330,6 @@ class WebSocketManager:
                     except Exception as e:
                         self.logger.error(f"Error in callback for topic {topic}: {e}")
             else:
-                # Broadcast to non-orderbook callbacks only
                 for callback, _, _meta in list(self._subscriptions.values()):
                     if _meta and _meta.get("kind") == "orderbook":
                         continue
@@ -357,7 +355,7 @@ def _build_meta(
     orderbook_pair: str | None,
     orderbook_decimal: int | None,
 ) -> dict[str, Any] | None:
-    """Build the subscription meta dict (orderbook info or None for legacy topics)."""
+    """Build the subscription meta dict (orderbook info or None for topic-list subscriptions)."""
     pair = orderbook_pair
     dec = orderbook_decimal
     if not is_private and pair is None and subscription_key.startswith("OrderBook/"):
@@ -402,7 +400,6 @@ def _build_subscribe_payload(
 
         payload = {"type": "subscribe", "topics": [subscription_key]}
 
-        # Generate authentication signature (legacy private topics).
         # The Dexalot backend accepts private-topic signatures whose timestamp is
         # within ±30 000 ms of server time.  If the local clock is skewed, set
         # config.ws_time_offset_ms (env: DEXALOT_WS_TIME_OFFSET_MS) to compensate.

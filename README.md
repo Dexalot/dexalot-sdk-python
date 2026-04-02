@@ -469,16 +469,14 @@ client = DexalotClient(config=config)
 await client.connect()
 await client.initialize_client()
 
-# RPC calls will automatically use failover if primary provider fails
-# No code changes needed - failover is transparent
+# RPC calls use failover automatically when the primary provider fails (if enabled)
 ```
 
-### Backwards Compatibility
+### Provider failover behavior
 
-- If `provider_failover_enabled=False`, behavior matches the original implementation (single provider)
-- Single provider from API response works as before
-- Environment variable override is optional
-- All existing code paths continue to work
+- With `provider_failover_enabled=False`, only the primary RPC URL is used (no rotation).
+- When the API returns a single provider entry, the client uses that URL directly.
+- Environment variables can override failover settings as documented above.
 
 ### RPC Security Settings
 
@@ -924,10 +922,8 @@ The SDK automatically standardizes API response field names to match Python nami
 
 ### Benefits
 
-- **Consistent Interface**: Always use snake_case field names in Python
-- **Backward Compatible**: Existing code continues to work
-- **Future-Proof**: Handles API field name variations automatically
-- **No Code Changes**: Transformation happens transparently
+- **Consistent interface**: Field names are exposed in snake_case in Python consistently.
+- **Alias handling**: Common camelCase and alternate keys from the API are normalized automatically.
 
 All API responses are automatically transformed before being returned, so you can always rely on standardized field names.
 
@@ -981,7 +977,7 @@ Automatic nonce management prevents transaction race conditions:
 
 - **Automatic**: Tracks nonces per (chain_id, address) combination
 - **Thread-safe**: Uses async locks for concurrent transactions
-- **Transparent**: No code changes needed
+- **Default-on**: No manual nonce bookkeeping for normal use
 
 The nonce manager is enabled by default and works automatically. It:
 1. Fetches the current nonce from the chain on first use

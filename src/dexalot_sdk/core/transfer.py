@@ -99,7 +99,6 @@ class TransferClient(DexalotBaseClient):
                     token_data[t["symbol"]] = {}
                 token_data[t["symbol"]][t["env"]] = t
 
-            # Update instance variable for backward compatibility
             self.token_data = token_data
 
             if token in token_data:

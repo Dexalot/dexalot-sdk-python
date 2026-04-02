@@ -49,7 +49,6 @@ class DexalotConfig:
             Env var: ``DEXALOT_CACHE_TTL_BALANCE``.
         cache_ttl_orderbook: TTL (seconds) for orderbook snapshots.
             Env var: ``DEXALOT_CACHE_TTL_ORDERBOOK``.
-        timeouts: ``(connect_timeout, read_timeout)`` in seconds.
         log_level: Log level string: ``DEBUG``, ``INFO``, ``WARNING``, ``ERROR``,
             or ``CRITICAL``.
             Env var: ``DEXALOT_LOG_LEVEL``.
@@ -64,8 +63,9 @@ class DexalotConfig:
         retry_max_delay: Maximum delay between retries in seconds.
             Env var: ``DEXALOT_RETRY_MAX_DELAY``.
         retry_exponential_base: Exponential backoff multiplier (≥1.0).
-            Env var: ``DEXALOT_RETRY_EXPONENTIAL_BASE`` (via code, not currently
-            loaded from env — use constructor kwargs).
+            Env var: ``DEXALOT_RETRY_EXPONENTIAL_BASE``.
+        timeouts: Connect and read timeouts for the HTTP client (seconds, ≥1 each).
+            Env vars: ``DEXALOT_TIMEOUT_CONNECT``, ``DEXALOT_TIMEOUT_READ``.
         retry_on_status: HTTP status codes that trigger a retry.
         retry_on_exceptions: Exception types that trigger a retry.
         rate_limit_enabled: Enable per-instance API and RPC rate limiters.
@@ -252,6 +252,11 @@ class DexalotConfig:
             "retry_max_attempts": get_env_int("DEXALOT_RETRY_MAX_ATTEMPTS", 3),
             "retry_initial_delay": get_env_float("DEXALOT_RETRY_INITIAL_DELAY", 1.0),
             "retry_max_delay": get_env_float("DEXALOT_RETRY_MAX_DELAY", 10.0),
+            "retry_exponential_base": get_env_float("DEXALOT_RETRY_EXPONENTIAL_BASE", 2.0),
+            "timeouts": (
+                get_env_int("DEXALOT_TIMEOUT_CONNECT", 5),
+                get_env_int("DEXALOT_TIMEOUT_READ", 30),
+            ),
             "rate_limit_enabled": get_env_bool("DEXALOT_RATE_LIMIT_ENABLED", True),
             "rate_limit_requests_per_second": get_env_float(
                 "DEXALOT_RATE_LIMIT_REQUESTS_PER_SECOND", 5.0
@@ -360,6 +365,11 @@ class DexalotConfig:
             raise ValueError("connection_pool_limit_per_host must be at least 1")
         if self.connection_pool_limit_per_host > self.connection_pool_limit:
             raise ValueError("connection_pool_limit_per_host must be <= connection_pool_limit")
+
+        if len(self.timeouts) != 2:
+            raise ValueError("timeouts must be a (connect, read) pair")
+        if self.timeouts[0] < 1 or self.timeouts[1] < 1:
+            raise ValueError("timeouts values must be at least 1 second")
 
         # Validate websocket settings
         if self.ws_ping_interval < 1:

@@ -3928,8 +3928,8 @@ class TestWebSocketManager:
         await manager._send_subscribe("Topic")  # no exception
 
     @pytest.mark.asyncio
-    async def test_send_unsubscribe_legacy_topic(self, manager):
-        """_send_unsubscribe sends correct unsubscribe payload for legacy topics."""
+    async def test_send_unsubscribe_topic_list(self, manager):
+        """_send_unsubscribe sends topics-array payload for non-orderbook subscriptions."""
         with patch.object(manager, "connect"):
             manager.subscribe("Topic", lambda _m: None)
         spec = manager._subscriptions.pop("Topic")

@@ -176,6 +176,32 @@ class TestDexalotConfig:
                 cfg = DexalotConfig.from_env()
                 assert cfg.retry_initial_delay == 1.0
 
+    def test_env_retry_exponential_base_and_timeouts(self):
+        """DEXALOT_RETRY_EXPONENTIAL_BASE and DEXALOT_TIMEOUT_* load into config."""
+        env_vars = {
+            "DEXALOT_RETRY_EXPONENTIAL_BASE": "3.5",
+            "DEXALOT_TIMEOUT_CONNECT": "8",
+            "DEXALOT_TIMEOUT_READ": "45",
+        }
+        with patch.dict(os.environ, env_vars, clear=False):
+            with patch("dexalot_sdk.core.config.load_dotenv"):
+                cfg = DexalotConfig.from_env()
+                assert cfg.retry_exponential_base == 3.5
+                assert cfg.timeouts == (8, 45)
+
+    def test_validate_timeouts(self):
+        """Test validation raises error when timeouts are too small."""
+        cfg = DexalotConfig(timeouts=(0, 30))
+        with pytest.raises(ValueError, match="timeouts values must be at least 1 second"):
+            cfg.validate()
+
+    def test_validate_timeouts_wrong_length(self):
+        """Malformed timeouts tuple should fail validation (defensive guard)."""
+        cfg = DexalotConfig()
+        cfg.timeouts = (5,)
+        with pytest.raises(ValueError, match="timeouts must be a \\(connect, read\\) pair"):
+            cfg.validate()
+
     def test_validate_retry_max_attempts(self):
         """Test validation raises error when retry_max_attempts < 1."""
         cfg = DexalotConfig(retry_max_attempts=0)
