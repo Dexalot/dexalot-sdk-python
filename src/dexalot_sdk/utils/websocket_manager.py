@@ -234,7 +234,7 @@ class WebSocketManager:
 
         self._reconnect_attempts += 1
         delay = min(self._reconnect_delay, self.config.ws_reconnect_max_delay)
-        self.logger.info(f"Scheduling reconnect in {delay}s (attempt {self._reconnect_attempts})")
+        self.logger.debug(f"Scheduling reconnect in {delay}s (attempt {self._reconnect_attempts})")
         try:
             await asyncio.sleep(delay)
         except asyncio.CancelledError:
