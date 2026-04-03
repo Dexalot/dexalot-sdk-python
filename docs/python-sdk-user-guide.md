@@ -443,7 +443,7 @@ config = DexalotConfig(
 
 ## Secrets vault
 
-The secrets vault stores sensitive values (private keys, tokens) in a Fernet-encrypted SQLite database at `~/.dexalot/secrets_vault.db`. The file is created with owner-only permissions (0o600). Values are encrypted at rest; only key names are stored in plaintext. The vault is shared between the SDK and the MCP server.
+The secrets vault stores sensitive values (private keys, tokens) in a Fernet-encrypted local file at `~/.dexalot/secrets_vault.json`. The file uses the shared Dexalot JSON vault format so Python and TypeScript tooling can read the same encrypted store. The file is created with owner-only permissions (0o600). Values are encrypted at rest; only key names are stored in plaintext. The vault is shared between the SDK and the MCP server.
 
 ### One-time setup
 
@@ -470,7 +470,7 @@ secrets-vault get PRIVATE_KEY
 ### Custom vault path
 
 ```bash
-DEXALOT_SECRETS_VAULT_PATH=/secure/path/vault.db
+DEXALOT_SECRETS_VAULT_PATH=/secure/path/vault.json
 ```
 
 ### Using the vault in code
@@ -487,9 +487,9 @@ from dexalot_sdk import (
 )
 
 key = generate_secrets_vault_key()   # generate once, save safely
-secrets_vault_set("~/.dexalot/secrets_vault.db", "PRIVATE_KEY", "0x...", key)
+secrets_vault_set("~/.dexalot/secrets_vault.json", "PRIVATE_KEY", "0x...", key)
 
-result = secrets_vault_get("~/.dexalot/secrets_vault.db", "PRIVATE_KEY", key)
+result = secrets_vault_get("~/.dexalot/secrets_vault.json", "PRIVATE_KEY", key)
 if result.success:
     private_key = result.data
 ```
@@ -498,7 +498,7 @@ if result.success:
 
 - Never commit the vault key or your `.env` file to version control.
 - Store the vault key in a password manager or secrets manager (1Password, AWS Secrets Manager, HashiCorp Vault, etc.).
-- The vault database file itself is safe to back up — it is encrypted and useless without the key.
+- The vault file itself is safe to back up - it is encrypted and useless without the key.
 - Prefer `secrets-vault add PRIVATE_KEY ...` over `PRIVATE_KEY=...` in `.env` for anything beyond a local throwaway key.
 
 ---
