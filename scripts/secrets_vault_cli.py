@@ -3,7 +3,7 @@
 CLI tool to manage the Dexalot secrets vault.
 
 Reads DEXALOT_SECRETS_VAULT_PATH from .env (or the environment) to locate the
-vault database. The encryption key is never stored — it must be supplied via the
+vault file. The encryption key is never stored - it must be supplied via the
 DEXALOT_SECRETS_VAULT_KEY environment variable or entered interactively.
 
 Usage:
@@ -17,25 +17,9 @@ Commands:
     delete <key>        Remove a key-value pair from the vault.
 
 Environment variables:
-    DEXALOT_SECRETS_VAULT_PATH   Path to the vault database
-                                  (default: ~/.dexalot/secrets_vault.db).
-    DEXALOT_SECRETS_VAULT_KEY    Encryption key — if not set, prompted interactively.
-
-Examples:
-    # Generate a new key and store it somewhere safe:
-    python -m dexalot_sdk.scripts.secrets_vault_cli keygen
-
-    # Store the wallet private key:
-    python -m dexalot_sdk.scripts.secrets_vault_cli add PRIVATE_KEY 0xabc123...
-
-    # List all stored secrets:
-    python -m dexalot_sdk.scripts.secrets_vault_cli list
-
-    # Retrieve a value:
-    python -m dexalot_sdk.scripts.secrets_vault_cli get PRIVATE_KEY
-
-    # Delete an entry:
-    python -m dexalot_sdk.scripts.secrets_vault_cli delete PRIVATE_KEY
+    DEXALOT_SECRETS_VAULT_PATH   Path to the vault file
+                                  (default: ~/.dexalot/secrets_vault.json).
+    DEXALOT_SECRETS_VAULT_KEY    Encryption key - if not set, prompted interactively.
 """
 
 import argparse
@@ -66,7 +50,7 @@ def _load_dotenv() -> None:
 
 
 def _resolve_vault_path() -> str:
-    default = os.path.expanduser("~/.dexalot/secrets_vault.db")
+    default = os.path.expanduser("~/.dexalot/secrets_vault.json")
     return os.path.expanduser(os.environ.get("DEXALOT_SECRETS_VAULT_PATH", default))
 
 
@@ -158,13 +142,13 @@ def cmd_delete(args: argparse.Namespace) -> int:
 _DESCRIPTION = """\
 Manage the Dexalot encrypted secrets vault.
 
-The vault is a local SQLite file with Fernet-encrypted values.
+The vault is a local JSON file with Fernet-encrypted values.
 Key names are stored in plain text; only values are encrypted.
 
 Environment variables (also read from .env in the current directory):
-  DEXALOT_SECRETS_VAULT_PATH   Path to the vault database
-                                (default: ~/.dexalot/secrets_vault.db)
-  DEXALOT_SECRETS_VAULT_KEY    Encryption key — if not set, prompted interactively\
+  DEXALOT_SECRETS_VAULT_PATH   Path to the vault file
+                                (default: ~/.dexalot/secrets_vault.json)
+  DEXALOT_SECRETS_VAULT_KEY    Encryption key - if not set, prompted interactively\
 """
 
 _EPILOG = """\
@@ -218,25 +202,25 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def main() -> None:
+def main(argv: list[str] | None = None) -> int:
     _load_dotenv()
-
     parser = build_parser()
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
 
-    if args.command is None:
-        parser.print_help()
-        sys.exit(0)
+    if args.command == "keygen":
+        return cmd_keygen(args)
+    if args.command == "add":
+        return cmd_add(args)
+    if args.command == "get":
+        return cmd_get(args)
+    if args.command == "list":
+        return cmd_list(args)
+    if args.command == "delete":
+        return cmd_delete(args)
 
-    handlers = {
-        "keygen": cmd_keygen,
-        "add": cmd_add,
-        "get": cmd_get,
-        "list": cmd_list,
-        "delete": cmd_delete,
-    }
-    sys.exit(handlers[args.command](args))
+    parser.print_help(sys.stderr)
+    return 1
 
 
-if __name__ == "__main__":
-    main()
+if __name__ == "__main__":  # pragma: no cover
+    raise SystemExit(main())
