@@ -554,7 +554,9 @@ class TestCLOBClient:
 
         mock_resp2 = AsyncMock()
         mock_resp2.status = 200
-        mock_resp2.json.return_value = [{"id": "0x1", "tradepairid": "0xaaa", "createBlock": 10, "updateBlock": 11}]
+        mock_resp2.json.return_value = [
+            {"id": "0x1", "tradepairid": "0xaaa", "createBlock": 10, "updateBlock": 11}
+        ]
         mock_cm2 = AsyncMock()
         mock_cm2.__aenter__.return_value = mock_resp2
         client._mock_session.get.return_value = mock_cm2
@@ -635,7 +637,14 @@ class TestCLOBClient:
 
     async def test_get_open_orders_single_dict_response(self, client):
         """Test get_open_orders handles single dict response (not in rows or list)."""
-        mock_order = {"id": "0x1", "clientordid": "0xabc", "tradepairid": "0xaaa", "price": 100, "createBlock": 10, "updateBlock": 11}
+        mock_order = {
+            "id": "0x1",
+            "clientordid": "0xabc",
+            "tradepairid": "0xaaa",
+            "price": 100,
+            "createBlock": 10,
+            "updateBlock": 11,
+        }
 
         mock_resp = AsyncMock()
         mock_resp.status = 200
@@ -815,19 +824,32 @@ class TestCLOBClient:
 
     async def test_transform_order_from_api_normalizes_side_type_and_status(self, client):
         """Test int-to-string normalization for side, type, type2, and status enums."""
-        buy_limit = client._transform_order_from_api({"side": 0, "type": 1, "type2": 0, "status": 3, "create_block": 1, "update_block": 2})
+        buy_limit = client._transform_order_from_api(
+            {"side": 0, "type": 1, "type2": 0, "status": 3, "create_block": 1, "update_block": 2}
+        )
         assert buy_limit["side"] == "BUY"
         assert buy_limit["type1"] == "LIMIT"
         assert buy_limit["type2"] == "GTC"
         assert buy_limit["status"] == "FILLED"
 
-        sell_market = client._transform_order_from_api({"side": 1, "type": 0, "type2": 2, "status": 4, "create_block": 3, "update_block": 4})
+        sell_market = client._transform_order_from_api(
+            {"side": 1, "type": 0, "type2": 2, "status": 4, "create_block": 3, "update_block": 4}
+        )
         assert sell_market["side"] == "SELL"
         assert sell_market["type1"] == "MARKET"
         assert sell_market["type2"] == "IOC"
         assert sell_market["status"] == "CANCELED"
 
-        already_str = client._transform_order_from_api({"side": "BUY", "type1": "LIMIT", "type2": "GTC", "status": "NEW", "create_block": 5, "update_block": 6})
+        already_str = client._transform_order_from_api(
+            {
+                "side": "BUY",
+                "type1": "LIMIT",
+                "type2": "GTC",
+                "status": "NEW",
+                "create_block": 5,
+                "update_block": 6,
+            }
+        )
         assert already_str["side"] == "BUY"
         assert already_str["type1"] == "LIMIT"
         assert already_str["type2"] == "GTC"
@@ -863,6 +885,7 @@ class TestCLOBClient:
         assert transformed["price"] is None
         assert transformed["quantity"] is None
         assert transformed["total_amount"] is None
+
     async def test_cancel_all_orders(self, client):
         """Test cancel_all_orders."""
         # Mock get_open_orders
@@ -3413,7 +3436,6 @@ class TestCLOBClient:
         assert not res.success
         assert "Invalid pair" in (res.error or "")
 
-
     def test_order_pair_cache_helpers_cover_skip_and_rehydrate_guard(self, client):
         """Pair cache helpers skip unsupported envs and no-op on failed cache hydration."""
         from dexalot_sdk.constants import ENV_FUJI_MULTI_SUBNET
@@ -3582,7 +3604,15 @@ class TestCLOBClient:
 
         self._stub_resolved_order(client, pair="AVAX/USDC", trade_pair_id=b"PAIR")
         cancel_add_result = await client.cancel_add_list(
-            [{"order_id": VALID_ORDER_ID, "pair": "AVAX/USDC", "side": "BUY", "amount": 0.6, "price": 12.25}]
+            [
+                {
+                    "order_id": VALID_ORDER_ID,
+                    "pair": "AVAX/USDC",
+                    "side": "BUY",
+                    "amount": 0.6,
+                    "price": 12.25,
+                }
+            ]
         )
         assert not cancel_add_result.success
         assert cancel_add_result.error == "Order formatting failed"

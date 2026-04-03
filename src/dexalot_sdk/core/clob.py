@@ -1,7 +1,7 @@
 import asyncio
 import time
 from collections.abc import Callable
-from typing import Any, cast
+from typing import Any, SupportsInt, cast
 
 from ..constants import (
     ENDPOINT_SIGNED_ORDERS,
@@ -737,10 +737,14 @@ class CLOBClient(DexalotBaseClient):
                     f"Order field '{field_name}' must be an integer block number."
                 ) from exc
 
+        if isinstance(value, SupportsInt):
+            return int(value)
         try:
-            return int(value)  # type: ignore[arg-type]
+            return int(cast(str | bytes | bytearray, value))
         except (ValueError, TypeError) as exc:
-            raise ValueError(f"Order field '{field_name}' must be an integer block number.") from exc
+            raise ValueError(
+                f"Order field '{field_name}' must be an integer block number."
+            ) from exc
 
     def _enum_to_name(self, value: object, mapping: dict[int, str]) -> object:
         """Normalize enum integers from contract/API reads into string labels."""
@@ -840,9 +844,7 @@ class CLOBClient(DexalotBaseClient):
         )
         total_fee = order.get("total_fee") or order.get("totalFee") or order.get("totalfee")
         trader_address = (
-            order.get("trader_address")
-            or order.get("traderAddress")
-            or order.get("traderaddress")
+            order.get("trader_address") or order.get("traderAddress") or order.get("traderaddress")
         )
         update_block = (
             order.get("update_block")
@@ -878,7 +880,15 @@ class CLOBClient(DexalotBaseClient):
             type2=self._enum_to_name(order.get("type2"), {0: "GTC", 1: "FOK", 2: "IOC", 3: "PO"}),
             status=self._enum_to_name(
                 order.get("status"),
-                {0: "NEW", 1: "REJECTED", 2: "PARTIAL", 3: "FILLED", 4: "CANCELED", 5: "EXPIRED", 6: "KILLED"},
+                {
+                    0: "NEW",
+                    1: "REJECTED",
+                    2: "PARTIAL",
+                    3: "FILLED",
+                    4: "CANCELED",
+                    5: "EXPIRED",
+                    6: "KILLED",
+                },
             ),
             update_block=update_block,
             create_block=create_block,
@@ -985,7 +995,9 @@ class CLOBClient(DexalotBaseClient):
             order_result = await self._format_order_data(resolved["order_data"])
             if not order_result.success:
                 return Result.fail(order_result.error or "Order formatting failed")
-            return Result.ok(order_result.data)
+            formatted_order = order_result.data
+            assert formatted_order is not None
+            return Result.ok(formatted_order)
 
         except Exception as e:
             error_msg = self._sanitize_error(e, "getting order")
@@ -1028,7 +1040,9 @@ class CLOBClient(DexalotBaseClient):
             order_result = await self._format_order_data(order_data)
             if not order_result.success:
                 return Result.fail(order_result.error or "Order formatting failed")
-            return Result.ok(order_result.data)
+            formatted_order = order_result.data
+            assert formatted_order is not None
+            return Result.ok(formatted_order)
 
         except Exception as e:
             error_msg = self._sanitize_error(e, "getting order by client ID")
@@ -1085,9 +1099,22 @@ class CLOBClient(DexalotBaseClient):
             total_fee=total_fee,
             trader_address=w3_l1.to_checksum_address(order_data[8]),
             side=self._enum_to_name(order_data[9], {0: "BUY", 1: "SELL"}),
-            type1=self._enum_to_name(order_data[10], {0: "MARKET", 1: "LIMIT", 2: "STOP", 3: "STOPLIMIT"}),
+            type1=self._enum_to_name(
+                order_data[10], {0: "MARKET", 1: "LIMIT", 2: "STOP", 3: "STOPLIMIT"}
+            ),
             type2=self._enum_to_name(order_data[11], {0: "GTC", 1: "FOK", 2: "IOC", 3: "PO"}),
-            status=self._enum_to_name(order_data[12], {0: "NEW", 1: "REJECTED", 2: "PARTIAL", 3: "FILLED", 4: "CANCELED", 5: "EXPIRED", 6: "KILLED"}),
+            status=self._enum_to_name(
+                order_data[12],
+                {
+                    0: "NEW",
+                    1: "REJECTED",
+                    2: "PARTIAL",
+                    3: "FILLED",
+                    4: "CANCELED",
+                    5: "EXPIRED",
+                    6: "KILLED",
+                },
+            ),
             update_block=order_data[13],
             create_block=order_data[14],
         )
@@ -1427,7 +1454,9 @@ class CLOBClient(DexalotBaseClient):
             order_result = await self._format_order_data(resolved["order_data"])
             if not order_result.success:
                 return Result.fail(order_result.error or "Order formatting failed")
-            pair_name = order_result.data.get("pair")
+            existing_order = order_result.data
+            assert existing_order is not None
+            pair_name = existing_order.get("pair")
             if not pair_name:
                 return Result.fail("Could not determine pair from order details.")
 
@@ -1600,6 +1629,7 @@ class CLOBClient(DexalotBaseClient):
         if not order_result.success:
             return Result.fail(order_result.error or "Order formatting failed")
         existing_order = order_result.data
+        assert existing_order is not None
         pair_res = self._resolve_cancel_add_pair_from_replacement(
             rep.get("pair"), existing_order.get("pair"), rep["order_id"]
         )
