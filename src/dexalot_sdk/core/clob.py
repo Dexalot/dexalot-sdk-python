@@ -701,72 +701,190 @@ class CLOBClient(DexalotBaseClient):
         signature = self.account.sign_message(message).signature.hex()
         return {"x-signature": f"{addr}:0x{signature}"}
 
+    def _coerce_order_numeric(self, value: object) -> float | None:
+        """Convert order numeric fields to ``float`` when possible."""
+        if value is None:
+            return None
+        try:
+            return float(value)  # type: ignore[arg-type]
+        except (ValueError, TypeError):
+            return None
+
+    def _coerce_order_block(self, value: object, field_name: str) -> int:
+        """Convert order block metadata to ``int`` and fail for missing values."""
+        if value is None:
+            raise ValueError(f"Order missing required '{field_name}' field.")
+
+        if isinstance(value, bool):
+            raise ValueError(f"Order field '{field_name}' must be an integer block number.")
+
+        if isinstance(value, int):
+            return value
+
+        if isinstance(value, float):
+            if value.is_integer():
+                return int(value)
+            raise ValueError(f"Order field '{field_name}' must be an integer block number.")
+
+        if isinstance(value, str):
+            raw = value.strip()
+            if not raw:
+                raise ValueError(f"Order missing required '{field_name}' field.")
+            try:
+                return int(raw, 16 if raw.startswith("0x") else 10)
+            except ValueError as exc:
+                raise ValueError(
+                    f"Order field '{field_name}' must be an integer block number."
+                ) from exc
+
+        try:
+            return int(value)  # type: ignore[arg-type]
+        except (ValueError, TypeError) as exc:
+            raise ValueError(f"Order field '{field_name}' must be an integer block number.") from exc
+
+    def _enum_to_name(self, value: object, mapping: dict[int, str]) -> object:
+        """Normalize enum integers from contract/API reads into string labels."""
+        if isinstance(value, int):
+            return mapping.get(value, value)
+        return value
+
+    def _to_hex_identifier(self, value: object) -> object:
+        """Convert bytes-like identifiers to hex strings while preserving strings."""
+        if isinstance(value, bytes):
+            return "0x" + value.hex()
+        return value
+
+    def _resolve_pair_from_order(self, order: dict) -> str | None:
+        """Extract a trading pair symbol from API order variations."""
+        pair = order.get("pair") or order.get("tradePair") or order.get("trade_pair")
+        return str(pair) if isinstance(pair, str) else pair
+
+    def _resolve_trade_pair_id_from_pair(self, pair: str | None) -> object:
+        """Resolve ``trade_pair_id`` from cached pair metadata when absent from the API."""
+        if not pair:
+            return None
+        pair_data = self.pairs.get(pair)
+        if not pair_data:
+            return None
+        return self._to_hex_identifier(pair_data.get("tradePairId"))
+
+    def _build_canonical_order(
+        self,
+        *,
+        internal_order_id: object,
+        client_order_id: object,
+        trade_pair_id: object,
+        pair: object,
+        price: float | None,
+        total_amount: float | None,
+        quantity: float | None,
+        quantity_filled: float | None,
+        total_fee: float | None,
+        trader_address: object,
+        side: object,
+        type1: object,
+        type2: object,
+        status: object,
+        update_block: object,
+        create_block: object,
+        create_ts: object = None,
+        update_ts: object = None,
+    ) -> dict:
+        """Build the canonical SDK order dict shared by REST and contract reads."""
+        return {
+            "internal_order_id": self._to_hex_identifier(internal_order_id),
+            "client_order_id": self._to_hex_identifier(client_order_id),
+            "trade_pair_id": self._to_hex_identifier(trade_pair_id),
+            "pair": pair,
+            "price": price,
+            "total_amount": total_amount,
+            "quantity": quantity,
+            "quantity_filled": quantity_filled,
+            "total_fee": total_fee,
+            "trader_address": trader_address,
+            "side": side,
+            "type1": type1,
+            "type2": type2,
+            "status": status,
+            "update_block": self._coerce_order_block(update_block, "update_block"),
+            "create_block": self._coerce_order_block(create_block, "create_block"),
+            "create_ts": create_ts,
+            "update_ts": update_ts,
+        }
+
     @track_method("clob")
     def _transform_order_from_api(self, order: dict) -> dict:
-        """Transform API order response to match :meth:`_format_order_data` output.
-
-        Extracts only canonical SDK fields, normalizing field names, side/type
-        enums, and numeric string values.  Raw API fields (``id``,
-        ``clientordid``, ``tx``, ``traderaddress``, etc.) are dropped so that
-        consumers see exactly two clearly-labelled identifiers
-        (``internal_order_id`` and ``client_order_id``).
-
-        Args:
-            order: Raw order dict from API response.
-
-        Returns:
-            Clean order dict with only canonical fields.
-        """
-        # Resolve internal order ID from any API variation
+        """Transform an API order response into the canonical SDK order shape."""
         internal_order_id = order.get("internal_order_id") or order.get("id")
-
-        # Resolve client order ID from any API variation (prefer camelCase)
         client_order_id = (
             order.get("client_order_id") or order.get("clientOrderId") or order.get("clientordid")
         )
+        pair = self._resolve_pair_from_order(order)
+        trade_pair_id = (
+            order.get("trade_pair_id")
+            or order.get("tradePairId")
+            or order.get("tradepairid")
+            or self._resolve_trade_pair_id_from_pair(pair)
+        )
 
-        # Normalize side: API returns int (0=BUY, 1=SELL)
-        side_raw = order.get("side")
-        if isinstance(side_raw, int):
-            side: Any = "BUY" if side_raw == 0 else "SELL"
-        else:
-            side = side_raw
-
-        # Normalize type: API returns int (0=MARKET, 1=LIMIT)
-        type_raw = order.get("type")
-        if isinstance(type_raw, int):
-            order_type: Any = "MARKET" if type_raw == 0 else "LIMIT"
-        else:
-            order_type = type_raw
-
-        # Coerce numeric strings to float
-        def _to_num(val: object) -> float | None:
-            if val is None:
-                return None
-            try:
-                return float(val)  # type: ignore[arg-type]
-            except (ValueError, TypeError):
-                return None
-
-        # Resolve filledQuantity from any API variation
         filled_qty = (
-            order.get("filledQuantity")
+            order.get("quantity_filled")
+            or order.get("quantityFilled")
+            or order.get("filledQuantity")
             or order.get("quantityfilled")
             or order.get("filledquantity")
             or order.get("filled_quantity")
         )
+        total_amount = (
+            order.get("total_amount") or order.get("totalAmount") or order.get("totalamount")
+        )
+        total_fee = order.get("total_fee") or order.get("totalFee") or order.get("totalfee")
+        trader_address = (
+            order.get("trader_address")
+            or order.get("traderAddress")
+            or order.get("traderaddress")
+        )
+        update_block = (
+            order.get("update_block")
+            or order.get("updateBlock")
+            or order.get("updateblock")
+            or order.get("update_block_number")
+        )
+        create_block = (
+            order.get("create_block")
+            or order.get("createBlock")
+            or order.get("createblock")
+            or order.get("create_block_number")
+        )
+        create_ts = order.get("create_ts") or order.get("createTs") or order.get("timestamp")
+        update_ts = order.get("update_ts") or order.get("updateTs") or order.get("updatets")
 
-        return {
-            "internal_order_id": internal_order_id,
-            "client_order_id": client_order_id,
-            "pair": order.get("pair"),
-            "side": side,
-            "type": order_type,
-            "price": _to_num(order.get("price")),
-            "quantity": _to_num(order.get("quantity")),
-            "filledQuantity": _to_num(filled_qty),
-            "status": order.get("status"),
-        }
+        return self._build_canonical_order(
+            internal_order_id=internal_order_id,
+            client_order_id=client_order_id,
+            trade_pair_id=trade_pair_id,
+            pair=pair,
+            price=self._coerce_order_numeric(order.get("price")),
+            total_amount=self._coerce_order_numeric(total_amount),
+            quantity=self._coerce_order_numeric(order.get("quantity")),
+            quantity_filled=self._coerce_order_numeric(filled_qty),
+            total_fee=self._coerce_order_numeric(total_fee),
+            trader_address=trader_address,
+            side=self._enum_to_name(order.get("side"), {0: "BUY", 1: "SELL"}),
+            type1=self._enum_to_name(
+                order.get("type1") if order.get("type1") is not None else order.get("type"),
+                {0: "MARKET", 1: "LIMIT", 2: "STOP", 3: "STOPLIMIT"},
+            ),
+            type2=self._enum_to_name(order.get("type2"), {0: "GTC", 1: "FOK", 2: "IOC", 3: "PO"}),
+            status=self._enum_to_name(
+                order.get("status"),
+                {0: "NEW", 1: "REJECTED", 2: "PARTIAL", 3: "FILLED", 4: "CANCELED", 5: "EXPIRED", 6: "KILLED"},
+            ),
+            update_block=update_block,
+            create_block=create_block,
+            create_ts=create_ts,
+            update_ts=update_ts,
+        )
 
     async def get_open_orders(self, pair: str | None = None) -> Result[list]:
         """Fetch open orders for the current account from the REST API.
@@ -776,11 +894,9 @@ class CLOBClient(DexalotBaseClient):
                 ``None``, returns all open orders across all pairs.
 
         Returns:
-            Result containing a list of order dicts on success, or an error
-            message on failure.  Each dict includes fields such as
-            ``internal_order_id``, ``client_order_id``, ``tradePairId``,
-            ``price``, ``quantity``, ``filledQuantity``, ``side``, and
-            ``status``.
+            Result containing a list of canonical order dicts on success, or an
+            error message on failure. Each order includes identifiers, economic
+            fields, enum labels, block metadata, and optional timestamp fields.
         """
         if not self.account:
             return Result.fail("Private key not configured.")
@@ -814,7 +930,13 @@ class CLOBClient(DexalotBaseClient):
                     elif data:
                         orders = [data]
 
-                    # Transform API field names to match _format_order_data() convention
+                    if orders and any(
+                        (o.get("trade_pair_id") or o.get("tradePairId") or o.get("tradepairid"))
+                        is None
+                        for o in orders
+                    ):
+                        await self.get_clob_pairs()
+
                     transformed_orders = [self._transform_order_from_api(order) for order in orders]
                     return Result.ok(transformed_orders)
                 else:
@@ -839,10 +961,8 @@ class CLOBClient(DexalotBaseClient):
                 string, or ``bytes32``.
 
         Returns:
-            Result containing an order dict with ``internal_order_id``,
-            ``client_order_id``, ``tradePairId``, ``price``, ``quantity``,
-            ``filledQuantity``, ``side``, ``type``, ``status``, and ``pair``
-            on success, or an error message on failure.
+            Result containing a canonical order dict on success, or an error
+            message on failure.
         """
         if not self.account:
             return Result.fail("Private key not configured.")
@@ -862,8 +982,10 @@ class CLOBClient(DexalotBaseClient):
                 return Result.fail(resolved_result.error or "Order not found")
             resolved = resolved_result.data
             assert resolved is not None
-            order_details = await self._format_order_data(resolved["order_data"])
-            return Result.ok(order_details)
+            order_result = await self._format_order_data(resolved["order_data"])
+            if not order_result.success:
+                return Result.fail(order_result.error or "Order formatting failed")
+            return Result.ok(order_result.data)
 
         except Exception as e:
             error_msg = self._sanitize_error(e, "getting order")
@@ -903,34 +1025,22 @@ class CLOBClient(DexalotBaseClient):
             order_data = fetch_result.data
             if order_data is None:
                 return Result.fail("Order not found (Client ID).")
-            order_details = await self._format_order_data(order_data)
-            return Result.ok(order_details)
+            order_result = await self._format_order_data(order_data)
+            if not order_result.success:
+                return Result.fail(order_result.error or "Order formatting failed")
+            return Result.ok(order_result.data)
 
         except Exception as e:
             error_msg = self._sanitize_error(e, "getting order by client ID")
             return Result.fail(error_msg)
 
-    async def _format_order_data(self, order_data):
-        # Parse order data (Struct: id, clientOrderId, tradePairId, price, totalAmount, quantity, quantityFilled, totalFee, traderaddress, side, type1, type2, status, updateBlock, createBlock)
-        # Note: The struct fields order might vary based on ABI, but usually matches the return tuple.
-        # Based on inspect_abi.py output:
-        # 0: id
-        # 1: clientOrderId
-        # 2: tradePairId
-        # 3: price
-        # 4: totalAmount
-        # 5: quantity
-        # 6: quantityFilled
-        # 7: totalFee
-        # 8: traderaddress
-        # 9: side
-        # 10: type1
-        # 11: type2
-        # 12: status
+    async def _format_order_data(self, order_data) -> Result[dict]:
+        """Format a TradePairs ``Order`` struct into the canonical SDK order shape."""
+        if len(order_data) < 15:
+            return Result.fail("Order data missing required create_block/update_block fields.")
 
         trade_pair_id = order_data[2]
 
-        # Find pair info
         pair_info = None
         for _p_name, p_data in self.pairs.items():
             if p_data["tradePairId"] == trade_pair_id:
@@ -938,7 +1048,6 @@ class CLOBClient(DexalotBaseClient):
                 break
 
         if not pair_info:
-            # Try to fetch pairs if not found
             await self.get_clob_pairs()
             for _p_name, p_data in self.pairs.items():
                 if p_data["tradePairId"] == trade_pair_id:
@@ -948,25 +1057,41 @@ class CLOBClient(DexalotBaseClient):
         w3_l1 = await self._get_w3_l1()
         if not w3_l1:
             return Result.fail("L1 provider not available.")
-        result = {
-            "internal_order_id": w3_l1.to_hex(order_data[0]),
-            "client_order_id": w3_l1.to_hex(order_data[1]),
-            "tradePairId": w3_l1.to_hex(trade_pair_id),
-            "price": order_data[3],
-            "quantity": order_data[5],
-            "filledQuantity": order_data[6],
-            "status": order_data[12],  # Enum
-            "side": "BUY" if order_data[9] == 0 else "SELL",
-            "type": "MARKET" if order_data[10] == 0 else "LIMIT",
-        }
+
+        price = float(order_data[3])
+        total_amount = float(order_data[4])
+        quantity = float(order_data[5])
+        quantity_filled = float(order_data[6])
+        total_fee = float(order_data[7])
 
         if pair_info:
-            result["price"] = result["price"] / (10 ** pair_info["quote_decimals"])
-            result["quantity"] = result["quantity"] / (10 ** pair_info["base_decimals"])
-            result["filledQuantity"] = result["filledQuantity"] / (10 ** pair_info["base_decimals"])
-            result["pair"] = pair_info["pair"]
+            quote_scale = 10 ** pair_info["quote_decimals"]
+            base_scale = 10 ** pair_info["base_decimals"]
+            price = price / quote_scale
+            total_amount = total_amount / quote_scale
+            quantity = quantity / base_scale
+            quantity_filled = quantity_filled / base_scale
+            total_fee = total_fee / quote_scale
 
-        return result
+        order = self._build_canonical_order(
+            internal_order_id=w3_l1.to_hex(order_data[0]),
+            client_order_id=w3_l1.to_hex(order_data[1]),
+            trade_pair_id=w3_l1.to_hex(trade_pair_id),
+            pair=pair_info["pair"] if pair_info else None,
+            price=price,
+            total_amount=total_amount,
+            quantity=quantity,
+            quantity_filled=quantity_filled,
+            total_fee=total_fee,
+            trader_address=w3_l1.to_checksum_address(order_data[8]),
+            side=self._enum_to_name(order_data[9], {0: "BUY", 1: "SELL"}),
+            type1=self._enum_to_name(order_data[10], {0: "MARKET", 1: "LIMIT", 2: "STOP", 3: "STOPLIMIT"}),
+            type2=self._enum_to_name(order_data[11], {0: "GTC", 1: "FOK", 2: "IOC", 3: "PO"}),
+            status=self._enum_to_name(order_data[12], {0: "NEW", 1: "REJECTED", 2: "PARTIAL", 3: "FILLED", 4: "CANCELED", 5: "EXPIRED", 6: "KILLED"}),
+            update_block=order_data[13],
+            create_block=order_data[14],
+        )
+        return Result.ok(order)
 
     def _parse_order_side(self, side_str, pair_data):
         """Parse order side and return side enum, required token, and required amount."""
@@ -1299,8 +1424,10 @@ class CLOBClient(DexalotBaseClient):
             resolved = resolved_result.data
             assert resolved is not None
             order_id_bytes = resolved["internal_id_bytes"]
-            order_details = await self._format_order_data(resolved["order_data"])
-            pair_name = order_details.get("pair")
+            order_result = await self._format_order_data(resolved["order_data"])
+            if not order_result.success:
+                return Result.fail(order_result.error or "Order formatting failed")
+            pair_name = order_result.data.get("pair")
             if not pair_name:
                 return Result.fail("Could not determine pair from order details.")
 
@@ -1469,7 +1596,10 @@ class CLOBClient(DexalotBaseClient):
         resolved = resolved_result.data
         assert resolved is not None
 
-        existing_order = await self._format_order_data(resolved["order_data"])
+        order_result = await self._format_order_data(resolved["order_data"])
+        if not order_result.success:
+            return Result.fail(order_result.error or "Order formatting failed")
+        existing_order = order_result.data
         pair_res = self._resolve_cancel_add_pair_from_replacement(
             rep.get("pair"), existing_order.get("pair"), rep["order_id"]
         )

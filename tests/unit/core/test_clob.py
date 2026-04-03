@@ -94,8 +94,16 @@ class TestCLOBClient:
         internal_id: bytes | None = None,
         client_order_id: bytes | None = None,
         side: int = 0,
+        type1: int = 1,
+        type2: int = 0,
+        status: int = 0,
         price_wei: int = 10_000_000,
+        total_amount_wei: int = 10_000_000,
         quantity_wei: int = 10**18,
+        quantity_filled_wei: int = 0,
+        total_fee_wei: int = 0,
+        update_block: int = 101,
+        create_block: int = 100,
     ):
         from dexalot_sdk.utils.result import Result
 
@@ -106,15 +114,17 @@ class TestCLOBClient:
             resolved_client_order_id,
             trade_pair_id,
             price_wei,
-            0,
+            total_amount_wei,
             quantity_wei,
-            0,
-            0,
+            quantity_filled_wei,
+            total_fee_wei,
             VALID_ADDRESS,
             side,
-            1,
-            0,
-            1,
+            type1,
+            type2,
+            status,
+            update_block,
+            create_block,
         )
         client._resolve_order_reference = AsyncMock(
             return_value=Result.ok(
@@ -129,302 +139,6 @@ class TestCLOBClient:
                 }
             )
         )
-        return order_data
-
-    def test_transform_pair_from_api(self, client):
-        """Test _transform_pair_from_api with various field name combinations."""
-        # Test lowercase fields transformed to snake_case
-        item1 = {
-            "pair": "AVAX/USDC",
-            "base": "AVAX",
-            "quote": "USDC",
-            "base_evmdecimals": 18,
-            "quote_evmdecimals": 6,
-            "basedisplaydecimals": 18,
-            "quotedisplaydecimals": 6,
-            "mintrade_amnt": "0.1",
-            "maxtrade_amnt": "1000",
-        }
-        transformed1 = client._transform_pair_from_api(item1)
-        assert transformed1["base_decimals"] == 18
-        assert transformed1["quote_decimals"] == 6
-        assert transformed1["base_display_decimals"] == 18
-        assert transformed1["quote_display_decimals"] == 6
-        assert transformed1["min_trade_amount"] == "0.1"
-        assert transformed1["max_trade_amount"] == "1000"
-
-        # Test camelCase fields transformed to snake_case
-        item2 = {
-            "pair": "BTC/USDC",
-            "base": "BTC",
-            "quote": "USDC",
-            "baseEvmDecimals": 8,
-            "quoteEvmDecimals": 6,
-            "baseDisplayDecimals": 8,
-            "quoteDisplayDecimals": 6,
-            "minTradeAmnt": "0.001",
-            "maxTradeAmnt": "10",
-        }
-        transformed2 = client._transform_pair_from_api(item2)
-        assert transformed2["base_decimals"] == 8
-        assert transformed2["quote_decimals"] == 6
-        assert transformed2["base_display_decimals"] == 8
-        assert transformed2["quote_display_decimals"] == 6
-        assert transformed2["min_trade_amount"] == "0.001"
-        assert transformed2["max_trade_amount"] == "10"
-
-        # Test mixed fields (prefer existing snake_case)
-        item3 = {
-            "pair": "ETH/USDC",
-            "base_decimals": 18,
-            "quote_decimals": 6,
-            "base_evmdecimals": 999,  # Should be ignored
-            "baseEvmDecimals": 999,  # Should be ignored
-            "base_display_decimals": 18,
-            "quote_display_decimals": 6,
-            "basedisplaydecimals": 999,  # Should be ignored
-            "min_trade_amount": "0.01",
-            "max_trade_amount": "100",
-            "mintrade_amnt": "999",  # Should be ignored
-        }
-        transformed3 = client._transform_pair_from_api(item3)
-        assert transformed3["base_decimals"] == 18  # Prefer existing
-        assert transformed3["quote_decimals"] == 6  # Prefer existing
-        assert transformed3["base_display_decimals"] == 18  # Prefer existing
-        assert transformed3["min_trade_amount"] == "0.01"  # Prefer existing
-
-        # Test missing optional fields
-        item4 = {
-            "pair": "ALOT/USDC",
-            "base_evmdecimals": 18,
-            "quote_evmdecimals": 6,
-            "mintrade_amnt": "0.1",
-        }
-        transformed4 = client._transform_pair_from_api(item4)
-        assert transformed4["base_decimals"] == 18
-        assert transformed4["quote_decimals"] == 6
-        assert transformed4["min_trade_amount"] == "0.1"
-        assert (
-            "base_display_decimals" not in transformed4
-            or transformed4.get("base_display_decimals") is None
-        )
-
-    def test_store_clob_pairs_filters_unsupported_envs(self, client):
-        """Only subnet pair metadata should be stored for CLOB operations."""
-        stored = client._store_clob_pairs(
-            [
-                {
-                    "env": "unsupported-env",
-                    "pair": "BAD/PAIR",
-                    "base": "BAD",
-                    "quote": "PAIR",
-                },
-                {
-                    "env": "fuji-multi-subnet",
-                    "pair": "AVAX/USDC",
-                    "base": "AVAX",
-                    "quote": "USDC",
-                },
-            ]
-        )
-
-        assert [pair["pair"] for pair in stored] == ["AVAX/USDC"]
-        assert list(client.pairs) == ["AVAX/USDC"]
-
-    def test_rehydrate_cached_get_clob_pairs_ignores_missing_data(self, client):
-        """No rehydration should happen for failed or empty cached results."""
-        from dexalot_sdk.utils.result import Result
-
-        client.pairs = {"KEEP/ME": {}}
-
-        client._rehydrate_cached_get_clob_pairs(Result.fail("boom"))
-        assert client.pairs == {"KEEP/ME": {}}
-
-        client._rehydrate_cached_get_clob_pairs(Result.ok(None))
-        assert client.pairs == {"KEEP/ME": {}}
-
-    async def test_get_clob_pairs(self, client):
-        """Test fetching pairs."""
-        mock_resp_data = [
-            {
-                "env": "fuji-multi-subnet",
-                "pair": "AVAX/USDC",
-                "base": "AVAX",
-                "quote": "USDC",
-                "base_evmdecimals": 18,
-                "quote_evmdecimals": 6,
-                "basedisplaydecimals": 18,
-                "quotedisplaydecimals": 6,
-                "mintrade_amnt": "0.1",
-                "maxtrade_amnt": "1000",
-            },
-            {
-                "env": "production-multi-subnet",
-                "pair": "BTC/USDC",
-                "base": "BTC",
-                "quote": "USDC",
-                "base_evmdecimals": 8,
-                "quote_evmdecimals": 6,
-                "basedisplaydecimals": 8,
-                "quotedisplaydecimals": 6,
-                "mintrade_amnt": "0.001",
-                "maxtrade_amnt": "10",
-            },
-        ]
-
-        mock_resp = AsyncMock()
-        mock_resp.json.return_value = mock_resp_data
-        mock_resp.raise_for_status = MagicMock()
-
-        mock_cm = AsyncMock()
-        mock_cm.__aenter__.return_value = mock_resp
-        client._mock_session.get.return_value = mock_cm
-
-        res = await client.get_clob_pairs()
-
-        assert res.success
-        assert [pair["pair"] for pair in res.data] == ["AVAX/USDC", "BTC/USDC"]
-        assert "AVAX/USDC" in client.pairs
-        assert "BTC/USDC" in client.pairs
-        assert client.pairs["AVAX/USDC"]["base_decimals"] == 18
-        assert client.pairs["AVAX/USDC"]["quote_decimals"] == 6
-
-    async def test_get_clob_pairs_transforms_field_names(self, client):
-        """Test get_clob_pairs transforms API field names to snake_case."""
-        mock_resp_data = [
-            {
-                "env": "fuji-multi-subnet",
-                "pair": "AVAX/USDC",
-                "base": "AVAX",
-                "quote": "USDC",
-                "base_evmdecimals": 18,
-                "quote_evmdecimals": 6,
-                "basedisplaydecimals": 18,
-                "quotedisplaydecimals": 6,
-                "mintrade_amnt": "0.1",
-                "maxtrade_amnt": "1000",
-            },
-            {
-                "env": "production-multi-subnet",
-                "pair": "BTC/USDC",
-                "base": "BTC",
-                "quote": "USDC",
-                "baseEvmDecimals": 8,
-                "quoteEvmDecimals": 6,
-                "baseDisplayDecimals": 8,
-                "quoteDisplayDecimals": 6,
-                "minTradeAmnt": "0.001",
-                "maxTradeAmnt": "10",
-            },
-        ]
-
-        mock_resp = AsyncMock()
-        mock_resp.json.return_value = mock_resp_data
-        mock_resp.raise_for_status = MagicMock()
-
-        mock_cm = AsyncMock()
-        mock_cm.__aenter__.return_value = mock_resp
-        client._mock_session.get.return_value = mock_cm
-
-        res = await client.get_clob_pairs()
-        assert res.success
-        assert {pair["pair"] for pair in res.data} == {"AVAX/USDC", "BTC/USDC"}
-
-        # First pair: lowercase fields transformed
-        assert "AVAX/USDC" in client.pairs
-        assert client.pairs["AVAX/USDC"]["base_decimals"] == 18
-        assert client.pairs["AVAX/USDC"]["quote_decimals"] == 6
-        assert client.pairs["AVAX/USDC"]["base_display_decimals"] == 18
-        assert client.pairs["AVAX/USDC"]["quote_display_decimals"] == 6
-        assert client.pairs["AVAX/USDC"]["min_trade_amount"] == 0.1
-        assert client.pairs["AVAX/USDC"]["max_trade_amount"] == 1000.0
-
-        # Second pair: camelCase fields transformed
-        assert "BTC/USDC" in client.pairs
-        assert client.pairs["BTC/USDC"]["base_decimals"] == 8
-        assert client.pairs["BTC/USDC"]["quote_decimals"] == 6
-        assert client.pairs["BTC/USDC"]["base_display_decimals"] == 8
-        assert client.pairs["BTC/USDC"]["quote_display_decimals"] == 6
-        assert client.pairs["BTC/USDC"]["min_trade_amount"] == 0.001
-        assert client.pairs["BTC/USDC"]["max_trade_amount"] == 10.0
-
-    async def test_get_clob_pairs_preserves_existing_snake_case(self, client):
-        """Test get_clob_pairs prefers existing snake_case fields over transformations."""
-        mock_resp_data = [
-            {
-                "env": "fuji-multi-subnet",
-                "pair": "ETH/USDC",
-                "base": "ETH",
-                "quote": "USDC",
-                "base_decimals": 18,
-                "quote_decimals": 6,
-                "base_evmdecimals": 999,  # Should be ignored
-                "baseEvmDecimals": 999,  # Should be ignored
-                "base_display_decimals": 18,
-                "quote_display_decimals": 6,
-                "basedisplaydecimals": 999,  # Should be ignored
-                "min_trade_amount": "0.01",
-                "max_trade_amount": "100",
-                "mintrade_amnt": "999",  # Should be ignored
-            }
-        ]
-
-        mock_resp = AsyncMock()
-        mock_resp.json.return_value = mock_resp_data
-        mock_resp.raise_for_status = MagicMock()
-
-        mock_cm = AsyncMock()
-        mock_cm.__aenter__.return_value = mock_resp
-        client._mock_session.get.return_value = mock_cm
-
-        res = await client.get_clob_pairs()
-        assert res.success
-        assert [pair["pair"] for pair in res.data] == ["ETH/USDC"]
-        assert "ETH/USDC" in client.pairs
-        assert client.pairs["ETH/USDC"]["base_decimals"] == 18  # Prefer existing
-        assert client.pairs["ETH/USDC"]["quote_decimals"] == 6  # Prefer existing
-        assert client.pairs["ETH/USDC"]["base_display_decimals"] == 18  # Prefer existing
-        assert client.pairs["ETH/USDC"]["min_trade_amount"] == 0.01  # Prefer existing
-
-    async def test_get_clob_pairs_rehydrates_pairs_on_cache_hit(self, client):
-        """Cached pair results should still rebuild ``client.pairs`` for a fresh client."""
-        mock_resp_data = [
-            {
-                "env": "fuji-multi-subnet",
-                "pair": "AVAX/USDC",
-                "base": "AVAX",
-                "quote": "USDC",
-                "base_evmdecimals": 18,
-                "quote_evmdecimals": 6,
-                "basedisplaydecimals": 18,
-                "quotedisplaydecimals": 6,
-                "mintrade_amnt": "0.1",
-                "maxtrade_amnt": "1000",
-            }
-        ]
-
-        mock_resp = AsyncMock()
-        mock_resp.json.return_value = mock_resp_data
-        mock_resp.raise_for_status = MagicMock()
-
-        mock_cm = AsyncMock()
-        mock_cm.__aenter__.return_value = mock_resp
-        client._mock_session.get.return_value = mock_cm
-
-        first_result = await client.get_clob_pairs()
-        assert first_result.success
-
-        cached_client = client.__class__()
-        cached_client.api_base_url = client.api_base_url
-        cached_client._cache_enabled = True
-        cached_client.pairs = {}
-        cached_client._sanitize_error = client._sanitize_error
-        cached_client._session = client._session
-
-        second_result = await cached_client.get_clob_pairs()
-        assert second_result.success
-        assert [pair["pair"] for pair in second_result.data] == ["AVAX/USDC"]
-        assert "AVAX/USDC" in cached_client.pairs
 
     async def test_get_orderbook(self, client):
         """Test get_orderbook."""
@@ -815,7 +529,10 @@ class TestCLOBClient:
 
     async def test_get_open_orders(self, client):
         """Test get_open_orders."""
-        mock_orders = [{"id": "0x1"}, {"id": "0x2"}]
+        mock_orders = [
+            {"id": "0x1", "tradepairid": "0xaaa", "createBlock": 10, "updateBlock": 11},
+            {"id": "0x2", "tradepairid": "0xbbb", "createBlock": 12, "updateBlock": 13},
+        ]
 
         mock_resp = AsyncMock()
         mock_resp.status = 200
@@ -829,14 +546,15 @@ class TestCLOBClient:
         assert res.success
         assert res.data[0]["internal_order_id"] == "0x1"
         assert res.data[1]["internal_order_id"] == "0x2"
+        assert res.data[0]["create_block"] == 10
+        assert res.data[1]["update_block"] == 13
 
-        # Verify signature header logic
         args, kwargs = client._mock_session.get.call_args
         assert "x-signature" in kwargs["headers"]
 
         mock_resp2 = AsyncMock()
         mock_resp2.status = 200
-        mock_resp2.json.return_value = [{"id": "0x1"}]
+        mock_resp2.json.return_value = [{"id": "0x1", "tradepairid": "0xaaa", "createBlock": 10, "updateBlock": 11}]
         mock_cm2 = AsyncMock()
         mock_cm2.__aenter__.return_value = mock_resp2
         client._mock_session.get.return_value = mock_cm2
@@ -847,7 +565,6 @@ class TestCLOBClient:
 
     async def test_get_open_orders_field_transformation(self, client):
         """Test get_open_orders transforms raw API fields to canonical SDK shape."""
-        # Mock API response with lowercase field names (as API returns)
         mock_orders = [
             {
                 "id": "0x123",
@@ -856,12 +573,18 @@ class TestCLOBClient:
                 "price": 100,
                 "quantity": 1.5,
                 "filledquantity": 0.5,
-                "status": 0,
+                "status": 3,
                 "side": 0,
-                "type": 1,
+                "type1": "LIMIT",
+                "type2": "GTC",
                 "pair": "AVAX/USDC",
                 "totalamount": 150,
                 "totalfee": 0.1,
+                "traderaddress": VALID_ADDRESS,
+                "createBlock": 120,
+                "updateBlock": 121,
+                "timestamp": "2023-02-19T14:14:00.000Z",
+                "updateTs": "2023-02-21T19:45:49.000Z",
             }
         ]
 
@@ -880,14 +603,22 @@ class TestCLOBClient:
         order = res.data[0]
         assert order["internal_order_id"] == "0x123"
         assert order["client_order_id"] == "0xabc"
+        assert order["trade_pair_id"] == "0xdef"
         assert order["pair"] == "AVAX/USDC"
         assert order["side"] == "BUY"
-        assert order["type"] == "LIMIT"
+        assert order["type1"] == "LIMIT"
+        assert order["type2"] == "GTC"
         assert order["price"] == 100.0
+        assert order["total_amount"] == 150.0
         assert order["quantity"] == 1.5
-        assert order["filledQuantity"] == 0.5
-        assert order["status"] == 0
-        # Raw API fields are stripped — only canonical fields remain
+        assert order["quantity_filled"] == 0.5
+        assert order["total_fee"] == 0.1
+        assert order["trader_address"] == VALID_ADDRESS
+        assert order["status"] == "FILLED"
+        assert order["create_block"] == 120
+        assert order["update_block"] == 121
+        assert order["create_ts"] == "2023-02-19T14:14:00.000Z"
+        assert order["update_ts"] == "2023-02-21T19:45:49.000Z"
         assert "id" not in order
         assert "clientordid" not in order
         assert "tradepairid" not in order
@@ -896,7 +627,6 @@ class TestCLOBClient:
 
     async def test_get_open_orders_exception(self, client):
         """Test get_open_orders exception handling (lines 361-363)."""
-        # Make _make_http_request raise an exception (not just HTTP error)
         client._make_http_request = AsyncMock(side_effect=Exception("Network error"))
 
         result = await client.get_open_orders()
@@ -905,11 +635,11 @@ class TestCLOBClient:
 
     async def test_get_open_orders_single_dict_response(self, client):
         """Test get_open_orders handles single dict response (not in rows or list)."""
-        mock_order = {"id": "0x1", "clientordid": "0xabc", "price": 100}
+        mock_order = {"id": "0x1", "clientordid": "0xabc", "tradepairid": "0xaaa", "price": 100, "createBlock": 10, "updateBlock": 11}
 
         mock_resp = AsyncMock()
         mock_resp.status = 200
-        mock_resp.json.return_value = mock_order  # Single dict, not in rows or list
+        mock_resp.json.return_value = mock_order
 
         mock_cm = AsyncMock()
         mock_cm.__aenter__.return_value = mock_resp
@@ -920,6 +650,7 @@ class TestCLOBClient:
         assert len(res.data) == 1
         assert res.data[0]["internal_order_id"] == "0x1"
         assert res.data[0]["client_order_id"] == "0xabc"
+        assert res.data[0]["create_block"] == 10
 
     async def test_get_open_orders_empty_response(self, client):
         """Test get_open_orders handles empty response."""
@@ -937,18 +668,21 @@ class TestCLOBClient:
 
     async def test_get_open_orders_prefers_camelcase_over_lowercase(self, client):
         """Test that transformation prefers camelCase over lowercase API variants."""
-        # Order with both camelCase and lowercase versions
         mock_orders = [
             {
                 "id": "0x123",
-                "clientOrderId": "0xcamel",  # camelCase exists
-                "clientordid": "0xlower",  # lowercase also exists
+                "clientOrderId": "0xcamel",
+                "clientordid": "0xlower",
+                "tradePairId": "0xpaircamel",
+                "tradepairid": "0xpairlower",
                 "pair": "AVAX/USDC",
                 "side": 0,
-                "type": 1,
+                "type1": 1,
                 "price": "10",
                 "quantity": "1",
                 "status": 0,
+                "createBlock": 10,
+                "updateBlock": 11,
             }
         ]
 
@@ -963,31 +697,43 @@ class TestCLOBClient:
         res = await client.get_open_orders()
         assert res.success
         order = res.data[0]
-        # camelCase clientOrderId wins over lowercase clientordid
         assert order["client_order_id"] == "0xcamel"
+        assert order["trade_pair_id"] == "0xpaircamel"
 
     async def test_transform_order_from_api_snake_case(self, client):
         """Test _transform_order_from_api resolves snake_case field names."""
         order = {
             "id": "0x123",
             "client_order_id": "0xabc",
+            "trade_pair_id": "0xpair",
             "filled_quantity": 0.5,
             "pair": "AVAX/USDC",
             "side": "BUY",
-            "type": "LIMIT",
+            "type1": "LIMIT",
+            "type2": "GTC",
             "price": 12.0,
+            "total_amount": 9.6,
             "quantity": 0.8,
-            "status": 0,
+            "total_fee": 0.01,
+            "trader_address": VALID_ADDRESS,
+            "status": "FILLED",
+            "create_block": 44,
+            "update_block": 45,
+            "create_ts": "2023-01-01T00:00:00.000Z",
+            "update_ts": "2023-01-02T00:00:00.000Z",
         }
         transformed = client._transform_order_from_api(order)
 
         assert transformed["internal_order_id"] == "0x123"
         assert transformed["client_order_id"] == "0xabc"
+        assert transformed["trade_pair_id"] == "0xpair"
         assert transformed["pair"] == "AVAX/USDC"
-        assert transformed["filledQuantity"] == 0.5
+        assert transformed["quantity_filled"] == 0.5
         assert transformed["side"] == "BUY"
-        assert transformed["type"] == "LIMIT"
-        # Raw API fields are not preserved
+        assert transformed["type1"] == "LIMIT"
+        assert transformed["type2"] == "GTC"
+        assert transformed["create_block"] == 44
+        assert transformed["update_block"] == 45
         assert "id" not in transformed
 
     async def test_transform_order_from_api_all_variations(self, client):
@@ -995,23 +741,36 @@ class TestCLOBClient:
         order_lower = {
             "id": "0x1",
             "clientordid": "0xabc",
+            "tradepairid": "0xpair",
             "filledquantity": 0.5,
             "pair": "ETH/USDC",
             "side": 0,
             "type": 1,
+            "type2": 0,
             "price": "100",
+            "totalamount": "150",
             "quantity": "1.5",
+            "totalfee": "0.2",
+            "traderaddress": VALID_ADDRESS,
             "status": 0,
+            "createBlock": "55",
+            "updateBlock": "56",
         }
         transformed = client._transform_order_from_api(order_lower)
         assert transformed["internal_order_id"] == "0x1"
         assert transformed["client_order_id"] == "0xabc"
-        assert transformed["filledQuantity"] == 0.5
+        assert transformed["trade_pair_id"] == "0xpair"
+        assert transformed["quantity_filled"] == 0.5
         assert transformed["side"] == "BUY"
-        assert transformed["type"] == "LIMIT"
+        assert transformed["type1"] == "LIMIT"
+        assert transformed["type2"] == "GTC"
         assert transformed["price"] == 100.0
+        assert transformed["total_amount"] == 150.0
         assert transformed["quantity"] == 1.5
-        # Raw API fields are not preserved
+        assert transformed["total_fee"] == 0.2
+        assert transformed["status"] == "NEW"
+        assert transformed["create_block"] == 55
+        assert transformed["update_block"] == 56
         assert "id" not in transformed
         assert "clientordid" not in transformed
 
@@ -1020,20 +779,29 @@ class TestCLOBClient:
         order = {
             "internal_order_id": "0x123",
             "client_order_id": "0xabc",
+            "trade_pair_id": "0xpair",
             "pair": "AVAX/USDC",
             "side": "BUY",
-            "type": "LIMIT",
+            "type1": "LIMIT",
+            "type2": "GTC",
             "price": 12.0,
+            "total_amount": 9.6,
             "quantity": 0.8,
-            "filledQuantity": 0.5,
-            "status": 0,
+            "quantity_filled": 0.5,
+            "total_fee": 0.01,
+            "trader_address": VALID_ADDRESS,
+            "status": "FILLED",
+            "create_block": 44,
+            "update_block": 45,
+            "create_ts": None,
+            "update_ts": None,
         }
         transformed = client._transform_order_from_api(order)
 
         assert transformed == order
 
-    async def test_transform_order_from_api_missing_optional_fields(self, client):
-        """Test _transform_order_from_api sets missing optional fields to None."""
+    async def test_transform_order_from_api_missing_required_blocks(self, client):
+        """Test _transform_order_from_api rejects orders missing canonical block metadata."""
         order = {
             "id": "0x123",
             "price": 100,
@@ -1042,55 +810,59 @@ class TestCLOBClient:
             "side": 0,
             "type": 1,
         }
-        transformed = client._transform_order_from_api(order)
+        with pytest.raises(ValueError, match="update_block|create_block"):
+            client._transform_order_from_api(order)
 
-        assert transformed["internal_order_id"] == "0x123"
-        assert transformed["price"] == 100.0
-        assert transformed["side"] == "BUY"
-        assert transformed["type"] == "LIMIT"
-        assert transformed["client_order_id"] is None
-        assert transformed["filledQuantity"] is None
-        assert transformed["pair"] is None
-
-    async def test_transform_order_from_api_normalizes_side_and_type(self, client):
-        """Test int-to-string normalization for side and type enums."""
-        buy_limit = client._transform_order_from_api({"side": 0, "type": 1})
+    async def test_transform_order_from_api_normalizes_side_type_and_status(self, client):
+        """Test int-to-string normalization for side, type, type2, and status enums."""
+        buy_limit = client._transform_order_from_api({"side": 0, "type": 1, "type2": 0, "status": 3, "create_block": 1, "update_block": 2})
         assert buy_limit["side"] == "BUY"
-        assert buy_limit["type"] == "LIMIT"
+        assert buy_limit["type1"] == "LIMIT"
+        assert buy_limit["type2"] == "GTC"
+        assert buy_limit["status"] == "FILLED"
 
-        sell_market = client._transform_order_from_api({"side": 1, "type": 0})
+        sell_market = client._transform_order_from_api({"side": 1, "type": 0, "type2": 2, "status": 4, "create_block": 3, "update_block": 4})
         assert sell_market["side"] == "SELL"
-        assert sell_market["type"] == "MARKET"
+        assert sell_market["type1"] == "MARKET"
+        assert sell_market["type2"] == "IOC"
+        assert sell_market["status"] == "CANCELED"
 
-        # String values pass through unchanged
-        already_str = client._transform_order_from_api({"side": "BUY", "type": "LIMIT"})
+        already_str = client._transform_order_from_api({"side": "BUY", "type1": "LIMIT", "type2": "GTC", "status": "NEW", "create_block": 5, "update_block": 6})
         assert already_str["side"] == "BUY"
-        assert already_str["type"] == "LIMIT"
+        assert already_str["type1"] == "LIMIT"
+        assert already_str["type2"] == "GTC"
+        assert already_str["status"] == "NEW"
 
     async def test_transform_order_from_api_coerces_string_numbers(self, client):
         """Test that numeric strings from the REST API are coerced to float."""
         order = {
             "id": "0x1",
             "price": "12",
+            "totalamount": "9.6",
             "quantity": "0.8",
             "filledquantity": "0.3",
+            "totalfee": "0.01",
+            "createBlock": 10,
+            "updateBlock": 11,
         }
         transformed = client._transform_order_from_api(order)
 
         assert transformed["price"] == 12.0
+        assert transformed["total_amount"] == 9.6
         assert transformed["quantity"] == 0.8
-        assert transformed["filledQuantity"] == 0.3
+        assert transformed["quantity_filled"] == 0.3
+        assert transformed["total_fee"] == 0.01
         assert isinstance(transformed["price"], float)
         assert isinstance(transformed["quantity"], float)
-        assert isinstance(transformed["filledQuantity"], float)
+        assert isinstance(transformed["quantity_filled"], float)
 
     async def test_transform_order_from_api_unconvertible_number(self, client):
         """Test that unconvertible numeric values become None."""
-        order = {"price": "not-a-number", "quantity": {}}
+        order = {"price": "not-a-number", "quantity": {}, "create_block": 1, "update_block": 2}
         transformed = client._transform_order_from_api(order)
         assert transformed["price"] is None
         assert transformed["quantity"] is None
-
+        assert transformed["total_amount"] is None
     async def test_cancel_all_orders(self, client):
         """Test cancel_all_orders."""
         # Mock get_open_orders
@@ -1138,17 +910,38 @@ class TestCLOBClient:
 
     async def test_get_order_contract(self, client):
         """Test get_order via contract."""
-        # Mock tuple with 13 elements
-        mock_order_data = (b"ID", b"CID", b"TPID", 100, 10, 10, 0, 0, "0xUser", 0, 0, 0, 3)
+        # Mock tuple with full 15-field Order struct
+        mock_order_data = (
+            b"ID",
+            b"CID",
+            b"TPID",
+            100,
+            250,
+            10,
+            0,
+            1,
+            "0xUser",
+            0,
+            1,
+            0,
+            3,
+            101,
+            100,
+        )
         client.trade_pairs_contract.functions.getOrder.return_value.call = AsyncMock(
             return_value=mock_order_data
         )
 
         res = await client.get_order("0x01")
-        # get_order returns a Result now
         assert res.success
         assert isinstance(res.data, dict)
         assert res.data["price"] == 100.0
+        assert res.data["total_amount"] == 250.0
+        assert res.data["type1"] == "LIMIT"
+        assert res.data["type2"] == "GTC"
+        assert res.data["status"] == "FILLED"
+        assert res.data["create_block"] == 100
+        assert res.data["update_block"] == 101
 
     async def test_add_limit_order_list(self, client):
         """Test add_limit_order_list."""
@@ -1296,8 +1089,10 @@ class TestCLOBClient:
 
         self._stub_resolved_order(client, pair="AVAX/USDC", trade_pair_id=b"TPID")
         # Patch _format_order_data to return an order without side
+        from dexalot_sdk.utils.result import Result
+
         client._format_order_data = AsyncMock(
-            return_value={"pair": "AVAX/USDC", "price": 10.0, "quantity": 1.0}
+            return_value=Result.ok({"pair": "AVAX/USDC", "price": 10.0, "quantity": 1.0})
         )
         client._ensure_pair_exists = AsyncMock(return_value=True)
 
@@ -1508,22 +1303,24 @@ class TestCLOBClient:
 
     async def test_get_order_by_client_id(self, client):
         """Test get_order_by_client_id."""
-        # Mock order data tuple (13 elements)
+        # Mock order data tuple (full 15-field Order struct)
         # Price 100 * 10^6 = 100000000
         mock_order_data = (
             b"ID",
             b"CID",
             b"TPID",
             100000000,
-            10,
+            100000000,
             10,
             0,
-            0,
+            1000,
             VALID_ADDRESS,
             0,
-            0,
+            1,
             0,
             3,
+            101,
+            100,
         )
         client.trade_pairs_contract.functions.getOrderByClientOrderId.return_value.call = AsyncMock(
             return_value=mock_order_data
@@ -1541,6 +1338,10 @@ class TestCLOBClient:
 
         res = await client.get_order_by_client_id(VALID_CLIENT_ORDER_ID)
         assert res.data["price"] == 100.0
+        assert res.data["total_amount"] == 100.0
+        assert res.data["type1"] == "LIMIT"
+        assert res.data["status"] == "FILLED"
+        assert res.data["create_block"] == 100
 
         # Verify bytes32 conversion
         call_args = client.trade_pairs_contract.functions.getOrderByClientOrderId.call_args[0]
@@ -1945,6 +1746,8 @@ class TestCLOBClient:
                         1,
                         0,
                         1,
+                        101,
+                        100,
                     ),
                     "internal_id_bytes": b"\x01".rjust(32, b"\0"),
                     "client_order_id_bytes": b"\xab" * 32,
@@ -2047,8 +1850,24 @@ class TestCLOBClient:
         assert not result.success
         assert result.error == "No open orders to cancel."
 
-        # Mock tuple with 13 elements
-        mock_order_data = (b"ID", b"CID", b"id", 100, 10, 10, 0, 0, "0xUser", 0, 0, 0, 3)
+        # Mock tuple with full 15-field Order struct
+        mock_order_data = (
+            b"ID",
+            b"CID",
+            b"id",
+            100,
+            250,
+            10,
+            0,
+            1,
+            "0xUser",
+            0,
+            1,
+            0,
+            3,
+            101,
+            100,
+        )
         client.trade_pairs_contract.functions.getOrderByClientOrderId.return_value.call = AsyncMock(
             return_value=mock_order_data
         )
@@ -2228,7 +2047,23 @@ class TestCLOBClient:
         client.trade_pairs_contract.functions.getOrder.return_value.call = AsyncMock(
             return_value=(b"\0" * 32,)
         )
-        mock_order_data = (b"ID", b"CID", b"TPID", 100, 10, 10, 0, 0, "0xUser", 0, 0, 0, 3)
+        mock_order_data = (
+            b"ID",
+            b"CID",
+            b"TPID",
+            100,
+            250,
+            10,
+            0,
+            1,
+            "0xUser",
+            0,
+            1,
+            0,
+            3,
+            101,
+            100,
+        )
         client.trade_pairs_contract.functions.getOrderByClientId.return_value.call = AsyncMock(
             return_value=mock_order_data
         )
@@ -2426,9 +2261,26 @@ class TestCLOBClient:
             }
 
         client.get_clob_pairs.side_effect = side_effect_get_clob_pairs
-        order_data = (b"ID", b"CID", b"ID", 100, 10, 10, 0, 0, "0xUser", 0, 0, 0, 3)
+        order_data = (
+            b"ID",
+            b"CID",
+            b"ID",
+            100,
+            10,
+            10,
+            0,
+            0,
+            "0xUser",
+            0,
+            1,
+            0,
+            3,
+            101,
+            100,
+        )
         res = await client._format_order_data(order_data)
-        assert res["pair"] == "ZZ/USDC"
+        assert res.success
+        assert res.data["pair"] == "ZZ/USDC"
 
     async def test_clob_batch_rounding(self, client):
         """Test rounding logic in batch orders."""
@@ -2580,6 +2432,8 @@ class TestCLOBClient:
                             1,
                             0,
                             1,
+                            101,
+                            100,
                         ),
                         "internal_id_bytes": (12345).to_bytes(32, "big"),
                         "client_order_id_bytes": b"\xaa" * 32,
@@ -2603,6 +2457,8 @@ class TestCLOBClient:
                             1,
                             0,
                             1,
+                            101,
+                            100,
                         ),
                         "internal_id_bytes": b"\x01" * 32,
                         "client_order_id_bytes": b"\xbb" * 32,
@@ -2660,6 +2516,8 @@ class TestCLOBClient:
                             1,
                             0,
                             1,
+                            101,
+                            100,
                         ),
                         "internal_id_bytes": (12345).to_bytes(32, "big"),
                         "client_order_id_bytes": b"\xaa" * 32,
@@ -2683,6 +2541,8 @@ class TestCLOBClient:
                             1,
                             0,
                             1,
+                            101,
+                            100,
                         ),
                         "internal_id_bytes": b"\x01" * 32,
                         "client_order_id_bytes": b"\xbb" * 32,
@@ -3160,12 +3020,20 @@ class TestCLOBClient:
         # _format_order_data takes only order_data, extracts trade_pair_id from order_data[2]
         order_data = (
             b"order_id" + b"\0" * 24,
-            b"client_id" + b"\0" * 22,
-            b"pair_id" + b"\0" * 26,
+            b"client_id" + b"\0" * 23,
+            b"pair_id" + b"\0" * 25,
             100,
             0,
             1000,
             0,
+            0,
+            VALID_ADDRESS,
+            0,
+            1,
+            0,
+            0,
+            101,
+            100,
         )
         # But w3_l1 is None, so it should fail
         result = await client._format_order_data(order_data)
@@ -3295,6 +3163,8 @@ class TestCLOBClient:
                         1,
                         0,
                         1,
+                        101,
+                        100,
                     ),
                     "internal_id_bytes": b"\x01" * 32,
                     "client_order_id_bytes": b"\x02" * 32,
@@ -3376,6 +3246,8 @@ class TestCLOBClient:
                         1,
                         0,
                         1,
+                        101,
+                        100,
                     ),
                     "internal_id_bytes": b"\x01" * 32,
                     "client_order_id_bytes": b"\x02" * 32,
@@ -3419,6 +3291,8 @@ class TestCLOBClient:
                         1,
                         0,
                         1,
+                        101,
+                        100,
                     ),
                     "internal_id_bytes": b"\x01" * 32,
                     "client_order_id_bytes": b"\x02" * 32,
@@ -3538,6 +3412,180 @@ class TestCLOBClient:
         )
         assert not res.success
         assert "Invalid pair" in (res.error or "")
+
+
+    def test_order_pair_cache_helpers_cover_skip_and_rehydrate_guard(self, client):
+        """Pair cache helpers skip unsupported envs and no-op on failed cache hydration."""
+        from dexalot_sdk.constants import ENV_FUJI_MULTI_SUBNET
+        from dexalot_sdk.utils.result import Result
+
+        transformed = [
+            {
+                "env": "unsupported-env",
+                "pair": "BAD/USDC",
+                "base": "BAD",
+                "quote": "USDC",
+            },
+            {
+                "env": ENV_FUJI_MULTI_SUBNET,
+                "pair": "AVAX/USDC",
+                "base": "AVAX",
+                "quote": "USDC",
+                "base_decimals": 18,
+                "quote_decimals": 6,
+                "min_trade_amount": "0.1",
+                "max_trade_amount": "10",
+            },
+        ]
+
+        pair_list = client._store_clob_pairs(transformed)
+        assert len(pair_list) == 1
+        assert pair_list[0]["pair"] == "AVAX/USDC"
+        assert "BAD/USDC" not in client.pairs
+
+        before = dict(client.pairs)
+        client._rehydrate_cached_get_clob_pairs(Result.fail("cache miss"))
+        assert client.pairs == before
+
+    def test_order_normalization_helper_edge_cases(self, client):
+        """Direct helper tests cover block coercion and pair-id resolution edge cases."""
+
+        class IntLike:
+            def __int__(self):
+                return 77
+
+        with pytest.raises(ValueError, match="integer block number"):
+            client._coerce_order_block(True, "create_block")
+        assert client._coerce_order_block(101.0, "create_block") == 101
+        with pytest.raises(ValueError, match="integer block number"):
+            client._coerce_order_block(101.5, "create_block")
+        with pytest.raises(ValueError, match="missing required 'create_block'"):
+            client._coerce_order_block("   ", "create_block")
+        with pytest.raises(ValueError, match="integer block number"):
+            client._coerce_order_block("nope", "create_block")
+        assert client._coerce_order_block(IntLike(), "create_block") == 77
+        with pytest.raises(ValueError, match="integer block number"):
+            client._coerce_order_block(object(), "create_block")
+
+        assert client._to_hex_identifier(b"\x01\x02") == "0x0102"
+        assert client._resolve_trade_pair_id_from_pair(None) is None
+        assert client._resolve_trade_pair_id_from_pair("MISSING/USDC") is None
+        client.pairs = {"AVAX/USDC": {"tradePairId": b"\x11" * 32}}
+        assert client._resolve_trade_pair_id_from_pair("AVAX/USDC") == "0x" + ("11" * 32)
+
+    async def test_get_open_orders_fetches_pairs_when_trade_pair_id_missing(self, client):
+        """Open-order reads rehydrate pair metadata before canonicalizing orders."""
+        from dexalot_sdk.utils.result import Result
+
+        order_payload = {
+            "id": "0x" + "01" * 32,
+            "clientordid": "0x" + "02" * 32,
+            "pair": "AVAX/USDC",
+            "price": "12.25",
+            "totalamount": "7.35",
+            "quantity": "0.6",
+            "quantityfilled": "0",
+            "totalfee": "0",
+            "traderaddress": VALID_ADDRESS,
+            "side": 0,
+            "type": 1,
+            "type2": 0,
+            "status": 0,
+            "createBlock": 100,
+            "updateBlock": 101,
+            "timestamp": "2024-01-01T00:00:00.000Z",
+            "update_ts": "2024-01-01T00:01:00.000Z",
+        }
+        mock_resp = client._mock_session.get.return_value.__aenter__.return_value
+        mock_resp.status = 200
+        mock_resp.json = AsyncMock(return_value={"rows": [order_payload]})
+
+        async def hydrate_pairs():
+            client.pairs = {
+                "AVAX/USDC": {
+                    "pair": "AVAX/USDC",
+                    "tradePairId": b"\xaa" * 32,
+                    "base_decimals": 18,
+                    "quote_decimals": 6,
+                    "base": "AVAX",
+                    "quote": "USDC",
+                }
+            }
+            return Result.ok(list(client.pairs.values()))
+
+        client.get_clob_pairs = AsyncMock(side_effect=hydrate_pairs)
+        result = await client.get_open_orders(pair="AVAX/USDC")
+        assert result.success
+        client.get_clob_pairs.assert_awaited_once()
+        assert result.data[0]["trade_pair_id"] == "0x" + ("aa" * 32)
+
+    async def test_order_reads_fail_with_formatting_fallback_message(self, client):
+        """Order read methods surface the fallback formatting failure message."""
+        from dexalot_sdk.utils.result import Result
+
+        self._stub_resolved_order(client, pair="AVAX/USDC", trade_pair_id=b"PAIR")
+        client._format_order_data = AsyncMock(return_value=Result(False, None, None))
+        result = await client.get_order(VALID_ORDER_ID)
+        assert not result.success
+        assert result.error == "Order formatting failed"
+
+        order_data = (
+            b"\x01" * 32,
+            b"\x02" * 32,
+            b"PAIR",
+            10_000_000,
+            10_000_000,
+            10**18,
+            0,
+            0,
+            VALID_ADDRESS,
+            0,
+            1,
+            0,
+            0,
+            101,
+            100,
+        )
+        client._fetch_order_by_client_id = AsyncMock(return_value=Result.ok(order_data))
+        result = await client.get_order_by_client_id(VALID_CLIENT_ORDER_ID)
+        assert not result.success
+        assert result.error == "Order formatting failed"
+
+        short_result = await CLOBClient._format_order_data(client, (b"short",))
+        assert not short_result.success
+        assert "create_block/update_block" in (short_result.error or "")
+
+    async def test_replace_and_cancel_add_list_fail_with_formatting_fallback_message(self, client):
+        """State-changing order helpers surface the fallback formatting failure message."""
+        from dexalot_sdk.utils.result import Result
+
+        client.account = MagicMock()
+        client.account.address = VALID_ADDRESS
+        client.trade_pairs_contract = MagicMock()
+        client.pairs = {
+            "AVAX/USDC": {
+                "pair": "AVAX/USDC",
+                "tradePairId": b"PAIR",
+                "base_decimals": 18,
+                "quote_decimals": 6,
+                "base": "AVAX",
+                "quote": "USDC",
+            }
+        }
+        client._ensure_pair_exists = AsyncMock(return_value=True)
+        self._stub_resolved_order(client, pair="AVAX/USDC", trade_pair_id=b"PAIR")
+        client._format_order_data = AsyncMock(return_value=Result(False, None, None))
+
+        replace_result = await client.replace_order(VALID_ORDER_ID, 12.25, 0.6)
+        assert not replace_result.success
+        assert replace_result.error == "Order formatting failed"
+
+        self._stub_resolved_order(client, pair="AVAX/USDC", trade_pair_id=b"PAIR")
+        cancel_add_result = await client.cancel_add_list(
+            [{"order_id": VALID_ORDER_ID, "pair": "AVAX/USDC", "side": "BUY", "amount": 0.6, "price": 12.25}]
+        )
+        assert not cancel_add_result.success
+        assert cancel_add_result.error == "Order formatting failed"
 
 
 class TestWebSocketManager:

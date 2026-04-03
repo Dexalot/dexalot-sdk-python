@@ -236,8 +236,20 @@ if result.success:
 result = await client.get_open_orders(pair="ALOT/USDC")
 if result.success:
     for order in result.data:
-        print(order["internal_order_id"], order["client_order_id"], order["price"], order["quantity"])
+        print(
+            order["internal_order_id"],
+            order["client_order_id"],
+            order["pair"],
+            order["side"],
+            order["type1"],
+            order["status"],
+            order["price"],
+            order["quantity"],
+            order["create_block"],
+        )
 ```
+
+Order reads return the SDK's full canonical order shape with normalized identifiers, human-readable enum labels, integer `create_block` / `update_block`, and optional `create_ts` / `update_ts` metadata.
 
 ### Get a specific order
 
