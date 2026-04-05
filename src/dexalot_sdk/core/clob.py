@@ -746,6 +746,14 @@ class CLOBClient(DexalotBaseClient):
                 f"Order field '{field_name}' must be an integer block number."
             ) from exc
 
+    def _coerce_optional_order_block(self, value: object, field_name: str) -> int | None:
+        """Convert optional API block metadata to ``int`` when present."""
+        if value is None:
+            return None
+        if isinstance(value, str) and not value.strip():
+            return None
+        return self._coerce_order_block(value, field_name)
+
     def _enum_to_name(self, value: object, mapping: dict[int, str]) -> object:
         """Normalize enum integers from contract/API reads into string labels."""
         if isinstance(value, int):
@@ -793,6 +801,8 @@ class CLOBClient(DexalotBaseClient):
         create_block: object,
         create_ts: object = None,
         update_ts: object = None,
+        tx: object = None,
+        require_block_fields: bool = True,
     ) -> dict:
         """Build the canonical SDK order dict shared by REST and contract reads."""
         return {
@@ -810,10 +820,19 @@ class CLOBClient(DexalotBaseClient):
             "type1": type1,
             "type2": type2,
             "status": status,
-            "update_block": self._coerce_order_block(update_block, "update_block"),
-            "create_block": self._coerce_order_block(create_block, "create_block"),
+            "update_block": (
+                self._coerce_order_block(update_block, "update_block")
+                if require_block_fields
+                else self._coerce_optional_order_block(update_block, "update_block")
+            ),
+            "create_block": (
+                self._coerce_order_block(create_block, "create_block")
+                if require_block_fields
+                else self._coerce_optional_order_block(create_block, "create_block")
+            ),
             "create_ts": create_ts,
             "update_ts": update_ts,
+            "tx": tx,
         }
 
     @track_method("clob")
@@ -858,8 +877,14 @@ class CLOBClient(DexalotBaseClient):
             or order.get("createblock")
             or order.get("create_block_number")
         )
-        create_ts = order.get("create_ts") or order.get("createTs") or order.get("timestamp")
+        create_ts = (
+            order.get("create_ts")
+            or order.get("createTs")
+            or order.get("timestamp")
+            or order.get("ts")
+        )
         update_ts = order.get("update_ts") or order.get("updateTs") or order.get("updatets")
+        tx = order.get("tx") or order.get("tx_hash") or order.get("txHash")
 
         return self._build_canonical_order(
             internal_order_id=internal_order_id,
@@ -894,6 +919,8 @@ class CLOBClient(DexalotBaseClient):
             create_block=create_block,
             create_ts=create_ts,
             update_ts=update_ts,
+            tx=tx,
+            require_block_fields=False,
         )
 
     async def get_open_orders(self, pair: str | None = None) -> Result[list]:

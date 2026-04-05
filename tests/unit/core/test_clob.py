@@ -621,11 +621,11 @@ class TestCLOBClient:
         assert order["update_block"] == 121
         assert order["create_ts"] == "2023-02-19T14:14:00.000Z"
         assert order["update_ts"] == "2023-02-21T19:45:49.000Z"
+        assert order["tx"] is None
         assert "id" not in order
         assert "clientordid" not in order
         assert "tradepairid" not in order
         assert "totalamount" not in order
-        assert "tx" not in order
 
     async def test_get_open_orders_exception(self, client):
         """Test get_open_orders exception handling (lines 361-363)."""
@@ -804,23 +804,35 @@ class TestCLOBClient:
             "update_block": 45,
             "create_ts": None,
             "update_ts": None,
+            "tx": None,
         }
         transformed = client._transform_order_from_api(order)
 
         assert transformed == order
 
     async def test_transform_order_from_api_missing_required_blocks(self, client):
-        """Test _transform_order_from_api rejects orders missing canonical block metadata."""
+        """Test _transform_order_from_api allows block-less signed-order API rows."""
         order = {
             "id": "0x123",
+            "clientordid": "0xabc",
+            "pair": "AVAX/USDC",
             "price": 100,
             "quantity": 1.5,
+            "quantityfilled": 0,
             "status": 0,
             "side": 0,
             "type": 1,
+            "type2": 0,
+            "ts": "2026-04-05T13:41:13.000Z",
+            "update_ts": "2026-04-05T13:41:13.000Z",
+            "tx": "0xtxhash",
         }
-        with pytest.raises(ValueError, match="update_block|create_block"):
-            client._transform_order_from_api(order)
+        transformed = client._transform_order_from_api(order)
+        assert transformed["create_block"] is None
+        assert transformed["update_block"] is None
+        assert transformed["create_ts"] == "2026-04-05T13:41:13.000Z"
+        assert transformed["update_ts"] == "2026-04-05T13:41:13.000Z"
+        assert transformed["tx"] == "0xtxhash"
 
     async def test_transform_order_from_api_normalizes_side_type_and_status(self, client):
         """Test int-to-string normalization for side, type, type2, and status enums."""
@@ -3478,6 +3490,8 @@ class TestCLOBClient:
 
         with pytest.raises(ValueError, match="integer block number"):
             client._coerce_order_block(True, "create_block")
+        with pytest.raises(ValueError, match="missing required 'create_block'"):
+            client._coerce_order_block(None, "create_block")
         assert client._coerce_order_block(101.0, "create_block") == 101
         with pytest.raises(ValueError, match="integer block number"):
             client._coerce_order_block(101.5, "create_block")
@@ -3486,8 +3500,12 @@ class TestCLOBClient:
         with pytest.raises(ValueError, match="integer block number"):
             client._coerce_order_block("nope", "create_block")
         assert client._coerce_order_block(IntLike(), "create_block") == 77
+        assert client._coerce_order_block(b"15", "create_block") == 15
         with pytest.raises(ValueError, match="integer block number"):
             client._coerce_order_block(object(), "create_block")
+        assert client._coerce_optional_order_block(None, "create_block") is None
+        assert client._coerce_optional_order_block("   ", "create_block") is None
+        assert client._coerce_optional_order_block("0x10", "create_block") == 16
 
         assert client._to_hex_identifier(b"\x01\x02") == "0x0102"
         assert client._resolve_trade_pair_id_from_pair(None) is None
