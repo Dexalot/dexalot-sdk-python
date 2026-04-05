@@ -249,7 +249,7 @@ if result.success:
         )
 ```
 
-Order reads return the SDK's full canonical order shape with normalized identifiers, human-readable enum labels, integer `create_block` / `update_block`, and optional `create_ts` / `update_ts` metadata.
+Order reads return the SDK's full canonical order shape with normalized identifiers and human-readable enum labels. Contract-backed reads include integer `create_block` / `update_block`; API-backed open orders may return those fields as `None` when the API omits them, while still carrying `create_ts` / `update_ts` and `tx` when available.
 
 ### Get a specific order
 
