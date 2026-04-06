@@ -139,88 +139,38 @@ def cmd_delete(args: argparse.Namespace) -> int:
     return 0
 
 
-_DESCRIPTION = """\
-Manage the Dexalot encrypted secrets vault.
-
-The vault is a local JSON file with Fernet-encrypted values.
-Key names are stored in plain text; only values are encrypted.
-
-Environment variables (also read from .env in the current directory):
-  DEXALOT_SECRETS_VAULT_PATH   Path to the vault file
-                                (default: ~/.dexalot/secrets_vault.json)
-  DEXALOT_SECRETS_VAULT_KEY    Encryption key - if not set, prompted interactively\
-"""
-
-_EPILOG = """\
-Examples:
-  # 1. Generate a new encryption key and save it somewhere safe:
-  secrets-vault keygen
-
-  # 2. Store a secret (prompts for the encryption key if not in env):
-  secrets-vault add PRIVATE_KEY 0xabc123...
-  secrets-vault add API_KEY sk-...
-
-  # 3. List all stored secret names:
-  secrets-vault list
-
-  # 4. Retrieve a decrypted value:
-  secrets-vault get PRIVATE_KEY
-
-  # 5. Remove a secret:
-  secrets-vault delete PRIVATE_KEY
-
-  # Supply the key via environment to avoid repeated prompts:
-  export DEXALOT_SECRETS_VAULT_KEY=<your-fernet-key>
-  secrets-vault list\
-"""
-
-
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(
-        prog="secrets-vault",
-        description=_DESCRIPTION,
-        epilog=_EPILOG,
-        formatter_class=argparse.RawDescriptionHelpFormatter,
-    )
-    sub = parser.add_subparsers(dest="command", metavar="<command>")
-    sub.required = False
+    parser = argparse.ArgumentParser(description="Manage Dexalot encrypted secrets vault.")
+    sub = parser.add_subparsers(dest="command", required=True)
 
-    sub.add_parser("keygen", help="Generate a new Fernet encryption key and print it.")
+    p = sub.add_parser("keygen", help="Generate a new encryption key.")
+    p.set_defaults(func=cmd_keygen)
 
-    p_add = sub.add_parser("add", help="Encrypt and store (or overwrite) a key-value pair.")
-    p_add.add_argument("key", help="Secret name, e.g. PRIVATE_KEY")
-    p_add.add_argument("value", help="Plaintext value to encrypt and store")
+    p = sub.add_parser("add", help="Add or overwrite a key/value pair.")
+    p.add_argument("key", help="Key name to store")
+    p.add_argument("value", help="Secret value to encrypt and store")
+    p.set_defaults(func=cmd_add)
 
-    p_get = sub.add_parser("get", help="Retrieve and decrypt a value.")
-    p_get.add_argument("key", help="Secret name to retrieve")
+    p = sub.add_parser("get", help="Retrieve and decrypt a value.")
+    p.add_argument("key", help="Key name to retrieve")
+    p.set_defaults(func=cmd_get)
 
-    sub.add_parser("list", help="List all stored key names (values are not decrypted).")
+    p = sub.add_parser("list", help="List stored key names.")
+    p.set_defaults(func=cmd_list)
 
-    p_del = sub.add_parser("delete", help="Remove a key-value pair from the vault.")
-    p_del.add_argument("key", help="Secret name to delete")
+    p = sub.add_parser("delete", help="Delete a stored key/value pair.")
+    p.add_argument("key", help="Key name to delete")
+    p.set_defaults(func=cmd_delete)
 
     return parser
 
 
-def main(argv: list[str] | None = None) -> int:
+def main() -> int:
     _load_dotenv()
     parser = build_parser()
-    args = parser.parse_args(argv)
-
-    if args.command == "keygen":
-        return cmd_keygen(args)
-    if args.command == "add":
-        return cmd_add(args)
-    if args.command == "get":
-        return cmd_get(args)
-    if args.command == "list":
-        return cmd_list(args)
-    if args.command == "delete":
-        return cmd_delete(args)
-
-    parser.print_help(sys.stderr)
-    return 1
+    args = parser.parse_args()
+    return args.func(args)
 
 
-if __name__ == "__main__":  # pragma: no cover
+if __name__ == "__main__":
     raise SystemExit(main())

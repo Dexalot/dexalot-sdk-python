@@ -1,13 +1,32 @@
 [build-system]
-requires = ["setuptools>=61.0"]
+requires = ["setuptools>=77.0.3", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "dexalot-sdk"
-version = "0.5.11"
+license = "MIT"
+license-files = [
+    "LICENSE.txt"
+]
+version = "0.5.12"
 description = "Dexalot Python SDK - Core library for Dexalot interaction"
 readme = "README.md"
 requires-python = ">=3.12,<3.14"
+authors = [
+    { name = "Dexalot" }
+]
+keywords = ["dexalot", "dex", "defi", "web3", "trading", "avalanche"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Office/Business :: Financial",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+    "Typing :: Typed",
+]
 dependencies = [
     "web3>=6.0.0,<8",
     "aiohttp>=3.9,<4",
@@ -17,13 +36,20 @@ dependencies = [
     "cryptography>=43,<45",
 ]
 
+[project.urls]
+Homepage = "https://dexalot.com"
+Documentation = "https://docs.dexalot.com"
+Repository = "https://github.com/Dexalot/dexalot-sdk-python"
+
 [dependency-groups]
 dev = [
+    "build",
     "mypy",
     "pytest",
     "pytest-asyncio",
     "pytest-cov",
     "ruff",
+    "twine",
 ]
 
 docs = [
@@ -35,8 +61,11 @@ docs = [
 secrets-vault = "dexalot_sdk.scripts.secrets_vault_cli:main"
 
 [tool.setuptools]
-packages = ["dexalot_sdk", "dexalot_sdk.core", "dexalot_sdk.utils", "dexalot_sdk.scripts"]
-package-dir = {"dexalot_sdk" = "src/dexalot_sdk", "dexalot_sdk.scripts" = "scripts"}
+include-package-data = true
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
 
 [tool.setuptools.package-data]
 "*" = ["*.json", "data/*.json", "py.typed"]

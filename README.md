@@ -1,5 +1,11 @@
 # Dexalot Python SDK
 
+## Disclaimer
+
+Here is our first public release of Dexalot SDK for Python.  It is in alpha testing right now.  Fork it, contribute to it and use it to integrate with Dexalot and let us know how we can improve it.
+
+**Please Note**: The public interface may undergo breaking changes.
+
 ## Overview
 
 `dexalot-sdk` is a Python library that provides core functionality for interacting with the Dexalot decentralized exchange. It offers a unified client interface for trading operations, cross-chain transfers, and portfolio management across multiple blockchain networks.
@@ -41,25 +47,20 @@ User-facing methods accept common symbol variants: surrounding whitespace is ign
 
 ## Installation
 
-### Install `uv`
-
-`uv` is the recommended way to manage Python environments and dependencies for this SDK.
+Install from PyPI:
 
 ```sh
-# macOS / Linux
-curl -LsSf https://astral.sh/uv/install.sh | sh
-
-# or with Homebrew
-brew install uv
+pip install dexalot-sdk
 ```
 
-Install the SDK using uv (recommended):
+For local development with `uv`:
 
 ```sh
-uv venv && uv sync --group dev
+uv venv
+uv sync --group dev
 ```
 
-Or install with pip:
+Or with pip in editable mode from the repository root:
 
 ```sh
 pip install -e .
@@ -165,7 +166,13 @@ See `examples/error_handling.py` for comprehensive error handling patterns.
 
 ## Scripts
 
-No scripts are included in the SDK. For prompt validation, use the `dexalot-mcp` package.
+The published package includes the `secrets-vault` console command:
+
+```sh
+secrets-vault keygen
+```
+
+Repository maintenance utilities such as `scripts/version_manager.py` are kept in the repo and are not part of the installed package.
 
 ## Testing
 
