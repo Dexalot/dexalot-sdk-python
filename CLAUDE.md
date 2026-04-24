@@ -95,6 +95,39 @@ Unit tests in `tests/unit/` have no external dependencies. Integration tests in 
 
 ---
 
+## Release Workflow
+
+Releases are **tag-driven**. Pushing a `v*` tag to `main` triggers
+`.github/workflows/pypi.yml`, which publishes to PyPI via trusted
+publishing (OIDC, `id-token: write`). The workflow also supports
+`workflow_dispatch` for manual reruns.
+
+**Gate, enforced by the workflow:** the tag name must equal
+`v{project.version}` in `pyproject.toml`. The workflow aborts with a
+`SystemExit` when the two don't match.
+
+**Steps:**
+
+1. `python scripts/version_manager.py <new-version>` — syncs `VERSION`,
+   `pyproject.toml`, `src/dexalot_sdk/__init__.py`, and `uv.lock`.
+2. Commit, PR, merge to `main`.
+3. From `main`: `git tag -a v<new-version> -m "Release v<new-version>"`
+   then `git push origin v<new-version>`.
+4. Watch the **Publish to PyPI** workflow in GitHub Actions; on
+   green, verify at <https://pypi.org/p/dexalot-sdk>.
+
+**Non-obvious:**
+
+- PyPI does not allow re-uploading a version under the same number;
+  `yank` is the only remediation. Always bump before tagging.
+- The TypeScript counterpart's workflow is stricter (adds ancestor-
+  of-`origin/main` and `ref_type == tag` checks, plus `--provenance`).
+  Consider porting those for defense-in-depth on the Python side.
+- Released versions so far: `v0.5.12` (first public release,
+  2026-04-06).
+
+---
+
 ## Remediation Workflow
 
 Security and performance issues are tracked in `docs/python-sdk-remediation-plan.md`. When working on these items:

@@ -183,6 +183,47 @@ make test  # Unit tests
 make cov   # Coverage report
 ```
 
+## Release
+
+Releases are **tag-driven**. Pushing a `v*` tag to `main` triggers
+`.github/workflows/pypi.yml`, which builds the sdist + wheel and
+publishes to PyPI via trusted publishing (OIDC — no long-lived API
+token is stored anywhere). The workflow also supports
+`workflow_dispatch` for manual reruns (the tag/version match check
+still fires).
+
+**Release gate (enforced by the workflow):** the tag name must equal
+`v{project.version}` in `pyproject.toml`; the workflow aborts with a
+`SystemExit` otherwise.
+
+**Steps:**
+
+1. Sync the version across all version-bearing files via the
+   maintenance script:
+
+   ```sh
+   python scripts/version_manager.py <new-version>
+   # touches VERSION, pyproject.toml, src/dexalot_sdk/__init__.py, uv.lock
+   ```
+
+2. Review the diff, commit on a feature branch, and merge a PR into
+   `main`.
+
+3. From `main`, tag and push:
+
+   ```sh
+   git checkout main && git pull
+   git tag -a v<new-version> -m "Release v<new-version>"
+   git push origin v<new-version>
+   ```
+
+4. Watch the **Publish to PyPI** workflow in GitHub Actions. On green,
+   verify the new version at <https://pypi.org/p/dexalot-sdk>.
+
+> ⚠️ Once a version is published to PyPI it cannot be re-uploaded
+> under the same number — it can only be *yanked*. Always bump the
+> version before tagging.
+
 
 ## Caching
 
