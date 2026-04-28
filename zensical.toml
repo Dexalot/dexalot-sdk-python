@@ -37,7 +37,15 @@ toggle.name = "Switch to light mode"
 
 [plugins.search]
 
-[plugins.mkdocstrings.python]
+# mkdocstrings: see https://zensical.org/docs/setup/extensions/mkdocstrings
+# The plugin lives under `project.plugins.mkdocstrings.handlers.python`;
+# rendering options nest under the `.options` subkey.
+[project.plugins.mkdocstrings.handlers.python]
+inventories = ["https://docs.python.org/3/objects.inv"]
+paths = ["src"]
+
+[project.plugins.mkdocstrings.handlers.python.options]
 docstring_style = "google"
+inherited_members = true
 show_source = false
 show_root_heading = true
