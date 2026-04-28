@@ -11,7 +11,7 @@ license-files = [
 version = "0.5.12"
 description = "Dexalot Python SDK - Core library for Dexalot interaction"
 readme = "README.md"
-requires-python = ">=3.12,<3.14"
+requires-python = ">=3.12,<3.15"
 authors = [
     { name = "Dexalot" }
 ]
@@ -33,7 +33,7 @@ dependencies = [
     "python-dotenv>=1.0,<2",
     "eth-account>=0.11,<1",
     "websockets>=13.0,<15",
-    "cryptography>=43,<45",
+    "cryptography>=46,<48",
 ]
 
 [project.urls]
@@ -55,6 +55,13 @@ dev = [
 docs = [
     "mkdocstrings[python]>=0.29",
     "zensical>=0.0.29",
+]
+
+# Security audit tooling — kept out of `dev` so a normal contributor install
+# stays lean.  CI installs this group explicitly via `uv sync --group security`.
+security = [
+    "bandit[toml]",
+    "pip-audit",
 ]
 
 [project.scripts]
@@ -84,3 +91,10 @@ dummy-variable-rgx = "^(_+|(_+[a-zA-Z0-9_]*[a-zA-Z0-9]+?))$"
 
 [tool.ruff.lint.mccabe]
 max-complexity = 15
+
+# bandit configuration — used by `make security` and the CI security gate.
+# Skip rules that don't apply to a typed library: assert_used (we use asserts
+# in tests only), and try_except_pass (intentional in some retry paths).
+[tool.bandit]
+exclude_dirs = ["tests", ".venv", ".venv-py313", ".venv-py314", "site", "dist", "docs"]
+skips = ["B101", "B110"]

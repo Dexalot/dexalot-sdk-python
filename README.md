@@ -47,6 +47,8 @@ User-facing methods accept common symbol variants: surrounding whitespace is ign
 
 ## Installation
 
+**Requirements:** Python 3.12, 3.13, or 3.14.
+
 Install from PyPI:
 
 ```sh
