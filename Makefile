@@ -8,7 +8,7 @@ RUFF := .venv/bin/ruff
 MYPY := .venv/bin/mypy
 MYPY_CONFIG := --config-file mypy.ini
 
-.PHONY: setup test cov cov-file int int-file lint lint-fix format mypy typecheck clean docs-serve docs-build
+.PHONY: setup test cov cov-file int int-file lint lint-fix format mypy typecheck security clean docs-serve docs-build
 
 setup:
 	uv venv && uv sync --group dev
@@ -50,6 +50,13 @@ mypy:
 	$(MYPY) $(MYPY_CONFIG) --follow-imports=silent
 
 typecheck: mypy
+
+# Run static security analysis (bandit) and dependency CVE audit (pip-audit).
+# Mirrors the gates that run in .github/workflows/ci.yml.  Run before opening a
+# PR to catch issues your downstream consumers would otherwise flag.
+security:
+	uv run --group security bandit -r src -c pyproject.toml --severity-level high
+	uv run --group security pip-audit --strict
 
 docs-serve:
 	uv run --group docs zensical serve

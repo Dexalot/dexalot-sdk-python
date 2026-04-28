@@ -55,6 +55,15 @@ jobs:
       - name: Install build tooling
         run: python -m pip install --upgrade build twine
 
+      # Defense-in-depth: refuse to publish if any production dep has a known
+      # CVE.  CI runs the same audit on every PR (.github/workflows/ci.yml),
+      # but a vulnerability can be disclosed between the last green PR and the
+      # release tag — this step closes that window.
+      - name: Pre-publish dependency CVE audit (pip-audit)
+        run: |
+          python -m pip install --upgrade pip-audit
+          pip-audit --strict
+
       - name: Build distributions
         run: python -m build
 

@@ -1,0 +1,65 @@
+name: CI
+
+# Pull-request and push-to-main gates: lint, type-check, full test+coverage,
+# static security analysis (bandit), and a dependency CVE audit (pip-audit).
+#
+# A weekly cron run keeps the dependency audit fresh — newly-disclosed CVEs
+# get caught even on quiet weeks with no PR activity.
+#
+# Mirrors the gates available locally via `make lint / mypy / cov / security`.
+on:
+  pull_request:
+  push:
+    branches: [main]
+  schedule:
+    - cron: "0 12 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  quality:
+    name: Quality gate (Python ${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.12", "3.13", "3.14"]
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v4
+        with:
+          enable-cache: true
+
+      - name: Set up Python ${{ matrix.python-version }}
+        run: uv python install ${{ matrix.python-version }}
+
+      - name: Sync dependencies (dev + security)
+        run: uv sync --group dev --group security --python ${{ matrix.python-version }}
+
+      - name: Lint (ruff)
+        run: uv run ruff check .
+
+      - name: Format check (ruff)
+        run: uv run ruff format --check .
+
+      - name: Type check (mypy)
+        run: uv run mypy --config-file mypy.ini --follow-imports=silent
+
+      - name: Tests with coverage
+        run: uv run pytest --cov=src --cov-report=term-missing tests/unit
+
+      - name: Static security analysis (bandit)
+        run: uv run bandit -r src -c pyproject.toml --severity-level high
+
+      - name: Dependency CVE audit (pip-audit)
+        run: uv run pip-audit --strict
