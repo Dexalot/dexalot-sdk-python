@@ -45,10 +45,13 @@ class WebSocketManager:
         self.config = config
         self.logger = logger or get_logger(__name__)
 
-        # Store the running event loop at construction time.  The SDK always
-        # instantiates WebSocketManager from async contexts (DexalotBaseClient
-        # methods are all async), so the loop is always available here.
-        self._loop: asyncio.AbstractEventLoop = asyncio.get_event_loop()
+        # Capture the running event loop lazily at the first sync entry point
+        # (connect/subscribe/unsubscribe).  Doing it here would call
+        # ``asyncio.get_event_loop()``, which is deprecated outside an async
+        # context and raises ``RuntimeError`` in Python 3.14.
+        # ``asyncio.get_running_loop()`` (used in ``_get_loop``) has the same
+        # semantics on 3.12/3.13/3.14: returns the running loop or raises.
+        self._loop: asyncio.AbstractEventLoop | None = None
 
         # Connection state
         self._state = ConnectionState.DISCONNECTED
@@ -82,6 +85,27 @@ class WebSocketManager:
     # Sync public API  (schedule work on the event loop)
     # ------------------------------------------------------------------
 
+    def _get_loop(self) -> asyncio.AbstractEventLoop:
+        """Return the asyncio loop used to schedule work, capturing it lazily.
+
+        The sync entry points below (``connect``, ``subscribe``, ``unsubscribe``)
+        all schedule coroutines on the running event loop.  We capture the loop
+        on first use rather than at ``__init__`` time so that:
+
+        * Constructing a ``WebSocketManager`` outside an event loop is allowed
+          (e.g. in test fixtures or sync configuration code).
+        * Work is always scheduled on the loop that's actually running when the
+          sync entry point is called, not on whatever loop happened to be
+          current at construction time.
+
+        Raises ``RuntimeError`` if no loop is running, which is the same error
+        the underlying ``asyncio.get_running_loop()`` raises on every supported
+        Python version (3.12 / 3.13 / 3.14).
+        """
+        if self._loop is None:
+            self._loop = asyncio.get_running_loop()
+        return self._loop
+
     def connect(self) -> None:
         """
         Start the WebSocket background task.
@@ -100,7 +124,7 @@ class WebSocketManager:
 
         self._state = ConnectionState.CONNECTING
         self._should_reconnect = True
-        self._run_task = self._loop.create_task(self._run())
+        self._run_task = self._get_loop().create_task(self._run())
 
     def subscribe(
         self,
@@ -127,7 +151,7 @@ class WebSocketManager:
         self._subscriptions[subscription_key] = (callback, is_private, meta)
 
         if self.is_connected and self._ws:
-            self._loop.create_task(self._send_subscribe(subscription_key))
+            self._get_loop().create_task(self._send_subscribe(subscription_key))
         elif not self.is_connected:
             self.connect()
 
@@ -138,7 +162,7 @@ class WebSocketManager:
             return
         self.logger.info(f"Unsubscribed from: {subscription_key}")
         if self.is_connected and self._ws:
-            self._loop.create_task(self._send_unsubscribe(subscription_key, spec))
+            self._get_loop().create_task(self._send_unsubscribe(subscription_key, spec))
 
     # ------------------------------------------------------------------
     # Async public API

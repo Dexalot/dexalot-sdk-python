@@ -3824,12 +3824,21 @@ class TestWebSocketManager:
 
     @pytest.fixture
     def manager(self, mock_config, mock_account):
-        """Create a WebSocketManager instance."""
-        return WebSocketManager(
+        """Create a WebSocketManager instance with a pre-injected mock loop.
+
+        ``WebSocketManager`` captures the running asyncio loop lazily at the
+        first sync entry point (``connect``/``subscribe``/``unsubscribe``).
+        Synchronous tests below patch ``manager._loop.create_task`` directly
+        rather than spinning up a real loop, so we inject a mock here.  Tests
+        that need the real lazy-capture path use ``@pytest.mark.asyncio``.
+        """
+        m = WebSocketManager(
             ws_url="wss://test.example.com/ws",
             account=mock_account,
             config=mock_config,
         )
+        m._loop = MagicMock(spec=asyncio.AbstractEventLoop)
+        return m
 
     # ------------------------------------------------------------------
     # Initialization
