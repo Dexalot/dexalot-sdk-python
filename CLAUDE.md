@@ -92,6 +92,8 @@ Unit tests in `tests/unit/` have no external dependencies. Integration tests in 
 - **Nonce manager lock is now lock-free on lookup**: The global `_dict_lock` was removed. `_get_lock()` uses `dict.setdefault()`, which is safe in asyncio's single-threaded model. Per-(chain_id, address) `asyncio.Lock` objects are still used for sequential nonce acquisition.
 - **ERC20 balance concurrency**: `_fetch_erc20_balances_list` uses `asyncio.Semaphore(config.erc20_balance_concurrency)` (default 10) to cap simultaneous `balanceOf` RPC calls. Prevents RPC overload during bulk balance fetches.
 - **RPC security enforcement**: `_reject_insecure_rpc_urls()` in `base.py` rejects plain `http://` RPC endpoints at provider setup time unless `config.allow_insecure_rpc=True`. Fail-fast before any traffic is sent over plaintext.
+- **Public market-data endpoints live under `/api/`, not `/privapi/`**: most SDK calls hit `/privapi/...`, but `get_candles` and `get_market_snapshot` (and therefore `get_24h_stats`) hit `/api/trading/candle-chunk` and `/api/stats/market-snapshot` because those routes are only mounted on the public `/api/` tree on the backend. Same host, different prefix — see `ENDPOINT_TRADING_CANDLE_CHUNK` and `ENDPOINT_STATS_MARKET_SNAPSHOT` in `constants.py`.
+- **`get_chain_token_balances` cache key is order-insensitive**: the public method coerces `tokens: list[str]` into a sorted unique tuple before delegating to the cached internal, so `["AVAX", "USDC"]` and `["USDC", "AVAX"]` share a cache slot. Lists are unhashable; the tuple coercion is also what lets the call participate in `_BALANCE_CACHE` at all.
 
 ---
 

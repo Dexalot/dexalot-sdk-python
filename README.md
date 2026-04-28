@@ -310,10 +310,13 @@ client.invalidate_cache(level="balance")  # Options: static, semi_static, balanc
 - `get_all_portfolio_balances(address=None)`
 - `get_chain_wallet_balance(chain, token, address=None)`
 - `get_chain_wallet_balances(chain, address=None)`
+- `get_chain_token_balances(chain, address=None, tokens=...)`
 - `get_all_chain_wallet_balances(address=None)`
 
 **Orderbook Data (1 second):**
 - `get_orderbook(pair)`
+- `get_candles(pair, interval, limit)`
+- `get_market_snapshot()`
 
 **Note:** Write operations (e.g., `add_order()`, `cancel_order()`, `deposit()`, `withdraw()`) are **never cached** to ensure data integrity.
 

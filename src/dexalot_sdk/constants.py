@@ -42,6 +42,11 @@ ENDPOINT_SIGNED_ORDERS = "/privapi/signed/orders"
 ENDPOINT_RFQ_PAIRS = "/api/rfq/pairs"
 ENDPOINT_RFQ_FIRM_QUOTE = "/api/rfq/firmQuote"
 ENDPOINT_RFQ_PAIR_PRICE = "/api/rfq/pairprice"
+# Public market-data endpoints live under /api/, not /privapi/.  The candle
+# count-back endpoint and global market snapshot are only mounted on the public
+# /api/ tree on the backend (not duplicated under /privapi/).
+ENDPOINT_TRADING_CANDLE_CHUNK = "/api/trading/candle-chunk"
+ENDPOINT_STATS_MARKET_SNAPSHOT = "/api/stats/market-snapshot"
 
 # Default Values
 DEFAULT_DECIMALS = 18

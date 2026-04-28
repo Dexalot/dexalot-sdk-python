@@ -259,6 +259,165 @@ class TestCLOBClient:
         assert book.data["asks"][0]["price"] == 101.0
         assert book.data["asks"][0]["quantity"] == 1.5
 
+    @staticmethod
+    def _stub_http_get_json(client, payload):
+        mock_resp = AsyncMock()
+        mock_resp.raise_for_status = MagicMock()
+        mock_resp.status = 200
+        mock_resp.json = AsyncMock(return_value=payload)
+        mock_cm = AsyncMock()
+        mock_cm.__aenter__.return_value = mock_resp
+        client._mock_session.get.return_value = mock_cm
+        return mock_resp
+
+    async def test_get_candles_happy_path(self, client):
+        rows = [
+            {
+                "date": "2026-04-28T00:00:00.000Z",
+                "open": 25.1,
+                "high": 25.9,
+                "low": 24.8,
+                "close": 25.5,
+                "volume": 1234.5,
+                "quote_volume": 31000.0,
+                "change": 0.0159,
+            }
+        ]
+        self._stub_http_get_json(client, rows)
+
+        result = await client.get_candles("AVAX/USDC", "1h", 100)
+
+        assert result.success
+        assert result.data == rows
+        # Verify the outgoing query params
+        call_args = client._mock_session.get.call_args
+        assert call_args.args[0].endswith("/api/trading/candle-chunk")
+        params = call_args.kwargs["params"]
+        assert params == {
+            "pair": "AVAX/USDC",
+            "intervalnum": 1,
+            "intervalstr": "hour",
+            "count": 100,
+        }
+
+    async def test_get_candles_invalid_interval(self, client):
+        result = await client.get_candles("AVAX/USDC", "2m", 10)
+        assert not result.success
+        assert "Invalid interval" in result.error
+        # No HTTP call should have been made
+        client._mock_session.get.assert_not_called()
+
+    async def test_get_candles_invalid_limit(self, client):
+        for bad in (0, -1, 501, 9999):
+            result = await client.get_candles("AVAX/USDC", "1h", bad)
+            assert not result.success
+            assert "Invalid limit" in result.error
+        client._mock_session.get.assert_not_called()
+
+    async def test_get_candles_invalid_pair(self, client):
+        result = await client.get_candles("not-a-pair", "1h", 10)
+        assert not result.success
+        client._mock_session.get.assert_not_called()
+
+    async def test_get_candles_unexpected_response_shape(self, client):
+        self._stub_http_get_json(client, {"oops": "wrong shape"})
+        result = await client.get_candles("AVAX/USDC", "1m", 5)
+        assert not result.success
+        assert "Unexpected candle response" in result.error
+
+    async def test_get_market_snapshot_happy_path(self, client):
+        envelope = {
+            "market_snapshot": [
+                {
+                    "pair": "AVAX/USDC",
+                    "date": "2026-04-28",
+                    "open": 25.0,
+                    "high": 26.0,
+                    "low": 24.5,
+                    "close": 25.5,
+                    "volume": 100.0,
+                    "quote_volume": 2550.0,
+                    "change": 0.02,
+                }
+            ],
+            "totals": {"volume_usd": 1_000_000, "total_tx": 500},
+            "last24": {"volume_usd": 50_000, "total_tx": 30},
+        }
+        self._stub_http_get_json(client, envelope)
+
+        result = await client.get_market_snapshot()
+
+        assert result.success
+        assert result.data == envelope
+        assert client._mock_session.get.call_args.args[0].endswith("/api/stats/market-snapshot")
+
+    async def test_get_market_snapshot_empty_string_fallback(self, client):
+        # Backend returns the literal string "{}" when the cache is empty.
+        self._stub_http_get_json(client, "{}")
+        result = await client.get_market_snapshot()
+        assert result.success
+        assert result.data == {"market_snapshot": [], "totals": {}, "last24": {}}
+
+    async def test_get_24h_stats_happy_path(self, client):
+        envelope = {
+            "market_snapshot": [
+                {"pair": "ALOT/USDC", "close": 1.1, "volume": 10},
+                {"pair": "AVAX/USDC", "close": 25.5, "volume": 100},
+            ],
+            "totals": {},
+            "last24": {},
+        }
+        self._stub_http_get_json(client, envelope)
+
+        result = await client.get_24h_stats("AVAX/USDC")
+
+        assert result.success
+        assert result.data["pair"] == "AVAX/USDC"
+        assert result.data["close"] == 25.5
+
+    async def test_get_24h_stats_pair_not_in_snapshot(self, client):
+        self._stub_http_get_json(
+            client,
+            {"market_snapshot": [{"pair": "ALOT/USDC", "close": 1.1}], "totals": {}, "last24": {}},
+        )
+        result = await client.get_24h_stats("AVAX/USDC")
+        assert not result.success
+        assert "not found" in result.error
+
+    async def test_get_24h_stats_invalid_pair(self, client):
+        result = await client.get_24h_stats("not-a-pair")
+        assert not result.success
+        client._mock_session.get.assert_not_called()
+
+    async def test_get_candles_http_exception(self, client):
+        client._make_http_request = AsyncMock(side_effect=Exception("network down"))
+        result = await client.get_candles("AVAX/USDC", "1m", 5)
+        assert not result.success
+        assert "fetching candles" in result.error or "network" in result.error
+
+    async def test_get_market_snapshot_unexpected_dict_shape(self, client):
+        # Backend returns a list/number/etc. instead of the expected envelope.
+        self._stub_http_get_json(client, [1, 2, 3])
+        result = await client.get_market_snapshot()
+        assert not result.success
+        assert "Unexpected market snapshot" in result.error
+
+    async def test_get_market_snapshot_http_exception(self, client):
+        client._make_http_request = AsyncMock(side_effect=Exception("network down"))
+        result = await client.get_market_snapshot()
+        assert not result.success
+        assert "fetching market snapshot" in result.error or "network" in result.error
+
+    async def test_get_24h_stats_propagates_snapshot_failure(self, client):
+        # Force the underlying snapshot fetch to fail; get_24h_stats should
+        # surface the snapshot's error message rather than its own fallback.
+        from dexalot_sdk.utils.result import Result
+
+        client.get_market_snapshot = AsyncMock(return_value=Result.fail("snapshot down"))
+        result = await client.get_24h_stats("AVAX/USDC")
+        assert not result.success
+        assert "snapshot down" in result.error
+
     async def test_add_order_success(self, client):
         """Test successful order placement."""
         # Setup pairs

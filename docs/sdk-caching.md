@@ -69,6 +69,7 @@ const client = new DexalotClient(createConfig({
 - `get_all_portfolio_balances(address=None)` / `getAllPortfolioBalances(address?)`
 - `get_chain_wallet_balance(chain, token, address=None)` / `getChainWalletBalance(chain, token, address?)`
 - `get_chain_wallet_balances(chain, address=None)` / `getChainWalletBalances(chain, address?)`
+- `get_chain_token_balances(chain, address, tokens)` *(Python only — TS pending)*
 - `get_all_chain_wallet_balances(address=None)` / `getAllChainWalletBalances(address?)`
 
 **Important:** Balance data is cached **per user address** to ensure data privacy and accuracy.
@@ -97,6 +98,10 @@ const client = new DexalotClient(createConfig({
 
 **Cached Methods:**
 - `get_orderbook(pair)` / `getOrderBook(pair)`
+- `get_candles(pair, interval, limit)` *(Python only — TS pending)*
+- `get_market_snapshot()` *(Python only — TS pending)*
+
+`get_24h_stats(pair)` is *not* directly cached; it filters the cached `get_market_snapshot()` envelope client-side, so multiple per-pair calls in the same 1 s window share a single network fetch.
 
 **When to customize:**
 - Set higher TTL (e.g., 2-5 seconds) if slight delays are acceptable

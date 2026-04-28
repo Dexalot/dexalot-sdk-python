@@ -389,6 +389,170 @@ class TestTransferClient:
         # Should have ERC20 balances
         assert len(info.data["chain_balances"]) >= 1
 
+    async def test_get_chain_token_balances_native_and_erc20(self, client):
+        """Filter to a specific token list, returning a flat symbol -> balance map."""
+        client.connected_chain_providers["Avalanche"].eth.get_balance.return_value = 15 * 10**18
+
+        mock_contract = MagicMock()
+        mock_contract.functions.balanceOf.return_value.call = AsyncMock(return_value=500 * 10**6)
+        client.connected_chain_providers["Avalanche"].eth.contract.side_effect = None
+        client.connected_chain_providers["Avalanche"].eth.contract.return_value = mock_contract
+
+        client.token_data["USDC"] = {
+            "Avalanche": {"chain_id": 43114, "address": "0xUSDC", "evmdecimals": 6},
+        }
+
+        result = await client.get_chain_token_balances("Avalanche", VALID_ADDRESS, ["AVAX", "USDC"])
+
+        assert result.success
+        assert set(result.data.keys()) == {"AVAX", "USDC"}
+        assert result.data["AVAX"] == "15.0"
+        assert "500" in result.data["USDC"]
+
+    async def test_get_chain_token_balances_unknown_token_aggregated(self, client):
+        """Unknown tokens produce a single aggregated error rather than silent skip."""
+        client.connected_chain_providers["Avalanche"].eth.get_balance.return_value = 1 * 10**18
+
+        result = await client.get_chain_token_balances(
+            "Avalanche", VALID_ADDRESS, ["AVAX", "FOOZ", "BARZ"]
+        )
+
+        assert not result.success
+        assert "Unknown tokens" in result.error
+        assert "FOOZ" in result.error
+        assert "BARZ" in result.error
+
+    async def test_get_chain_token_balances_empty_list(self, client):
+        result = await client.get_chain_token_balances("Avalanche", VALID_ADDRESS, [])
+        assert not result.success
+        assert "non-empty list" in result.error
+
+    async def test_get_chain_token_balances_non_list(self, client):
+        from typing import cast as _cast
+
+        # Caller passes a string instead of list[str] — guard against runtime misuse.
+        result = await client.get_chain_token_balances(
+            "Avalanche", VALID_ADDRESS, _cast(list[str], "AVAX")
+        )
+        assert not result.success
+        assert "non-empty list" in result.error
+
+    async def test_get_chain_token_balances_unknown_chain(self, client):
+        result = await client.get_chain_token_balances(
+            "DefinitelyNotAChain", VALID_ADDRESS, ["AVAX"]
+        )
+        assert not result.success
+
+    async def test_get_chain_token_balances_invalid_token_symbol(self, client):
+        result = await client.get_chain_token_balances("Avalanche", VALID_ADDRESS, ["AVAX", ""])
+        assert not result.success
+
+    async def test_get_chain_token_balances_invalid_chain_type(self, client):
+        from typing import cast as _cast
+
+        # Caller passes a non-string chain — guard against runtime misuse.
+        result = await client.get_chain_token_balances(_cast(str, 12345), VALID_ADDRESS, ["AVAX"])
+        assert not result.success
+        assert "Invalid chain" in result.error
+
+    async def test_get_chain_token_balances_internal_no_address(self, client):
+        # Internal path: caller passes through with no address and no signer.
+        client.account = None
+        result = await client._get_chain_token_balances_cached("Avalanche", None, ("AVAX",))
+        assert not result.success
+        assert "Address required" in result.error
+
+    async def test_get_chain_token_balances_internal_invalid_address(self, client):
+        # Internal path: explicit but malformed address must fail validation
+        # before any RPC call is made.
+        result = await client._get_chain_token_balances_cached(
+            "Avalanche", "0xnot-a-real-address", ("AVAX",)
+        )
+        assert not result.success
+
+    async def test_get_chain_token_balances_aggregates_per_token_exception(self, client):
+        """If one of the per-token fetches raises, the error is captured and
+        aggregated alongside the other tokens' results."""
+        from dexalot_sdk.utils.result import Result
+
+        # First call raises, second succeeds.
+        client._get_chain_wallet_balance_cached = AsyncMock(
+            side_effect=[
+                Exception("rpc blew up"),
+                Result.ok({"chain": "Avalanche", "symbol": "USDC", "balance": "12.5"}),
+            ]
+        )
+
+        client.token_data["USDC"] = {
+            "Avalanche": {"chain_id": 43114, "address": "0xUSDC", "evmdecimals": 6},
+        }
+
+        result = await client.get_chain_token_balances("Avalanche", VALID_ADDRESS, ["AVAX", "USDC"])
+        assert not result.success
+        # AVAX is sorted before USDC; the AVAX fetch is the one that raised.
+        assert "AVAX" in result.error
+
+    async def test_get_chain_token_balances_propagates_basexception(self, client):
+        """asyncio.CancelledError (a BaseException, not Exception) must
+        propagate out rather than be swallowed into an aggregated error."""
+
+        client._get_chain_wallet_balance_cached = AsyncMock(side_effect=asyncio.CancelledError())
+
+        with pytest.raises(asyncio.CancelledError):
+            await client.get_chain_token_balances("Avalanche", VALID_ADDRESS, ["AVAX"])
+
+    async def test_get_chain_token_balances_aggregates_generic_errors(self, client):
+        """Per-token Result.fail messages that don't match the unknown-token
+        pattern are aggregated into the errors-only branch."""
+        from dexalot_sdk.utils.result import Result
+
+        client._get_chain_wallet_balance_cached = AsyncMock(
+            side_effect=[
+                Result.fail("Chain ID not configured for Avalanche"),
+                Result.fail("zero address on chain Avalanche"),
+            ]
+        )
+
+        result = await client.get_chain_token_balances("Avalanche", VALID_ADDRESS, ["AVAX", "USDC"])
+        assert not result.success
+        assert "Unknown tokens" not in result.error
+        assert "Chain ID not configured" in result.error
+        assert "zero address" in result.error
+
+    async def test_get_chain_token_balances_cache_key_order_insensitive(self, client):
+        """Same token set in different order should hit the same cache slot."""
+        client._cache_enabled = True
+        client.connected_chain_providers["Avalanche"].eth.get_balance.return_value = 9 * 10**18
+
+        mock_contract = MagicMock()
+        mock_contract.functions.balanceOf.return_value.call = AsyncMock(return_value=42 * 10**6)
+        client.connected_chain_providers["Avalanche"].eth.contract.side_effect = None
+        client.connected_chain_providers["Avalanche"].eth.contract.return_value = mock_contract
+
+        client.token_data["USDC"] = {
+            "Avalanche": {"chain_id": 43114, "address": "0xUSDC", "evmdecimals": 6},
+        }
+
+        # Spy on the cached internal to confirm cache hits/misses.
+        from dexalot_sdk.core.base import _BALANCE_CACHE
+
+        _BALANCE_CACHE.clear()
+
+        first = await client.get_chain_token_balances("Avalanche", VALID_ADDRESS, ["AVAX", "USDC"])
+        second = await client.get_chain_token_balances("Avalanche", VALID_ADDRESS, ["USDC", "AVAX"])
+
+        assert first.success and second.success
+        assert first.data == second.data
+
+        # Cache should hold a single entry for this token-set on this chain/address;
+        # if ordering leaked into the key, we'd see two.
+        keys_for_method = [
+            k
+            for k in _BALANCE_CACHE._store
+            if isinstance(k, tuple) and k and k[0] == "_get_chain_token_balances_cached"
+        ]
+        assert len(keys_for_method) == 1
+
     async def test_get_all_chain_wallet_balances(self, client):
         client.w3_l1.eth.get_balance.return_value = 10 * 10**18
         client.connected_chain_providers["Avalanche"].eth.get_balance.return_value = 5 * 10**18
