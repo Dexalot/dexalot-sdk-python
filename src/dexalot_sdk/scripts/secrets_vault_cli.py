@@ -169,8 +169,9 @@ def main() -> int:
     _load_dotenv()
     parser = build_parser()
     args = parser.parse_args()
-    return args.func(args)
+    exit_code: int = args.func(args)
+    return exit_code
 
 
-if __name__ == "__main__":
+if __name__ == "__main__":  # pragma: no cover
     raise SystemExit(main())

@@ -260,6 +260,65 @@ result = await client.get_order_by_client_id(client_order_id="my-order-1")
 
 ---
 
+## Market data — candles, ticker, recent stats
+
+CLOB market-data helpers are read-only and require no signer.  They wrap the
+public endpoints documented in [REST API](rest-api.md).
+
+### Historical candles (count-back)
+
+`get_candles(pair, interval, limit)` returns up to `limit` OHLCV bars ending
+at "now", in chronological order.  Allowed intervals: `"1m"`, `"5m"`,
+`"15m"`, `"30m"`, `"1h"`, `"4h"`, `"1d"`.  Server caps `limit` at 500; the
+SDK rejects out-of-range values before any HTTP call.
+
+```python
+async with DexalotClient() as client:
+    await client.initialize_client()
+
+    candles = await client.get_candles("AVAX/USDC", interval="1h", limit=100)
+    if candles.success:
+        last = candles.data[-1]
+        print(f"Latest 1h close: {last['close']}  (vol {last['volume']})")
+```
+
+Each row carries `date`, `open`, `high`, `low`, `close`, `volume`,
+`quote_volume`, `change`.
+
+### Per-pair 24h stats
+
+`get_24h_stats(pair)` filters the global market snapshot to a single pair —
+useful for ticker rows, price displays, change indicators.
+
+```python
+stats = await client.get_24h_stats("AVAX/USDC")
+if stats.success:
+    s = stats.data
+    print(f"AVAX/USDC  last={s['close']}  Δ24h={s['change']}  vol={s['volume']}")
+```
+
+Note: the row has `close` (not `last`); alias it in your wrapper layer if you
+prefer the `last` naming.
+
+### Whole-exchange snapshot
+
+`get_market_snapshot()` returns the full envelope used internally by
+`get_24h_stats`, plus exchange-wide totals.  Use it when you need stats for
+many pairs at once — one network call serves them all.
+
+```python
+snap = await client.get_market_snapshot()
+if snap.success:
+    rows = snap.data["market_snapshot"]   # list[dict] keyed by pair
+    print(f"{len(rows)} pairs, last24 total vol: {snap.data['last24']['volume_usd']}")
+```
+
+Both methods share the same 1 s orderbook-tier cache, so calling
+`get_24h_stats` for several pairs in close succession costs at most one round
+trip.
+
+---
+
 ## Simple Swap — RFQ
 
 The swap flow is: soft quote → firm quote → execute. See [Simple Swap](simple-swap.md) for protocol details.
@@ -321,6 +380,24 @@ result = await client.get_portfolio_balance(token="USDC")
 ```python
 result = await client.get_all_chain_wallet_balances()
 ```
+
+For a known subset of tokens, `get_chain_token_balances` returns a flat
+`{symbol: balance}` map and errors if any of the requested tokens isn't
+available on the chain (rather than silently skipping it):
+
+```python
+result = await client.get_chain_token_balances(
+    "Avalanche",
+    address=None,                      # defaults to connected wallet
+    tokens=["AVAX", "USDC", "ALOT"],
+)
+if result.success:
+    for symbol, balance in result.data.items():
+        print(f"{symbol}: {balance}")
+```
+
+The token list is normalized (sorted, deduplicated) before caching, so the
+same set in different order shares one cache slot.
 
 ### Deposit
 

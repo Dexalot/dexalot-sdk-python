@@ -473,6 +473,115 @@ curl --location 'https://api.dexalot-test.com/privapi/trading/errorcodes'
 }
 ```
 
+## Public Market Data Endpoints
+
+Unlike the rest of this document, these endpoints are mounted under `/api/`
+(not `/privapi/`).  They are public — no signing, no API key — and are wrapped
+by `CLOBClient.get_candles()`, `CLOBClient.get_market_snapshot()`, and
+`CLOBClient.get_24h_stats()` in the Python SDK.
+
+### Get Candle Chunk (count-back OHLCV)
+
+GET /api/trading/candle-chunk
+
+#### Description
+
+Returns up to `count` OHLCV candles for a trading pair, ending at `periodto`
+(or "now" if omitted) and walking backward by `count - 1` interval steps.
+This is the count-back endpoint — give it the bar size and how many bars you
+want, and the backend computes the time window for you.
+
+#### Query Parameters
+
+| **Field Name** | **Required** | **Description** | **Sample Value** |
+|----------------|--------------|-----------------|------------------|
+| pair           | Y | Trading pair code | `AVAX/USDC` |
+| intervalnum    | Y | Numeric component of the interval | `1`, `5`, `15`, `30`, `4` |
+| intervalstr    | Y | Unit component | `minute`, `hour`, `day` |
+| count          | Y | Number of candles to return.  Server caps at 500. | `100` |
+| periodto       | N | ISO-8601 datetime, exclusive upper bound (default: server clock now) | `2026-04-28T12:00:00.000Z` |
+
+Allowed `(intervalnum, intervalstr)` combinations: `(1|5|15|30, minute)`,
+`(1|4, hour)`, `(1, day)` — any other pairing is rejected.
+
+#### Sample Request
+
+```
+https://api.dexalot-test.com/api/trading/candle-chunk?pair=AVAX/USDC&intervalnum=1&intervalstr=hour&count=100
+```
+
+```bash
+curl --location 'https://api.dexalot-test.com/api/trading/candle-chunk?pair=AVAX/USDC&intervalnum=1&intervalstr=hour&count=100'
+```
+
+#### Sample Response
+
+```json
+[
+    {
+        "date": "2026-04-28T11:00:00.000Z",
+        "open": "25.10",
+        "high": "25.90",
+        "low": "24.80",
+        "close": "25.50",
+        "volume": "1234.5",
+        "quote_volume": "31000.0",
+        "change": "0.0159"
+    }
+]
+```
+
+### Get Market Snapshot (24h ticker, all pairs)
+
+GET /api/stats/market-snapshot
+
+#### Description
+
+Returns a single envelope with rolling 24h OHLCV stats for **every** active
+trading pair, plus exchange-wide totals.  Cached server-side, so callers can
+poll cheaply.  Use this for ticker boards, dashboards, or any per-pair stat
+lookup — `CLOBClient.get_24h_stats(pair)` filters this envelope client-side.
+
+#### Query Parameters
+
+None.
+
+#### Sample Request
+
+```
+https://api.dexalot-test.com/api/stats/market-snapshot
+```
+
+```bash
+curl --location 'https://api.dexalot-test.com/api/stats/market-snapshot'
+```
+
+#### Sample Response
+
+```json
+{
+    "market_snapshot": [
+        {
+            "pair": "AVAX/USDC",
+            "date": "2026-04-28T00:00:00.000Z",
+            "open": 25.0,
+            "high": 26.0,
+            "low": 24.5,
+            "close": 25.5,
+            "volume": 100.0,
+            "quote_volume": 2550.0,
+            "change": 0.02
+        }
+    ],
+    "totals": { "volume_usd": 1234567, "total_tx": 8910 },
+    "last24": { "volume_usd": 56789, "total_tx": 234 }
+}
+```
+
+When the server-side cache is empty (e.g. immediately after a backend
+restart), the response body is the literal JSON string `"{}"`.  The SDK
+normalizes this to an empty envelope.
+
 ## Authorized Endpoints:
 
 Requests to the authorized endpoints should contain the "x-apikey" header. Please reach out to Dexalot Team for your api key. Currently only used for getting a temp token before establishing a websocket connection.

@@ -303,6 +303,120 @@ class TransferClient(DexalotBaseClient):
         return Result.ok(info)
 
     @track_method("transfer")
+    async def get_chain_token_balances(
+        self,
+        chain: str,
+        address: str | None = None,
+        tokens: list[str] | None = None,
+    ) -> Result[dict[str, str]]:
+        """Get balances for a specific list of tokens on one chain.
+
+        Returns a flat ``token -> balance`` map suitable for downstream
+        consumers that index balances by symbol.  Unlike
+        ``get_chain_wallet_balances``, the caller specifies exactly which
+        tokens to read; unknown tokens produce an aggregated error rather
+        than being silently skipped.
+
+        Note:
+            Cached for 10 seconds (balance cache tier).  Cache keys are
+            order-insensitive over ``tokens`` (the list is sorted and
+            deduplicated internally), so ``["AVAX", "USDC"]`` and
+            ``["USDC", "AVAX"]`` share a cache slot.
+
+        Args:
+            chain: Chain display name, e.g. ``"Avalanche"``, ``"Fuji"``, or
+                ``"Dexalot L1"``.
+            address: Wallet address to query.  Defaults to the current account.
+            tokens: Token symbols to fetch, e.g. ``["AVAX", "USDC"]``.  Must
+                be a non-empty list.
+
+        Returns:
+            Result containing a flat dict mapping each requested symbol to its
+            balance as a decimal string.  Returns an error on validation
+            failure, an unknown chain, an unknown token on the chain, or
+            backend error.
+        """
+        if not isinstance(chain, str) or not chain.strip():
+            return Result.fail(
+                f"Invalid chain: must be non-empty string, got {type(chain).__name__}"
+            )
+
+        if not isinstance(tokens, list) or not tokens:
+            return Result.fail("tokens must be a non-empty list of token symbols.")
+
+        for tok in tokens:
+            tok_result = validate_token_symbol(tok, "tokens")
+            if not tok_result.success:
+                return cast(Result[dict[str, str]], tok_result)
+
+        resolved_chain = self.resolve_chain_reference(chain, include_dexalot_l1=True)
+        if not resolved_chain.success or resolved_chain.data is None:
+            return Result.fail(resolved_chain.error or f"Could not resolve chain '{chain}'.")
+
+        resolved_address = address or (
+            cast(str, cast(Any, self.account).address) if self.account else None
+        )
+
+        normalized = sorted({self._normalize_user_token(t) for t in tokens})
+
+        return cast(
+            Result[dict[str, str]],
+            await self._get_chain_token_balances_cached(
+                resolved_chain.data.canonical_name,
+                resolved_address,
+                tuple(normalized),
+            ),
+        )
+
+    @async_ttl_cached(_BALANCE_CACHE)
+    async def _get_chain_token_balances_cached(
+        self,
+        chain: str,
+        query_address: str | None,
+        tokens: tuple[str, ...],
+    ) -> Result[dict[str, str]]:
+        """Internal cached implementation of get_chain_token_balances."""
+        if not query_address:
+            return Result.fail("Address required (pass as param or set signer)")
+
+        address_result = validate_address(query_address, "address")
+        if not address_result.success:
+            return cast(Result[dict[str, str]], address_result)
+
+        results = await asyncio.gather(
+            *(self._get_chain_wallet_balance_cached(chain, tok, query_address) for tok in tokens),
+            return_exceptions=True,
+        )
+
+        balances: dict[str, str] = {}
+        unknown: list[str] = []
+        errors: list[str] = []
+
+        for tok, res in zip(tokens, results, strict=True):
+            if isinstance(res, Exception):
+                errors.append(f"{tok}: {self._sanitize_error(res, 'fetching balance')}")
+                continue
+            if isinstance(res, BaseException):
+                # Non-Exception BaseException (e.g. CancelledError, KeyboardInterrupt)
+                # — propagate rather than swallow.
+                raise res
+            if not res.success or res.data is None:
+                err = res.error or "unknown error"
+                if "not available" in err or "not found" in err:
+                    unknown.append(tok)
+                else:
+                    errors.append(f"{tok}: {err}")
+                continue
+            balances[tok] = str(res.data.get("balance", ""))
+
+        if unknown:
+            return Result.fail(f"Unknown tokens on chain {chain}: {unknown}")
+        if errors:
+            return Result.fail("; ".join(errors))
+
+        return Result.ok(balances)
+
+    @track_method("transfer")
     async def get_all_chain_wallet_balances(self, address: str | None = None) -> Result[dict]:
         """Get all token balances across all connected chain wallets.
 

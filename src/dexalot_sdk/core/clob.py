@@ -5,6 +5,8 @@ from typing import Any, SupportsInt, cast
 
 from ..constants import (
     ENDPOINT_SIGNED_ORDERS,
+    ENDPOINT_STATS_MARKET_SNAPSHOT,
+    ENDPOINT_TRADING_CANDLE_CHUNK,
     ENDPOINT_TRADING_PAIRS,
     ENV_FUJI_MULTI_SUBNET,
     ENV_PROD_MULTI_SUBNET,
@@ -22,6 +24,17 @@ from ..utils.result import Result
 from ..utils.retry import async_retry
 from ..utils.websocket_manager import WebSocketManager
 from .base import _ORDERBOOK_CACHE, _SEMI_STATIC_CACHE, DexalotBaseClient
+
+_CANDLE_INTERVALS: dict[str, tuple[int, str]] = {
+    "1m": (1, "minute"),
+    "5m": (5, "minute"),
+    "15m": (15, "minute"),
+    "30m": (30, "minute"),
+    "1h": (1, "hour"),
+    "4h": (4, "hour"),
+    "1d": (1, "day"),
+}
+_CANDLE_LIMIT_MAX = 500
 
 
 class CLOBClient(DexalotBaseClient):
@@ -271,6 +284,140 @@ class CLOBClient(DexalotBaseClient):
         except Exception as e:
             error_msg = self._sanitize_error(e, "fetching orderbook")
             return Result.fail(error_msg)
+
+    @async_ttl_cached(_ORDERBOOK_CACHE)
+    @track_method("clob")
+    async def get_candles(
+        self, pair: str, interval: str, limit: int
+    ) -> Result[list[dict[str, Any]]]:
+        """Fetch the most recent OHLCV candles for a CLOB trading pair.
+
+        Wraps ``GET /api/trading/candle-chunk`` (count-back endpoint).  The
+        backend returns up to ``limit`` candles ending at the current time, in
+        chronological order.
+
+        Note:
+            Cached for 1 second (orderbook cache tier).
+
+        Args:
+            pair: Trading pair symbol, e.g. ``"AVAX/USDC"``.
+            interval: Bar size.  One of ``"1m"``, ``"5m"``, ``"15m"``,
+                ``"30m"``, ``"1h"``, ``"4h"``, ``"1d"``.
+            limit: Number of candles to return.  Must be between 1 and 500.
+
+        Returns:
+            Result containing a list of OHLCV rows on success.  Each row has
+            ``date``, ``open``, ``high``, ``low``, ``close``, ``volume``,
+            ``quote_volume``, ``change``.  Returns an error message on
+            validation failure or backend error.
+        """
+        pair_result = validate_pair_format(pair, "pair")
+        if not pair_result.success:
+            return cast(Result[list[dict[str, Any]]], pair_result)
+
+        if interval not in _CANDLE_INTERVALS:
+            allowed = ", ".join(_CANDLE_INTERVALS.keys())
+            return Result.fail(f"Invalid interval '{interval}'. Allowed: {allowed}.")
+
+        if not isinstance(limit, int) or limit < 1 or limit > _CANDLE_LIMIT_MAX:
+            return Result.fail(
+                f"Invalid limit: must be an integer in [1, {_CANDLE_LIMIT_MAX}], got {limit!r}."
+            )
+
+        pair = self._normalize_user_pair(pair)
+        interval_num, interval_str = _CANDLE_INTERVALS[interval]
+        params = {
+            "pair": pair,
+            "intervalnum": interval_num,
+            "intervalstr": interval_str,
+            "count": limit,
+        }
+        url = f"{self.api_base_url}{ENDPOINT_TRADING_CANDLE_CHUNK}"
+
+        try:
+            async with await self._make_http_request("get", url, params=params) as response:
+                response.raise_for_status()
+                data = await response.json()
+            if not isinstance(data, list):
+                return Result.fail(
+                    f"Unexpected candle response shape: expected list, got {type(data).__name__}."
+                )
+            return Result.ok(data)
+        except Exception as e:
+            error_msg = self._sanitize_error(e, "fetching candles")
+            return Result.fail(error_msg)
+
+    @async_ttl_cached(_ORDERBOOK_CACHE)
+    @track_method("clob")
+    async def get_market_snapshot(self) -> Result[dict[str, Any]]:
+        """Fetch the global market snapshot for all CLOB pairs.
+
+        Wraps ``GET /api/stats/market-snapshot``.  Returns the full envelope:
+        a per-pair list with rolling 24h OHLCV, plus exchange-wide totals.
+
+        Note:
+            Cached for 1 second (orderbook cache tier).  The backend itself
+            also caches this resource, so the SDK cache is a thin coalescing
+            layer.
+
+        Returns:
+            Result containing
+            ``{"market_snapshot": list[dict], "totals": dict, "last24": dict}``
+            on success, or an error message on failure.  Each
+            ``market_snapshot`` entry has ``pair``, ``date``, ``open``,
+            ``high``, ``low``, ``close``, ``volume``, ``quote_volume``,
+            ``change``.
+        """
+        url = f"{self.api_base_url}{ENDPOINT_STATS_MARKET_SNAPSHOT}"
+
+        try:
+            async with await self._make_http_request("get", url) as response:
+                response.raise_for_status()
+                data = await response.json()
+            if isinstance(data, str):
+                return Result.ok({"market_snapshot": [], "totals": {}, "last24": {}})
+            if not isinstance(data, dict):
+                return Result.fail(
+                    f"Unexpected market snapshot shape: expected dict, got {type(data).__name__}."
+                )
+            return Result.ok(data)
+        except Exception as e:
+            error_msg = self._sanitize_error(e, "fetching market snapshot")
+            return Result.fail(error_msg)
+
+    @track_method("clob")
+    async def get_24h_stats(self, pair: str) -> Result[dict[str, Any]]:
+        """Fetch 24h ticker stats for a single CLOB trading pair.
+
+        Filters the global market snapshot to the requested pair.  Reuses the
+        cached snapshot served by ``get_market_snapshot``, so calling this for
+        many pairs in close succession costs at most one network round trip.
+
+        Args:
+            pair: Trading pair symbol, e.g. ``"AVAX/USDC"``.
+
+        Returns:
+            Result containing the per-pair entry from the market snapshot:
+            ``date``, ``open``, ``high``, ``low``, ``close``, ``volume``,
+            ``quote_volume``, ``change``.  Returns an error if the pair is
+            invalid, unknown, or absent from the snapshot.
+        """
+        pair_result = validate_pair_format(pair, "pair")
+        if not pair_result.success:
+            return cast(Result[dict[str, Any]], pair_result)
+
+        pair = self._normalize_user_pair(pair)
+
+        snapshot_result = await self.get_market_snapshot()
+        if not snapshot_result.success or snapshot_result.data is None:
+            return Result.fail(snapshot_result.error or "Failed to fetch market snapshot.")
+
+        rows = snapshot_result.data.get("market_snapshot", [])
+        for row in rows:
+            if isinstance(row, dict) and row.get("pair") == pair:
+                return Result.ok(row)
+
+        return Result.fail(f"Pair {pair} not found in market snapshot.")
 
     @track_method("clob")
     async def add_order(
