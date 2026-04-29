@@ -53,12 +53,13 @@ Per-(chain_id, address) asyncio locks enforce sequential nonce acquisition. High
 
 - **Python interpreter**: always use `.venv/bin/python` (never the system `python3`)
 - **Package manager**: `uv` — not pip, not poetry
-- **Python version**: >=3.12, <3.14 (uses match statements, PEP 695 generics)
+- **Python version**: >=3.12, <3.15 — supported matrix is 3.12 / 3.13 / 3.14 (uses match statements, PEP 695 generics)
 - **Setup**: `make setup` (runs `uv venv && uv sync --group dev`)
 - **Test**: `make test` (unit, fast) / `make int` (integration, requires live env)
 - **Lint**: `make lint` / `make lint-fix` (ruff, line-length=100)
 - **Types**: `make mypy` (strict mode)
 - **Coverage**: `make cov`
+- **Security**: `make security` (bandit static analysis at `--severity-level high` + `pip-audit --strict`).  CI mirrors the same gates on every PR/push to main and a weekly cron — see `.github/workflows/ci.yml`.
 
 Unit tests in `tests/unit/` have no external dependencies. Integration tests in `tests/integration/` require a live API environment.
 
@@ -81,7 +82,8 @@ Unit tests in `tests/unit/` have no external dependencies. Integration tests in 
 - **Cache key generation**: Uses `(func_name, api_base_url, args[1:], frozenset(kwargs.items()))` — `self` is excluded; keys are namespaced by `api_base_url`. Kwarg ordering affects cache hits; deep objects may produce false misses.
 - **Config validation timing**: `config.validate()` is called automatically inside `DexalotBaseClient.__init__`. Invalid configs raise at construction time.
 - **Error sanitization is lossy**: Regex stripping makes production debugging harder. Use DEBUG logging in development.
-- **Python 3.12+ is required**: CI must enforce this. Match statements and PEP 695 generics are used throughout.
+- **Python 3.12+ is required**: CI must enforce this. Match statements and PEP 695 generics are used throughout.  Supported matrix is 3.12 / 3.13 / 3.14 — `requires-python = ">=3.12,<3.15"` in `pyproject.toml`.
+- **WebSocketManager captures the asyncio loop lazily**: `WebSocketManager.__init__` does *not* call `asyncio.get_event_loop()` (deprecated since 3.10, removed in 3.14).  Instead, `_get_loop()` calls `asyncio.get_running_loop()` on the first sync entry point (`connect`/`subscribe`/`unsubscribe`), which works identically across 3.12/3.13/3.14.  This also means the manager can be constructed outside a running event loop (useful in test fixtures and sync configuration code) — only the sync entry points require a running loop.
 - **Cache key for multi-env**: Cache keys are namespaced by `api_base_url`, so simultaneous testnet/mainnet clients do not share cached data. Test suites that use module-level caches must clear them between tests (e.g. `_SEMI_STATIC_CACHE.clear()`) since the key is env-based, not instance-based.
 - **`timestamped_auth` flag**: `_get_auth_headers` supports timestamped signing (`f"dexalot{ts}"` + `x-timestamp` header) via `config.timestamped_auth = True` (env: `DEXALOT_TIMESTAMPED_AUTH=true`). Defaults to `False` — the backend currently only accepts the static `"dexalot"` message. Enable only after backend confirms timestamp window validation. See remediation plan C-2.
 - **Cache stampede protection**: `async_ttl_cached` coalesces concurrent callers for the same uncached key using `asyncio.Future`. Only the first caller fetches; the rest await the same future. Prevents thundering herd on cache misses.

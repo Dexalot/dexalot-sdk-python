@@ -6,7 +6,7 @@ End-to-end guide from installation to production usage of the Dexalot Python SDK
 
 ## Prerequisites & installation
 
-**Python ≥ 3.12** is required (match statements and PEP 695 generics are used throughout).
+**Python 3.12, 3.13, or 3.14** is supported (match statements and PEP 695 generics are used throughout).
 
 ```bash
 pip install dexalot-sdk
