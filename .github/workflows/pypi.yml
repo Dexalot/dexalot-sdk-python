@@ -53,7 +53,7 @@ jobs:
           PY
 
       - name: Install build tooling
-        run: python -m pip install --upgrade build twine
+        run: python -m pip install --upgrade pip build twine
 
       # Defense-in-depth: refuse to publish if any production dep has a known
       # CVE.  CI runs the same audit on every PR (.github/workflows/ci.yml),
