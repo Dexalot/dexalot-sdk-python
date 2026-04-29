@@ -3852,6 +3852,29 @@ class TestWebSocketManager:
         assert manager.state == ConnectionState.DISCONNECTED
         assert not manager.is_connected
 
+    async def test_get_loop_captures_running_loop_lazily(self, mock_config, mock_account):
+        """First call to _get_loop captures the running loop; subsequent calls reuse it.
+
+        Bypasses the `manager` fixture (which pre-injects a mock loop) so we can
+        exercise the actual lazy-capture path against a real running loop.
+        """
+        m = WebSocketManager(
+            ws_url="wss://test.example.com/ws",
+            account=mock_account,
+            config=mock_config,
+        )
+
+        loop = m._get_loop()
+        assert loop is asyncio.get_running_loop()
+        assert m._loop is loop  # captured on first call
+        assert m._get_loop() is loop  # cached on subsequent calls
+
+    def test_get_loop_raises_when_no_running_loop(self, manager):
+        """_get_loop propagates RuntimeError when called outside an async context."""
+        manager._loop = None  # undo the fixture's mock-loop injection
+        with pytest.raises(RuntimeError):
+            manager._get_loop()
+
     # ------------------------------------------------------------------
     # connect() — sync entry point
     # ------------------------------------------------------------------
