@@ -56,7 +56,7 @@ typecheck: mypy
 # PR to catch issues your downstream consumers would otherwise flag.
 security:
 	uv run --group security bandit -r src -c pyproject.toml --severity-level high
-	uv run --group security pip-audit --strict
+	uv run --group security pip-audit --skip-editable
 
 docs-serve:
 	uv run --group docs zensical serve

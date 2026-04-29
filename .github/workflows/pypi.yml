@@ -59,10 +59,16 @@ jobs:
       # CVE.  CI runs the same audit on every PR (.github/workflows/ci.yml),
       # but a vulnerability can be disclosed between the last green PR and the
       # release tag — this step closes that window.
+      #
+      # The project is installed editable so pip-audit sees its runtime deps;
+      # `--skip-editable` then skips the project itself (whose new tagged
+      # version isn't on PyPI yet — that's what this workflow is about to do).
+      # pip-audit still exits non-zero on real CVEs in third-party deps.
       - name: Pre-publish dependency CVE audit (pip-audit)
         run: |
           python -m pip install --upgrade pip-audit
-          pip-audit --strict
+          python -m pip install -e .
+          pip-audit --skip-editable
 
       - name: Build distributions
         run: python -m build
