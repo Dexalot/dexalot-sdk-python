@@ -1,5 +1,7 @@
 from typing import Any, cast
 
+from web3 import Web3
+
 from ..constants import (
     DEFAULT_TAKER_ADDRESS,
     ENDPOINT_RFQ_FIRM_QUOTE,
@@ -14,6 +16,11 @@ from ..utils.input_validators import (
 from ..utils.observability import track_method
 from ..utils.result import Result
 from .base import _SEMI_STATIC_CACHE, DexalotBaseClient
+
+# MainnetRFQ uses the zero address to mean "the chain's native coin" (e.g. AVAX
+# on 43114).  When the taker is selling native, ``msg.value`` must equal
+# ``takerAmount``; for ERC20 takers it must be 0.
+NATIVE_ZERO_ADDRESS = "0x" + "0" * 40
 
 
 class SwapClient(DexalotBaseClient):
@@ -106,70 +113,52 @@ class SwapClient(DexalotBaseClient):
         self.rfq_pairs[chain_id] = cached.data
 
     def _transform_quote_from_api(self, quote: dict) -> dict:
-        """Transform API quote response to match standardized field names (snake_case).
+        """Normalize a Dexalot firm-quote response to snake_case keys.
 
-        Maps lowercase/camelCase API fields to snake_case SDK fields to match
-        Python naming conventions.
+        The HTTP response wraps the executable firm quote inside
+        ``{"success": true, "quote": {...}}``.  Unwrap so downstream code
+        operates on the inner dict, then apply snake_case aliases for
+        top-level identifiers and normalize the inner ``order`` dict.
+
+        After unwrapping, this helper:
+
+        * Adds ``chain_id`` and ``quote_id`` snake_case aliases for the camelCase
+          (or lowercase) identifiers the API may emit.
+        * Runs ``_transform_order_data_from_api`` over ``quote["order"]`` so nested
+          fields like ``nonceAndMeta``/``makerAsset``/``takerAmount`` gain
+          snake_case aliases.
+
+        Original keys are preserved; nothing is popped or renamed.
 
         Args:
-            quote: Raw quote dict from API response
+            quote: Raw quote dict from API response.  May be the full envelope
+                ``{"success": true, "quote": {...}}`` or the already-inner dict.
 
         Returns:
-            Transformed quote dict with standardized field names
+            Transformed inner-quote dict with snake_case aliases added.
         """
-        transformed = dict(quote)  # Start with all original fields
+        if isinstance(quote, dict) and "quote" in quote and isinstance(quote["quote"], dict):
+            quote = quote["quote"]
 
-        # Map chain_id: prefer existing snake_case, fallback to lowercase/camelCase
+        transformed = dict(quote)
+
+        # Map chain_id: prefer existing snake_case, fallback to lowercase/camelCase.
         if "chain_id" not in transformed:
             if "chainid" in quote:
                 transformed["chain_id"] = quote["chainid"]
             elif "chainId" in quote:
                 transformed["chain_id"] = quote["chainId"]
 
-        # Map secure_quote: prefer existing snake_case, fallback to lowercase/camelCase
-        if "secure_quote" not in transformed:
-            if "securequote" in quote:
-                transformed["secure_quote"] = self._transform_secure_quote_from_api(
-                    quote["securequote"]
-                )
-            elif "secureQuote" in quote:
-                transformed["secure_quote"] = self._transform_secure_quote_from_api(
-                    quote["secureQuote"]
-                )
-        else:
-            # Already exists, but ensure nested fields are transformed
-            transformed["secure_quote"] = self._transform_secure_quote_from_api(
-                transformed["secure_quote"]
-            )
-
-        # Map quote_id: prefer existing snake_case, fallback to lowercase/camelCase
+        # Map quote_id: prefer existing snake_case, fallback to lowercase/camelCase.
         if "quote_id" not in transformed:
             if "quoteid" in quote:
                 transformed["quote_id"] = quote["quoteid"]
             elif "quoteId" in quote:
                 transformed["quote_id"] = quote["quoteId"]
 
-        return transformed
-
-    def _transform_secure_quote_from_api(self, secure_quote: dict) -> dict:
-        """Transform secureQuote object fields to snake_case.
-
-        Args:
-            secure_quote: Raw secureQuote dict from API response
-
-        Returns:
-            Transformed secureQuote dict with standardized field names
-        """
-        if not secure_quote:
-            return secure_quote
-
-        transformed = dict(secure_quote)
-
-        # Transform data/order object if present
-        if "data" in secure_quote:
-            transformed["data"] = self._transform_order_data_from_api(secure_quote["data"])
-        if "order" in secure_quote:
-            transformed["order"] = self._transform_order_data_from_api(secure_quote["order"])
+        # Normalize the inner order dict so downstream code can read snake_case keys.
+        if "order" in transformed:
+            transformed["order"] = self._transform_order_data_from_api(transformed["order"])
 
         return transformed
 
@@ -286,6 +275,17 @@ class SwapClient(DexalotBaseClient):
             async with await self._make_http_request("get", url, params=params) as response:
                 if response.status == 200:
                     quote_data = await response.json()
+                    # Envelope-layer failure: Dexalot RFQ returns
+                    # ``{"success": false, "reason": "..."}`` on logical failure
+                    # even with HTTP 200.  Surface that as a Result.fail before
+                    # handing the payload to the shape-mapping transform.
+                    if isinstance(quote_data, dict) and quote_data.get("success") is False:
+                        reason = (
+                            quote_data.get("reason")
+                            or quote_data.get("error")
+                            or "Quote API returned success=false"
+                        )
+                        return Result.fail(f"Cannot execute failed quote: {reason}")
                     transformed_quote = self._transform_quote_from_api(quote_data)
                     return Result.ok(transformed_quote)
                 else:
@@ -379,8 +379,9 @@ class SwapClient(DexalotBaseClient):
                 during ``initialize_client()``).
 
         Returns:
-            Result containing a firm quote dict (including ``secure_quote`` and
-            ``quote_id``) on success, or an error message on failure.
+            Result containing a firm quote dict (with top-level ``signature``,
+            ``order``, ``tx``, and ``quote_id`` fields) on success, or an error
+            message on failure.
         """
         # Validate swap parameters
         swap_params_result = validate_swap_params(from_token, to_token, amount)
@@ -473,35 +474,31 @@ class SwapClient(DexalotBaseClient):
                 return Result.fail("Invalid quote: empty data")
             quote = quote.data
 
-        # Transform quote to ensure standardized field names
+        # Transform quote to ensure standardized field names.  This also
+        # unwraps the ``{"success": true, "quote": {...}}`` envelope when the
+        # caller passed in the raw API payload.  Envelope-layer failure
+        # (``success: false``) is handled by ``_get_swap_quote_base`` before
+        # the transform runs, so it never reaches us here.
         quote_typed: dict[Any, Any] = self._transform_quote_from_api(quote)
         quote = quote_typed
 
-        # Check if quote has error
-        if "success" in quote and not quote["success"]:
-            return Result.fail(
-                f"Cannot execute failed quote: {quote.get('reason', 'Unknown reason')}"
-            )
-
-        # Extract secure quote data
-        if "secure_quote" not in quote:
-            return Result.fail("Invalid quote format: 'secure_quote' missing.")
-
-        secure_quote = quote["secure_quote"]
-        signature = secure_quote.get("signature")
-        order_data = secure_quote.get("data") or secure_quote.get("order")
-
+        # Extract signature and order data from the firm-quote dict.
+        signature = quote.get("signature")
+        order_data = quote.get("order")
         if not signature or not order_data:
-            return Result.fail("Invalid secure quote data: missing signature or order data")
+            return Result.fail("Invalid firm quote: missing 'signature' or 'order' field.")
 
-        # Resolve contract and w3
-        w3, contract = await self._get_rfq_contract()
+        # Resolve contract and w3 for the connected chain carried in the quote.
+        w3, contract = await self._get_rfq_contract(quote.get("chain_id"))
         if not w3 or not contract:
             return Result.fail("RFQ Contract not found or W3 not initialized.")
 
         try:
             # Construct Order tuple
             order_tuple = self._construct_rfq_order(order_data)
+            # MainnetRFQ requires msg.value == takerAmount for native sells
+            # (takerAsset == zero address), 0 otherwise.
+            msg_value = self._compute_msg_value(order_data)
 
             # Convert signature to bytes
             if isinstance(signature, str):
@@ -515,7 +512,9 @@ class SwapClient(DexalotBaseClient):
             nonce = await self._get_nonce(w3)
 
             # Estimate gas
-            gas_estimate = await self._estimate_swap_gas(contract, order_tuple, signature_bytes)
+            gas_estimate = await self._estimate_swap_gas(
+                contract, order_tuple, signature_bytes, msg_value=msg_value
+            )
 
             gas_price = await self._rpc_call(w3, "eth.gas_price")
 
@@ -527,6 +526,7 @@ class SwapClient(DexalotBaseClient):
                     "nonce": nonce,
                     "gas": int(gas_estimate * 1.2),
                     "gasPrice": gas_price,
+                    "value": msg_value,
                 }
             )
 
@@ -535,6 +535,8 @@ class SwapClient(DexalotBaseClient):
             tx_hash = await self._rpc_call(
                 w3, "eth.send_raw_transaction", signed_tx.raw_transaction
             )
+
+            tx_hex = w3.to_hex(tx_hash)
 
             if wait_for_receipt:
                 receipt = await self._rpc_call(w3, "eth.wait_for_transaction_receipt", tx_hash)
@@ -546,42 +548,120 @@ class SwapClient(DexalotBaseClient):
                     else 1
                 )
                 if receipt_status != 1:
-                    return Result.fail("Transaction reverted")
-                return Result.ok({"tx_hash": w3.to_hex(tx_hash), "operation": "execute_rfq_swap"})
+                    revert_reason = await self._extract_revert_reason(w3, tx, receipt)
+                    block_number = (
+                        receipt.get("blockNumber")
+                        if isinstance(receipt, dict)
+                        else getattr(receipt, "blockNumber", None)
+                    )
+                    detail_parts = [f"tx={tx_hex}"]
+                    if block_number is not None:
+                        detail_parts.append(f"block={block_number}")
+                    if revert_reason:
+                        detail_parts.append(f"reason={revert_reason}")
+                    return Result.fail(f"Transaction reverted: {', '.join(detail_parts)}")
+                return Result.ok({"tx_hash": tx_hex, "operation": "execute_rfq_swap"})
 
-            return Result.ok({"tx_hash": w3.to_hex(tx_hash), "operation": "execute_rfq_swap"})
+            return Result.ok({"tx_hash": tx_hex, "operation": "execute_rfq_swap"})
 
         except Exception as e:
             error_msg = self._sanitize_error(e, "executing swap")
             return Result.fail(error_msg)
 
-    async def _get_rfq_contract(self):
-        """Resolve MainnetRFQ contract and W3 instance."""
+    async def _extract_revert_reason(self, w3: Any, tx: dict, receipt: Any) -> str | None:
+        """Best-effort extraction of the on-chain revert reason for a failed tx.
+
+        Re-runs the original transaction as ``eth_call`` against the block in
+        which it reverted; the node returns the revert message (e.g.
+        ``execution reverted: RF-EXP-01``) which is otherwise dropped from
+        the receipt. Returns ``None`` if the call cannot be replayed or the
+        node refuses to surface a reason.
+        """
+        try:
+            block_number = (
+                receipt.get("blockNumber")
+                if isinstance(receipt, dict)
+                else getattr(receipt, "blockNumber", None)
+            )
+            call_tx = {
+                "from": tx.get("from"),
+                "to": tx.get("to"),
+                "data": tx.get("data"),
+                "value": tx.get("value", 0),
+                "gas": tx.get("gas"),
+            }
+            call_tx = {k: v for k, v in call_tx.items() if v is not None}
+            try:
+                await w3.eth.call(call_tx, block_identifier=block_number)
+            except Exception as call_exc:
+                msg = str(call_exc)
+                marker = "execution reverted"
+                if marker in msg:
+                    after = msg.split(marker, 1)[1].lstrip(" :")
+                    after = after.strip().strip("'").strip('"')
+                    return after or marker
+                return msg[:200] or None
+            return None
+        except Exception:
+            return None
+
+    async def _get_rfq_contract(self, chain_id: int | None = None):
+        """Resolve MainnetRFQ contract and W3 instance for the target chain.
+
+        RFQ SimpleSwap executes on the connected chain (e.g. Avalanche
+        C-Chain for ``chain_id`` 43114), not on Dexalot L1.  The ``chain_id``
+        argument selects which connected chain to route to; when ``None``,
+        falls back to ``self.chain_id``.
+        """
         if "MainnetRFQ" not in self.deployments:
             return None, None
 
-        # For now, grab the first available deployment of MainnetRFQ
-        rfq_deployments = self.deployments["MainnetRFQ"]
-        contract_address = None
-        w3 = await self._get_w3_l1()  # Default to L1
-
-        for _key, dep in rfq_deployments.items():
-            if "address" in dep:
-                contract_address = dep["address"]
-                break
-
-        if not contract_address or not w3:
+        target_chain_id = chain_id if chain_id is not None else self.chain_id
+        if target_chain_id is None:
             return None, None
 
-        # Load ABI
-        abi = self.deployments["MainnetRFQ"][list(self.deployments["MainnetRFQ"].keys())[0]].get(
-            "abi", []
-        )
-        contract = w3.eth.contract(address=contract_address, abi=abi)
+        rfq_deployments = self.deployments["MainnetRFQ"]
+
+        # Reverse-resolve target chain_id to its chain name via chain_config.
+        chain_name: str | None = None
+        for name, cfg in (self.chain_config or {}).items():
+            if cfg.get("chain_id") == target_chain_id:
+                chain_name = name
+                break
+
+        # Pick the deployment for the resolved chain.  Deployments may be
+        # keyed by chain name or by chain_id; check both.
+        deployment = None
+        if chain_name is not None and chain_name in rfq_deployments:
+            deployment = rfq_deployments[chain_name]
+        elif target_chain_id in rfq_deployments:
+            deployment = rfq_deployments[target_chain_id]
+            chain_name = chain_name or str(target_chain_id)
+        elif str(target_chain_id) in rfq_deployments:
+            deployment = rfq_deployments[str(target_chain_id)]
+            chain_name = chain_name or str(target_chain_id)
+
+        if not deployment or "address" not in deployment:
+            return None, None
+
+        # chain_name is guaranteed non-None here: each branch above either
+        # matches on chain_name or assigns it from target_chain_id.
+        w3 = self.connected_chain_providers.get(cast(str, chain_name))
+        if w3 is None:
+            return None, None
+
+        contract_address = deployment["address"]
+        abi = deployment.get("abi", [])
+        contract = w3.eth.contract(address=Web3.to_checksum_address(contract_address), abi=abi)
         return w3, contract
 
-    async def _estimate_swap_gas(self, contract, order_tuple, signature_bytes):
-        """Estimate gas for swap transaction with retry/rate limiting."""
+    async def _estimate_swap_gas(self, contract, order_tuple, signature_bytes, msg_value: int = 0):
+        """Estimate gas for swap transaction with retry/rate limiting.
+
+        ``msg_value`` mirrors the ``value`` field of the eventual transaction
+        so the estimator sees the same call shape MainnetRFQ will validate
+        (native sells require ``msg.value == takerAmount``).
+        """
         if not self.account:
             raise ValueError("Account is required for gas estimation.")
         from_addr = cast(str, cast(Any, self.account).address)
@@ -595,7 +675,7 @@ class SwapClient(DexalotBaseClient):
             async def _estimate_gas():
                 return await contract.functions.simpleSwap(
                     order_tuple, signature_bytes
-                ).estimate_gas({"from": from_addr})
+                ).estimate_gas({"from": from_addr, "value": msg_value})
 
             retry_func = async_retry(
                 max_attempts=self.config.retry_max_attempts,
@@ -608,20 +688,51 @@ class SwapClient(DexalotBaseClient):
             return await retry_func()
         else:
             return await contract.functions.simpleSwap(order_tuple, signature_bytes).estimate_gas(
-                {"from": from_addr}
+                {"from": from_addr, "value": msg_value}
             )
+
+    @staticmethod
+    def _compute_msg_value(order_data: dict) -> int:
+        """Return the wei msg.value to attach to a SimpleSwap call.
+
+        The MainnetRFQ contract requires ``msg.value == takerAmount`` when the
+        taker is sending the chain's native token (``takerAsset`` is the zero
+        address), and ``msg.value == 0`` otherwise.
+        """
+        taker_asset = order_data.get("taker_asset") or order_data.get("takerAsset") or ""
+        if taker_asset.lower() == NATIVE_ZERO_ADDRESS:
+            return SwapClient._to_int(
+                order_data.get("taker_amount") or order_data.get("takerAmount")
+            )
+        return 0
+
+    @staticmethod
+    def _to_int(value: Any) -> int:
+        """Coerce an order field to int, accepting decimal or 0x-hex strings.
+
+        ``nonceAndMeta`` arrives as a 0x-prefixed hex string; ``makerAmount`` /
+        ``takerAmount`` as decimal strings; ``expiry`` as a JSON number.
+        """
+        if value is None or value == "":
+            return 0
+        if isinstance(value, int):
+            return value
+        text = str(value)
+        return int(text, 16) if text.lower().startswith("0x") else int(text)
 
     def _construct_rfq_order(self, order_data):
         """Construct the Order tuple from order data dictionary."""
         # ABI: simpleSwap((nonceAndMeta, expiry, makerAsset, takerAsset, maker, taker, makerAmount, takerAmount), signature)
         # Use snake_case field names (transformed from API)
+        maker_asset = order_data.get("maker_asset") or order_data.get("makerAsset")
+        taker_asset = order_data.get("taker_asset") or order_data.get("takerAsset")
         return (
-            int(order_data.get("nonce_and_meta") or order_data.get("nonceAndMeta", 0)),
-            int(order_data.get("expiry", 0)),
-            order_data.get("maker_asset") or order_data.get("makerAsset"),
-            order_data.get("taker_asset") or order_data.get("takerAsset"),
-            order_data.get("maker"),
-            order_data.get("taker"),
-            int(order_data.get("maker_amount") or order_data.get("makerAmount", 0)),
-            int(order_data.get("taker_amount") or order_data.get("takerAmount", 0)),
+            self._to_int(order_data.get("nonce_and_meta") or order_data.get("nonceAndMeta")),
+            self._to_int(order_data.get("expiry")),
+            Web3.to_checksum_address(maker_asset),
+            Web3.to_checksum_address(taker_asset),
+            Web3.to_checksum_address(order_data["maker"]),
+            Web3.to_checksum_address(order_data["taker"]),
+            self._to_int(order_data.get("maker_amount") or order_data.get("makerAmount")),
+            self._to_int(order_data.get("taker_amount") or order_data.get("takerAmount")),
         )

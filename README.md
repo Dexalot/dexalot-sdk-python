@@ -2,7 +2,7 @@
 
 ## Disclaimer
 
-Here is our first public release of Dexalot SDK for Python.  It is in alpha testing right now.  Fork it, contribute to it and use it to integrate with Dexalot and let us know how we can improve it.
+Here is our public release of Dexalot SDK for Python.  It is in beta testing right now.  Fork it, contribute to it and use it to integrate with Dexalot and let us know how we can improve it.
 
 **Please Note**: The public interface may undergo breaking changes.
 
@@ -979,10 +979,11 @@ Orders are normalized into one canonical SDK shape regardless of whether the sou
 - `min_trade_amount`, `max_trade_amount`
 
 **RFQ Quotes API:**
-- `chainId` (from `chainid`, `chain_id`)
-- `secureQuote` (from `securequote`, `secure_quote`)
-- `quoteId` (from `quoteid`, `quote_id`)
-- Nested order data: `nonceAndMeta`, `makerAsset`, `takerAsset`, `makerAmount`, `takerAmount`
+- HTTP envelope `{"success": true, "quote": {...}}` is unwrapped so callers see only the inner executable quote.  Envelope-layer failures (`success: false`) become `Result.fail(...)` at the HTTP layer using the API's `reason`/`error` field.
+- `chain_id` (from `chainid`, `chainId`)
+- `quote_id` (from `quoteid`, `quoteId`)
+- Top-level fields preserved as-is: `signature`, `order`, `tx`, `expiry`, `nonceAndMeta`, `pair`, `price`, `side`, `minOutputAmount`, `maxSlippageBps`, `bridgeFee`, `usdAmount`, `baseAddress`, `quoteAddress`, `baseAmount`, `quoteAmount`
+- Inner `order` data normalized to snake_case: `nonce_and_meta`, `maker_asset`, `taker_asset`, `maker_amount`, `taker_amount` (camelCase originals retained)
 
 **Deployment API:**
 - `env`, `address`, `abi` (handles variations like `Env`, `Address`, `Abi`)

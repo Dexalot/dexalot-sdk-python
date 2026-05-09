@@ -1271,12 +1271,21 @@ class DexalotBaseClient:
                 async with await self._make_http_request(
                     "get", rfq_url, params={"chainid": cid}
                 ) as response:
-                    response.raise_for_status()
-                    self.rfq_pairs[cid] = await response.json()
+                    if response.status == 200:
+                        self.rfq_pairs[cid] = await response.json()
+                        return
+                    log_event(
+                        self.logger,
+                        "debug",
+                        "rfq_pairs_unavailable",
+                        chain_id=cid,
+                        chain_name=chain_name,
+                        status=response.status,
+                    )
             except Exception as e:
                 log_event(
                     self.logger,
-                    "warning",
+                    "debug",
                     "rfq_pairs_fetch_failed",
                     chain_id=cid,
                     chain_name=chain_name,

@@ -8,7 +8,7 @@ license = "MIT"
 license-files = [
     "LICENSE.txt"
 ]
-version = "0.5.13"
+version = "0.5.14"
 description = "Dexalot Python SDK - Core library for Dexalot interaction"
 readme = "README.md"
 requires-python = ">=3.12,<3.15"
@@ -17,7 +17,7 @@ authors = [
 ]
 keywords = ["dexalot", "dex", "defi", "web3", "trading", "avalanche"]
 classifiers = [
-    "Development Status :: 3 - Alpha",
+    "Development Status :: 4 - Beta",
     "Intended Audience :: Developers",
     "Operating System :: OS Independent",
     "Programming Language :: Python :: 3",
