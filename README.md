@@ -2,7 +2,7 @@
 
 ## Disclaimer
 
-Here is our first public release of Dexalot SDK for Python.  It is in alpha testing right now.  Fork it, contribute to it and use it to integrate with Dexalot and let us know how we can improve it.
+Here is our public release of Dexalot SDK for Python.  It is in beta testing right now.  Fork it, contribute to it and use it to integrate with Dexalot and let us know how we can improve it.
 
 **Please Note**: The public interface may undergo breaking changes.
 

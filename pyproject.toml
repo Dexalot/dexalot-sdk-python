@@ -17,7 +17,7 @@ authors = [
 ]
 keywords = ["dexalot", "dex", "defi", "web3", "trading", "avalanche"]
 classifiers = [
-    "Development Status :: 3 - Alpha",
+    "Development Status :: 4 - Beta",
     "Intended Audience :: Developers",
     "Operating System :: OS Independent",
     "Programming Language :: Python :: 3",
