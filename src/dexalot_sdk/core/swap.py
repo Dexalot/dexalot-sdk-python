@@ -536,6 +536,8 @@ class SwapClient(DexalotBaseClient):
                 w3, "eth.send_raw_transaction", signed_tx.raw_transaction
             )
 
+            tx_hex = w3.to_hex(tx_hash)
+
             if wait_for_receipt:
                 receipt = await self._rpc_call(w3, "eth.wait_for_transaction_receipt", tx_hash)
                 receipt_status = (
@@ -546,14 +548,64 @@ class SwapClient(DexalotBaseClient):
                     else 1
                 )
                 if receipt_status != 1:
-                    return Result.fail("Transaction reverted")
-                return Result.ok({"tx_hash": w3.to_hex(tx_hash), "operation": "execute_rfq_swap"})
+                    revert_reason = await self._extract_revert_reason(w3, tx, receipt)
+                    block_number = (
+                        receipt.get("blockNumber") if isinstance(receipt, dict)
+                        else getattr(receipt, "blockNumber", None)
+                    )
+                    detail_parts = [f"tx={tx_hex}"]
+                    if block_number is not None:
+                        detail_parts.append(f"block={block_number}")
+                    if revert_reason:
+                        detail_parts.append(f"reason={revert_reason}")
+                    return Result.fail(
+                        f"Transaction reverted: {', '.join(detail_parts)}"
+                    )
+                return Result.ok({"tx_hash": tx_hex, "operation": "execute_rfq_swap"})
 
-            return Result.ok({"tx_hash": w3.to_hex(tx_hash), "operation": "execute_rfq_swap"})
+            return Result.ok({"tx_hash": tx_hex, "operation": "execute_rfq_swap"})
 
         except Exception as e:
             error_msg = self._sanitize_error(e, "executing swap")
             return Result.fail(error_msg)
+
+    async def _extract_revert_reason(
+        self, w3: Any, tx: dict, receipt: Any
+    ) -> str | None:
+        """Best-effort extraction of the on-chain revert reason for a failed tx.
+
+        Re-runs the original transaction as ``eth_call`` against the block in
+        which it reverted; the node returns the revert message (e.g.
+        ``execution reverted: RF-EXP-01``) which is otherwise dropped from
+        the receipt. Returns ``None`` if the call cannot be replayed or the
+        node refuses to surface a reason.
+        """
+        try:
+            block_number = (
+                receipt.get("blockNumber") if isinstance(receipt, dict)
+                else getattr(receipt, "blockNumber", None)
+            )
+            call_tx = {
+                "from": tx.get("from"),
+                "to": tx.get("to"),
+                "data": tx.get("data"),
+                "value": tx.get("value", 0),
+                "gas": tx.get("gas"),
+            }
+            call_tx = {k: v for k, v in call_tx.items() if v is not None}
+            try:
+                await w3.eth.call(call_tx, block_identifier=block_number)
+            except Exception as call_exc:
+                msg = str(call_exc)
+                marker = "execution reverted"
+                if marker in msg:
+                    after = msg.split(marker, 1)[1].lstrip(" :")
+                    after = after.strip().strip("'").strip('"')
+                    return after or marker
+                return msg[:200] or None
+            return None
+        except Exception:
+            return None
 
     async def _get_rfq_contract(self, chain_id: int | None = None):
         """Resolve MainnetRFQ contract and W3 instance for the target chain.

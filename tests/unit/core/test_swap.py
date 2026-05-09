@@ -1016,7 +1016,7 @@ class TestSwapClient:
         assert "empty data" in res.error
 
     async def test_execute_rfq_swap_tx_reverted(self, client):
-        """execute_rfq_swap returns fail when the swap transaction receipt has status=0."""
+        """Reverted swap surfaces tx hash, block, and revert reason in the error."""
         quote = {
             "success": True,
             "signature": "0xabcd",
@@ -1038,20 +1038,26 @@ class TestSwapClient:
         mock_contract.functions.simpleSwap.return_value.build_transaction = AsyncMock(
             return_value={
                 "from": client.account.address,
+                "to": "0xrfq",
+                "data": "0xdeadbeef",
                 "nonce": 0,
                 "gas": 120000,
                 "gasPrice": 100,
+                "value": 0,
             }
         )
         client._get_rfq_contract = AsyncMock(return_value=(client.w3_l1, mock_contract))
-        client.w3_l1.to_hex = lambda x: "0xHash"
+        client.w3_l1.to_hex = lambda x: "0xdeadbeef"
+        client.w3_l1.eth.call = AsyncMock(
+            side_effect=Exception("execution reverted: RF-EXP-01")
+        )
 
         async def mock_rpc_call(w3, method, *args):
             if method == "eth.wait_for_transaction_receipt":
-                return {"status": 0}  # reverted
-            elif method == "eth.send_raw_transaction":
+                return {"status": 0, "blockNumber": 42}
+            if method == "eth.send_raw_transaction":
                 return b"tx_hash"
-            elif method == "eth.gas_price":
+            if method == "eth.gas_price":
                 return 100
             return None
 
@@ -1060,6 +1066,79 @@ class TestSwapClient:
         res = await client.execute_rfq_swap(quote)
         assert not res.success
         assert "Transaction reverted" in res.error
+        assert "tx=0xdeadbeef" in res.error
+        assert "block=42" in res.error
+        assert "RF-EXP-01" in res.error
+
+    async def test_extract_revert_reason_generic_error(self, client):
+        """A non-revert exception from eth_call falls back to a sliced message."""
+        client.w3_l1.eth.call = AsyncMock(side_effect=Exception("rpc error: foo"))
+        reason = await client._extract_revert_reason(
+            client.w3_l1, {"from": "0xa", "to": "0xb", "data": "0xc"}, {"blockNumber": 1}
+        )
+        assert reason == "rpc error: foo"
+
+    async def test_extract_revert_reason_handles_outer_failure(self, client):
+        """If the helper itself blows up, it returns None instead of propagating."""
+        broken_tx = MagicMock()
+        broken_tx.get.side_effect = RuntimeError("boom")
+        reason = await client._extract_revert_reason(
+            client.w3_l1, broken_tx, {"blockNumber": 1}
+        )
+        assert reason is None
+
+    async def test_execute_rfq_swap_revert_without_replay(self, client):
+        """When eth_call replay is unavailable, error still surfaces tx + block."""
+        quote = {
+            "success": True,
+            "signature": "0xabcd",
+            "order": {
+                "makerAsset": "0x1111111111111111111111111111111111111111",
+                "takerAsset": "0x2222222222222222222222222222222222222222",
+                "maker": "0x0000000000000000000000000000000000000003",
+                "taker": "0x0000000000000000000000000000000000000004",
+                "makerAmount": 1,
+                "takerAmount": 1,
+                "expiry": 9999999999,
+                "nonceAndMeta": 0,
+            },
+        }
+        mock_contract = MagicMock()
+        mock_contract.functions.simpleSwap.return_value.estimate_gas = AsyncMock(
+            return_value=100000
+        )
+        mock_contract.functions.simpleSwap.return_value.build_transaction = AsyncMock(
+            return_value={
+                "from": client.account.address,
+                "to": "0xrfq",
+                "data": "0xdeadbeef",
+                "nonce": 0,
+                "gas": 120000,
+                "gasPrice": 100,
+                "value": 0,
+            }
+        )
+        client._get_rfq_contract = AsyncMock(return_value=(client.w3_l1, mock_contract))
+        client.w3_l1.to_hex = lambda x: "0xabc123"
+        # eth.call returns a value (no exception) — no revert reason available
+        client.w3_l1.eth.call = AsyncMock(return_value=b"")
+
+        async def mock_rpc_call(w3, method, *args):
+            if method == "eth.wait_for_transaction_receipt":
+                return {"status": 0, "blockNumber": 99}
+            if method == "eth.send_raw_transaction":
+                return b"tx_hash"
+            if method == "eth.gas_price":
+                return 100
+            return None
+
+        client._rpc_call = AsyncMock(side_effect=mock_rpc_call)
+
+        res = await client.execute_rfq_swap(quote)
+        assert not res.success
+        assert "tx=0xabc123" in res.error
+        assert "block=99" in res.error
+        assert "reason=" not in res.error
 
     async def test_execute_rfq_swap_no_wait_for_receipt(self, client):
         """execute_rfq_swap returns 'sent' message when wait_for_receipt=False."""
