@@ -1048,9 +1048,7 @@ class TestSwapClient:
         )
         client._get_rfq_contract = AsyncMock(return_value=(client.w3_l1, mock_contract))
         client.w3_l1.to_hex = lambda x: "0xdeadbeef"
-        client.w3_l1.eth.call = AsyncMock(
-            side_effect=Exception("execution reverted: RF-EXP-01")
-        )
+        client.w3_l1.eth.call = AsyncMock(side_effect=Exception("execution reverted: RF-EXP-01"))
 
         async def mock_rpc_call(w3, method, *args):
             if method == "eth.wait_for_transaction_receipt":
@@ -1082,9 +1080,7 @@ class TestSwapClient:
         """If the helper itself blows up, it returns None instead of propagating."""
         broken_tx = MagicMock()
         broken_tx.get.side_effect = RuntimeError("boom")
-        reason = await client._extract_revert_reason(
-            client.w3_l1, broken_tx, {"blockNumber": 1}
-        )
+        reason = await client._extract_revert_reason(client.w3_l1, broken_tx, {"blockNumber": 1})
         assert reason is None
 
     async def test_execute_rfq_swap_revert_without_replay(self, client):

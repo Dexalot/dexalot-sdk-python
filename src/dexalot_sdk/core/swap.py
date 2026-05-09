@@ -550,7 +550,8 @@ class SwapClient(DexalotBaseClient):
                 if receipt_status != 1:
                     revert_reason = await self._extract_revert_reason(w3, tx, receipt)
                     block_number = (
-                        receipt.get("blockNumber") if isinstance(receipt, dict)
+                        receipt.get("blockNumber")
+                        if isinstance(receipt, dict)
                         else getattr(receipt, "blockNumber", None)
                     )
                     detail_parts = [f"tx={tx_hex}"]
@@ -558,9 +559,7 @@ class SwapClient(DexalotBaseClient):
                         detail_parts.append(f"block={block_number}")
                     if revert_reason:
                         detail_parts.append(f"reason={revert_reason}")
-                    return Result.fail(
-                        f"Transaction reverted: {', '.join(detail_parts)}"
-                    )
+                    return Result.fail(f"Transaction reverted: {', '.join(detail_parts)}")
                 return Result.ok({"tx_hash": tx_hex, "operation": "execute_rfq_swap"})
 
             return Result.ok({"tx_hash": tx_hex, "operation": "execute_rfq_swap"})
@@ -569,9 +568,7 @@ class SwapClient(DexalotBaseClient):
             error_msg = self._sanitize_error(e, "executing swap")
             return Result.fail(error_msg)
 
-    async def _extract_revert_reason(
-        self, w3: Any, tx: dict, receipt: Any
-    ) -> str | None:
+    async def _extract_revert_reason(self, w3: Any, tx: dict, receipt: Any) -> str | None:
         """Best-effort extraction of the on-chain revert reason for a failed tx.
 
         Re-runs the original transaction as ``eth_call`` against the block in
@@ -582,7 +579,8 @@ class SwapClient(DexalotBaseClient):
         """
         try:
             block_number = (
-                receipt.get("blockNumber") if isinstance(receipt, dict)
+                receipt.get("blockNumber")
+                if isinstance(receipt, dict)
                 else getattr(receipt, "blockNumber", None)
             )
             call_tx = {
