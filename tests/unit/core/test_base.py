@@ -998,20 +998,18 @@ class TestDexalotBaseClient:
         assert client.rfq_pairs[43114] == {"Fallback": "Data"}
 
     async def test_fetch_rfq_pairs_status_branches(self, client):
-        """200 stores pairs, 4xx is silent (chain has no RFQ), 5xx warns."""
+        """200 stores pairs; non-200 statuses and exceptions are silent."""
         client.chain_config = {
             "Avalanche": {"chain_id": 43114},
             "Ethereum": {"chain_id": 1},
             "Broken": {"chain_id": 999},
+            "Network": {"chain_id": 12345},
         }
 
         def make_resp(status, json_data=None):
             resp = AsyncMock()
             resp.status = status
             resp.json.return_value = json_data or {}
-            resp.raise_for_status = MagicMock(
-                side_effect=Exception(f"HTTP {status}") if status >= 400 else None
-            )
             cm = AsyncMock()
             cm.__aenter__.return_value = resp
             return cm
@@ -1022,7 +1020,9 @@ class TestDexalotBaseClient:
                 return make_resp(200, {"AVAX/USDC": {}})
             if cid == 1:
                 return make_resp(404)
-            return make_resp(503)
+            if cid == 999:
+                return make_resp(500)
+            raise ConnectionError("network down")
 
         client._mock_session.get = MagicMock(side_effect=side_effect)
         client.rfq_pairs = {}

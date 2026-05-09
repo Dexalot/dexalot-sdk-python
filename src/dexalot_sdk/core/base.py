@@ -1273,21 +1273,19 @@ class DexalotBaseClient:
                 ) as response:
                     if response.status == 200:
                         self.rfq_pairs[cid] = await response.json()
-                    elif 400 <= response.status < 500:
-                        log_event(
-                            self.logger,
-                            "debug",
-                            "rfq_pairs_unavailable",
-                            chain_id=cid,
-                            chain_name=chain_name,
-                            status=response.status,
-                        )
-                    else:
-                        response.raise_for_status()
+                        return
+                    log_event(
+                        self.logger,
+                        "debug",
+                        "rfq_pairs_unavailable",
+                        chain_id=cid,
+                        chain_name=chain_name,
+                        status=response.status,
+                    )
             except Exception as e:
                 log_event(
                     self.logger,
-                    "warning",
+                    "debug",
                     "rfq_pairs_fetch_failed",
                     chain_id=cid,
                     chain_name=chain_name,
