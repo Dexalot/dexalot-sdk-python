@@ -176,6 +176,8 @@ result = await client.add_order(
 )
 ```
 
+> **Precision note**: `amount` and `price` accept `int`, `float`, `Decimal`, and numeric `str`. The SDK converts to wei via `Decimal`-backed arithmetic — never float-multiplication — so exact values like `2933.0` round-trip cleanly. Precision exceeding the pair's `base_display_decimals` / `quote_display_decimals` is **rejected** rather than silently rounded; pass `Decimal('2.0')` or round explicitly. See the "Amount Precision and Display Decimals" section of [README.md](../README.md) for the full contract.
+
 ### Cancel an order
 
 ```python

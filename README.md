@@ -1228,3 +1228,56 @@ if not result.success:
 | "Invalid order_id: must be hex string or bytes32" | Invalid order ID | Use valid hex string |
 
 Validation happens before any network calls, so invalid inputs fail fast with clear error messages.
+
+## Amount Precision and Display Decimals
+
+Trading and transfer methods accept human-readable amounts and convert them to integer wei (atomic units) internally using `Decimal` arithmetic — never `int(amount * 10**N)`, which silently truncates exact decimals (e.g. `2933.0 * 10**18` becomes `2932999999999999737856` instead of `2933000000000000000000` and the contract rejects with `T-TMDQ-01`).
+
+### Accepted input types
+
+`amount` and `price` parameters accept any of:
+
+- `int` (`amount=1`)
+- `float` (`amount=2933.0`) — converted via `Decimal(str(value))` so the user's intended decimal representation is preserved (`str(0.1) == "0.1"`)
+- `Decimal` (`amount=Decimal("2933")`) — recommended for precision-sensitive callers (e.g. market-making bots)
+- numeric `str` (`amount="2933.5"`) — parsed via `Decimal`
+
+```python
+from decimal import Decimal
+
+# All four produce identical wei.
+await client.add_order("AVAX/USDC", "BUY", 2933.0, 10.0)
+await client.add_order("AVAX/USDC", "BUY", 2933, 10.0)
+await client.add_order("AVAX/USDC", "BUY", Decimal("2933"), 10.0)
+await client.add_order("AVAX/USDC", "BUY", "2933", 10.0)
+```
+
+### Display-decimal enforcement
+
+Every Dexalot pair carries `basedisplaydecimals` and `quotedisplaydecimals` that bound how many fractional digits `amount` and `price` may have. The SDK enforces this client-side and **rejects** inputs that exceed the bound rather than silently rounding — silent rounding would slip orders (e.g. a stop at `99.99` quietly becoming `99.9`).
+
+```python
+# Pair AVAX/USDC: quote_display_decimals=4, base_display_decimals=1
+res = await client.add_order("AVAX/USDC", "BUY", 1.99, 10.0)
+# Result.fail: "Invalid amount: 1.99 has more than 1 decimals; pair allows 1.
+#               Round before passing (e.g. Decimal('2.0'))."
+```
+
+A `1e-10` tolerance band absorbs binary-float-representation noise so `0.1 + 0.2` (which evaluates to `0.30000000000000004`) is accepted at 4 display decimals and snapped to exactly `0.3000`.
+
+### Min/max trade-amount bounds
+
+Each pair also carries `mintrade_amnt` and `maxtrade_amnt` bounds (quote-token notional, i.e., `price * amount`). The SDK checks these client-side and returns `Result.fail` for orders outside the range:
+
+```python
+# Pair AVAX/USDC: min_trade_amount=0.3, max_trade_amount=4000 (AVAX notional)
+res = await client.add_order("AVAX/USDC", "BUY", 0.01, 1.0)
+# Result.fail: "Trade notional 0.01 below min_trade_amount 0.3 (quote-token)
+#               for pair AVAX/USDC."
+```
+
+A bound of `0` means "no bound" (some pairs legitimately omit a cap).
+
+### Pairs missing display decimals
+
+If the pair metadata API ever omits `basedisplaydecimals` or `quotedisplaydecimals` for a pair, the SDK drops that pair from `client.pairs` and logs a `WARNING`. Downstream order-placement calls will see `Pair X not found` — the correct fail-fast behavior.
