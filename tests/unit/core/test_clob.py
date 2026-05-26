@@ -736,9 +736,7 @@ class TestCLOBClient:
             (0.1, 100000000000000000),
         ],
     )
-    async def test_replace_order_quantity_precision(
-        self, client, new_amount, expected_qty_wei
-    ):
+    async def test_replace_order_quantity_precision(self, client, new_amount, expected_qty_wei):
         """replace_order encodes via Decimal arithmetic (the 2933.0 case)."""
         client.pairs = {
             "AVAX/USDC": {
@@ -753,9 +751,7 @@ class TestCLOBClient:
             }
         }
         self._stub_resolved_order(client, pair="AVAX/USDC", trade_pair_id=b"TPID")
-        client._send_trade_tx = AsyncMock(
-            return_value=("0xTxHash", MagicMock(status=1))
-        )
+        client._send_trade_tx = AsyncMock(return_value=("0xTxHash", MagicMock(status=1)))
 
         res = await client.replace_order("0x01", 10.0, new_amount)
         assert res.success
@@ -783,9 +779,7 @@ class TestCLOBClient:
             }
         }
         self._stub_resolved_order(client, pair="AVAX/USDC", trade_pair_id=b"TPID")
-        client._send_trade_tx = AsyncMock(
-            return_value=("0xTxHash", MagicMock(status=1))
-        )
+        client._send_trade_tx = AsyncMock(return_value=("0xTxHash", MagicMock(status=1)))
 
         # 1.94 has 2 decimals; pair allows 1 for amount → rejected.
         rejected = await client.replace_order("0x01", 0.1234, 1.94)
@@ -1367,9 +1361,7 @@ class TestCLOBClient:
             (0.1, 100000000000000000),
         ],
     )
-    async def test_cancel_add_list_quantity_precision(
-        self, client, amount, expected_qty_wei
-    ):
+    async def test_cancel_add_list_quantity_precision(self, client, amount, expected_qty_wei):
         """cancel_add_list (via _process_replacement) encodes quantity exactly."""
         client.pairs = {
             "AVAX/USDC": {
@@ -1385,9 +1377,7 @@ class TestCLOBClient:
         }
         self._stub_resolved_order(client, pair="AVAX/USDC", trade_pair_id=b"TPID")
         client._ensure_pair_exists = AsyncMock(return_value=True)
-        client._send_trade_tx = AsyncMock(
-            return_value=("0xTxHash", MagicMock(status=1))
-        )
+        client._send_trade_tx = AsyncMock(return_value=("0xTxHash", MagicMock(status=1)))
 
         res = await client.cancel_add_list(
             [
@@ -4090,6 +4080,13 @@ class TestCLOBClient:
             assert res.error is not None
             assert f"more than {display_decimals} decimals" in res.error
 
+    def test_check_display_precision_zero_short_circuits(self):
+        """Zero is valid at any precision and short-circuits before quantize."""
+        for val in (0, 0.0, Decimal("0"), "0"):
+            res = CLOBClient._check_display_precision(val, 4, "amount")
+            assert res.success
+            assert res.data == Decimal(0)
+
     async def test_all_clob_write_paths_reject_extra_precision(self, client):
         """All four CLOB write paths reject inputs that exceed display decimals.
 
@@ -4112,12 +4109,8 @@ class TestCLOBClient:
         }
         client.pairs = {"AVAX/USDC": pair_data}
         client._ensure_pair_exists = AsyncMock(return_value=True)
-        client.get_portfolio_balance = AsyncMock(
-            return_value=Result.ok({"available": 1000.0})
-        )
-        client._send_trade_tx = AsyncMock(
-            return_value=("0xTxHash", MagicMock(status=1))
-        )
+        client.get_portfolio_balance = AsyncMock(return_value=Result.ok({"available": 1000.0}))
+        client._send_trade_tx = AsyncMock(return_value=("0xTxHash", MagicMock(status=1)))
 
         # amount=1.99 has 2 fractional digits; pair allows 1 → rejected.
         a = await client.add_order("AVAX/USDC", "BUY", 1.99, 10.0)
@@ -4168,12 +4161,8 @@ class TestCLOBClient:
         }
         client.pairs = {"AVAX/USDC": pair_data}
         client._ensure_pair_exists = AsyncMock(return_value=True)
-        client.get_portfolio_balance = AsyncMock(
-            return_value=Result.ok({"available": 1000.0})
-        )
-        client._send_trade_tx = AsyncMock(
-            return_value=("0xTxHash", MagicMock(status=1))
-        )
+        client.get_portfolio_balance = AsyncMock(return_value=Result.ok({"available": 1000.0}))
+        client._send_trade_tx = AsyncMock(return_value=("0xTxHash", MagicMock(status=1)))
 
         # Precision-clean inputs (1 base dp, 4 quote dp).
         expected_price_wei = 10567000  # 10.567 * 10^6

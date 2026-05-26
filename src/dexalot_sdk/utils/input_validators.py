@@ -6,6 +6,7 @@ Validators are lightweight, synchronous functions with early returns.
 
 import math
 import re
+from decimal import Decimal, InvalidOperation
 
 from .result import Result
 
@@ -14,8 +15,24 @@ _PAIR_PATTERN = re.compile(r"^[A-Za-z0-9_-]+/[A-Za-z0-9_-]+$")
 _HEX_PATTERN = re.compile(r"^[0-9a-fA-F]+$")
 
 
-def validate_positive_float(value: object, param_name: str) -> Result[None]:
-    """Validate that a value is a positive finite float.
+def _validate_positive_decimal(d: Decimal, param_name: str) -> Result[None]:
+    """Shared positivity / NaN / Infinity checks for Decimal-convertible values."""
+    if d.is_nan():
+        return Result.fail(f"Invalid {param_name}: cannot be NaN")
+    if d.is_infinite():
+        return Result.fail(f"Invalid {param_name}: cannot be infinite")
+    if d <= 0:
+        return Result.fail(f"Invalid {param_name}: must be positive (> 0), got {d}")
+    return Result.ok(None)
+
+
+def validate_positive_number(value: object, param_name: str) -> Result[None]:
+    """Validate that a value is a positive finite number (int, float, Decimal, or numeric str).
+
+    Accepts ``int``, ``float``, ``Decimal``, and numeric ``str`` inputs so
+    callers wanting precision-exact arithmetic (e.g. for order amounts on
+    pairs with strict display decimals) can pass ``Decimal('2933')`` or
+    ``'2933.5'`` instead of a float.
 
     Args:
         value: The value to validate (runtime-checked; may be any type)
@@ -24,21 +41,47 @@ def validate_positive_float(value: object, param_name: str) -> Result[None]:
     Returns:
         Result.ok(None) if valid, Result.fail(error_message) if invalid
     """
-    if not isinstance(value, (int, float)):
+    if isinstance(value, bool):
+        # bool is a subclass of int in Python; reject explicitly so True/False
+        # don't slip through as amount=1 / amount=0.
         return Result.fail(
-            f"Invalid {param_name}: must be numeric (int or float), got {type(value).__name__}"
+            f"Invalid {param_name}: must be numeric (int, float, Decimal, or str), "
+            f"got {type(value).__name__}"
         )
 
-    if math.isnan(value):
-        return Result.fail(f"Invalid {param_name}: cannot be NaN")
+    if isinstance(value, float):
+        if math.isnan(value):
+            return Result.fail(f"Invalid {param_name}: cannot be NaN")
+        if math.isinf(value):
+            return Result.fail(f"Invalid {param_name}: cannot be infinite")
+        if value <= 0:
+            return Result.fail(f"Invalid {param_name}: must be positive (> 0), got {value}")
+        return Result.ok(None)
 
-    if math.isinf(value):
-        return Result.fail(f"Invalid {param_name}: cannot be infinite")
+    if isinstance(value, int):
+        if value <= 0:
+            return Result.fail(f"Invalid {param_name}: must be positive (> 0), got {value}")
+        return Result.ok(None)
 
-    if value <= 0:
-        return Result.fail(f"Invalid {param_name}: must be positive (> 0), got {value}")
+    if isinstance(value, Decimal):
+        return _validate_positive_decimal(value, param_name)
 
-    return Result.ok(None)
+    if isinstance(value, str):
+        try:
+            d = Decimal(value)
+        except InvalidOperation:
+            return Result.fail(f"Invalid {param_name}: not a valid numeric string, got {value!r}")
+        return _validate_positive_decimal(d, param_name)
+
+    return Result.fail(
+        f"Invalid {param_name}: must be numeric (int, float, Decimal, or str), "
+        f"got {type(value).__name__}"
+    )
+
+
+# Backwards-compatible alias. Existing callers still import this name;
+# slated for removal in a future release (see CLAUDE.md).
+validate_positive_float = validate_positive_number
 
 
 def validate_positive_int(value: object, param_name: str) -> Result[None]:
@@ -268,7 +311,7 @@ def validate_order_params(
         return pair_result
 
     # Validate amount
-    amount_result = validate_positive_float(amount, "amount")
+    amount_result = validate_positive_number(amount, "amount")
     if not amount_result.success:
         return amount_result
 
@@ -277,7 +320,7 @@ def validate_order_params(
     if order_type_upper == "LIMIT":
         if price is None:
             return Result.fail("Invalid price: required for LIMIT orders, got None")
-        price_result = validate_positive_float(price, "price")
+        price_result = validate_positive_number(price, "price")
         if not price_result.success:
             return price_result
 
@@ -301,7 +344,7 @@ def validate_transfer_params(token: object, amount: object, to_address: object) 
         return token_result
 
     # Validate amount
-    amount_result = validate_positive_float(amount, "amount")
+    amount_result = validate_positive_number(amount, "amount")
     if not amount_result.success:
         return amount_result
 
@@ -334,7 +377,7 @@ def validate_swap_params(from_token: object, to_token: object, amount: object) -
         return to_token_result
 
     # Validate amount
-    amount_result = validate_positive_float(amount, "amount")
+    amount_result = validate_positive_number(amount, "amount")
     if not amount_result.success:
         return amount_result
 
