@@ -595,6 +595,24 @@ class TestTransferClient:
         assert res.data["total"] == 10.0
         assert res.data["available"] == 5.0
 
+    async def test_get_portfolio_balance_large_wei_precision(self, client):
+        """Large wei values convert back to human units exactly (Decimal path).
+
+        With the previous float division, balance_wei // (10**18) for very
+        large balances would lose the last digit or two of precision. Routing
+        through Utils.unit_conversion (Decimal-backed) preserves them.
+        """
+        # A balance just at the edge where float division starts to drift
+        # (much larger than 2**53). Routing through Decimal keeps it exact.
+        large_wei = 12345678901234567890123456  # 25 digits
+        client.portfolio_sub_contract.functions.getBalance.return_value.call = AsyncMock(
+            return_value=(large_wei, large_wei, large_wei)
+        )
+        res = await client.get_portfolio_balance("USDC")
+        assert res.success
+        # 6-decimal token (USDC): divide by 10^6
+        assert res.data["total"] == float(Decimal(large_wei) / Decimal(10**6))
+
     async def test_get_portfolio_balance_empty_token(self, client):
         result = await client.get_portfolio_balance("")
         assert not result.success

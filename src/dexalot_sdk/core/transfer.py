@@ -700,9 +700,9 @@ class TransferClient(DexalotBaseClient):
 
             return Result.ok(
                 {
-                    "total": balance_data[0] / (10**decimals),
-                    "available": balance_data[1] / (10**decimals),
-                    "locked": balance_data[2] / (10**decimals),
+                    "total": Utils.unit_conversion(balance_data[0], decimals, to_base=False),
+                    "available": Utils.unit_conversion(balance_data[1], decimals, to_base=False),
+                    "locked": Utils.unit_conversion(balance_data[2], decimals, to_base=False),
                 }
             )
         except Exception as e:
@@ -772,8 +772,8 @@ class TransferClient(DexalotBaseClient):
                         decimals = self._get_token_decimals(symbol, self.subnet_chain_id)
                         if decimals is None:
                             decimals = self._get_token_decimals(symbol, self.chain_id) or 18
-                        total = totals[i] / (10**decimals)
-                        available = availables[i] / (10**decimals)
+                        total = Utils.unit_conversion(totals[i], decimals, to_base=False)
+                        available = Utils.unit_conversion(availables[i], decimals, to_base=False)
                         all_balances[symbol] = {
                             "total": total,
                             "available": available,
