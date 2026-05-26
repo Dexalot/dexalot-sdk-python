@@ -49,9 +49,49 @@ class TestValidatePositiveFloat:
         assert not result.success
         assert_contains(result.error, "cannot be infinite")
 
-    def test_non_numeric_fails(self):
-        """Test that non-numeric types fail."""
-        result = validate_positive_float("1.0", "amount")
+    def test_numeric_strings_now_accepted(self):
+        """Numeric strings are accepted (parsed as Decimal)."""
+        assert validate_positive_float("1.0", "amount").success
+        assert validate_positive_float("2933", "amount").success
+        assert validate_positive_float("0.000001", "amount").success
+
+    def test_decimal_now_accepted(self):
+        """Decimal is accepted (precision-preserving alternative to float)."""
+        from decimal import Decimal
+
+        assert validate_positive_float(Decimal("1"), "amount").success
+        assert validate_positive_float(Decimal("2933"), "amount").success
+        assert not validate_positive_float(Decimal("0"), "amount").success
+        assert not validate_positive_float(Decimal("-1"), "amount").success
+        assert not validate_positive_float(Decimal("NaN"), "amount").success
+
+    def test_decimal_infinity_fails(self):
+        """Decimal Infinity (and string 'Infinity') are rejected."""
+        from decimal import Decimal
+
+        res = validate_positive_float(Decimal("Infinity"), "amount")
+        assert not res.success
+        assert_contains(res.error, "cannot be infinite")
+
+        res = validate_positive_float("Infinity", "amount")
+        assert not res.success
+        assert_contains(res.error, "cannot be infinite")
+
+    def test_non_numeric_string_fails(self):
+        """Non-numeric strings still fail."""
+        result = validate_positive_float("abc", "amount")
+        assert not result.success
+        assert_contains(result.error, "not a valid numeric string")
+
+    def test_bool_fails(self):
+        """bool is explicitly rejected even though it's a subclass of int."""
+        result = validate_positive_float(True, "amount")
+        assert not result.success
+        assert_contains(result.error, "must be numeric")
+
+    def test_non_numeric_type_fails(self):
+        """Other non-numeric types fail."""
+        result = validate_positive_float([1.0], "amount")
         assert not result.success
         assert_contains(result.error, "must be numeric")
 

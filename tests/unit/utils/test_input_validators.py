@@ -49,11 +49,23 @@ class TestValidatePositiveFloat:
         assert not result.success
         assert_contains(result.error, "cannot be infinite")
 
-    def test_non_numeric_fails(self):
-        """Test that non-numeric types fail."""
-        result = validate_positive_float("1.0", "amount")
+    def test_numeric_strings_now_accepted(self):
+        """Numeric strings are accepted (parsed as Decimal)."""
+        assert validate_positive_float("1.0", "amount").success
+        assert validate_positive_float("2933", "amount").success
+
+    def test_decimal_now_accepted(self):
+        """Decimal is accepted (precision-preserving alternative to float)."""
+        from decimal import Decimal
+
+        assert validate_positive_float(Decimal("2933"), "amount").success
+        assert not validate_positive_float(Decimal("0"), "amount").success
+
+    def test_non_numeric_string_fails(self):
+        """Non-numeric strings still fail."""
+        result = validate_positive_float("abc", "amount")
         assert not result.success
-        assert_contains(result.error, "must be numeric")
+        assert_contains(result.error, "not a valid numeric string")
 
 
 class TestValidatePositiveInt:

@@ -2,6 +2,7 @@ import asyncio
 import json
 import os
 import time
+from decimal import Decimal
 from unittest.mock import AsyncMock, MagicMock, mock_open, patch
 
 import pytest
@@ -455,6 +456,47 @@ class TestCLOBClient:
         assert call_args["quantity"] == 1000000000000000000  # 1.0 * 10^18
         assert call_args["side"] == 0  # BUY
 
+    @pytest.mark.parametrize(
+        "amount,base_decimals,expected_qty_wei",
+        [
+            # The exact reporter case: 2933.0 * 1e18 used to truncate to ...934464.
+            (2933.0, 18, 2933000000000000000000),
+            (1840.0, 18, 1840000000000000000000),
+            # USDC-style 6-decimal token
+            (100.0, 6, 100_000_000),
+            # Sub-unit values
+            (0.1, 18, 100000000000000000),
+        ],
+    )
+    async def test_add_order_quantity_precision(
+        self, client, amount, base_decimals, expected_qty_wei
+    ):
+        """add_order encodes quantity via Decimal arithmetic — no float-mul drift."""
+        from dexalot_sdk.utils.result import Result
+
+        client.pairs = {
+            "AVAX/USDC": {
+                "pair": "AVAX/USDC",
+                "base": "AVAX",
+                "quote": "USDC",
+                "base_decimals": base_decimals,
+                "quote_decimals": 6,
+                "base_display_decimals": 1,
+                "quote_display_decimals": 4,
+                "tradePairId": b"TPID",
+            }
+        }
+        mock_receipt = MagicMock()
+        mock_receipt.status = 1
+        client._send_trade_tx = AsyncMock(return_value=("0xTxHash", mock_receipt))
+        client.get_portfolio_balance = AsyncMock(return_value=Result.ok({"available": amount + 1}))
+
+        res = await client.add_order("AVAX/USDC", "SELL", amount, 10.0)
+
+        assert res.success
+        call_args = client.trade_pairs_contract.functions.addNewOrder.call_args[0][0]
+        assert call_args["quantity"] == expected_qty_wei
+
     async def test_add_order_validations(self, client):
         """Test add_order validations."""
         # No account
@@ -685,6 +727,71 @@ class TestCLOBClient:
         assert args[0] == bytes.fromhex("01").rjust(32, b"\0")
         assert args[2] == 10000000  # 10.0 * 10^6
         assert args[3] == 1000000000000000000  # 1.0 * 10^18
+
+    @pytest.mark.parametrize(
+        "new_amount,expected_qty_wei",
+        [
+            (2933.0, 2933000000000000000000),
+            (1840.0, 1840000000000000000000),
+            (0.1, 100000000000000000),
+        ],
+    )
+    async def test_replace_order_quantity_precision(self, client, new_amount, expected_qty_wei):
+        """replace_order encodes via Decimal arithmetic (the 2933.0 case)."""
+        client.pairs = {
+            "AVAX/USDC": {
+                "pair": "AVAX/USDC",
+                "base": "AVAX",
+                "quote": "USDC",
+                "base_decimals": 18,
+                "quote_decimals": 6,
+                "base_display_decimals": 1,
+                "quote_display_decimals": 4,
+                "tradePairId": b"TPID",
+            }
+        }
+        self._stub_resolved_order(client, pair="AVAX/USDC", trade_pair_id=b"TPID")
+        client._send_trade_tx = AsyncMock(return_value=("0xTxHash", MagicMock(status=1)))
+
+        res = await client.replace_order("0x01", 10.0, new_amount)
+        assert res.success
+        args = client.trade_pairs_contract.functions.cancelReplaceOrder.call_args[0]
+        assert args[3] == expected_qty_wei
+
+    async def test_replace_order_enforces_display_decimal_precision(self, client):
+        """replace_order rejects inputs whose precision exceeds display decimals.
+
+        Before the precision fix, replace_order skipped this check entirely and
+        let the contract reject the order on-chain with T-TMDQ-01. Now the SDK
+        rejects precision-out-of-bounds inputs locally, preventing wasted
+        gas and silent-slippage scenarios.
+        """
+        client.pairs = {
+            "AVAX/USDC": {
+                "pair": "AVAX/USDC",
+                "base": "AVAX",
+                "quote": "USDC",
+                "base_decimals": 18,
+                "quote_decimals": 6,
+                "base_display_decimals": 1,
+                "quote_display_decimals": 4,
+                "tradePairId": b"TPID",
+            }
+        }
+        self._stub_resolved_order(client, pair="AVAX/USDC", trade_pair_id=b"TPID")
+        client._send_trade_tx = AsyncMock(return_value=("0xTxHash", MagicMock(status=1)))
+
+        # 1.94 has 2 decimals; pair allows 1 for amount → rejected.
+        rejected = await client.replace_order("0x01", 0.1234, 1.94)
+        assert not rejected.success
+        assert "more than 1 decimals" in rejected.error
+
+        # Precision-clean inputs pass through and encode exactly.
+        res = await client.replace_order("0x01", 0.1234, 1.9)
+        assert res.success
+        args = client.trade_pairs_contract.functions.cancelReplaceOrder.call_args[0]
+        assert args[2] == 123400  # 0.1234 * 10^6 (precision-exact)
+        assert args[3] == 1900000000000000000  # 1.9 * 10^18 (precision-exact)
 
     async def test_get_open_orders(self, client):
         """Test get_open_orders."""
@@ -1172,6 +1279,41 @@ class TestCLOBClient:
         assert order_tuples[0][5] == 0  # side BUY
         assert order_tuples[0][3] == 1000000000000000000  # amount
 
+    @pytest.mark.parametrize(
+        "amount,expected_qty_wei",
+        [
+            (2933.0, 2933000000000000000000),
+            (1840.0, 1840000000000000000000),
+            (0.1, 100000000000000000),
+        ],
+    )
+    async def test_add_limit_order_list_quantity_precision(self, client, amount, expected_qty_wei):
+        """add_limit_order_list (via _build_order_tuple) encodes quantity exactly."""
+        from dexalot_sdk.utils.result import Result
+
+        client.pairs = {
+            "AVAX/USDC": {
+                "tradePairId": b"TPID",
+                "pair": "AVAX/USDC",
+                "base_decimals": 18,
+                "quote_decimals": 6,
+                "base_display_decimals": 1,
+                "quote_display_decimals": 4,
+                "quote": "USDC",
+                "base": "AVAX",
+            }
+        }
+        client.get_portfolio_balance = AsyncMock(return_value=Result.ok({"available": amount + 1}))
+        client._ensure_pair_exists = AsyncMock(return_value=True)
+        client._send_trade_tx = AsyncMock(return_value=("0xTxHash", MagicMock(status=1)))
+
+        res = await client.add_limit_order_list(
+            [{"pair": "AVAX/USDC", "side": "SELL", "amount": amount, "price": 10.0}]
+        )
+        assert res.success
+        order_tuples = client.trade_pairs_contract.functions.addOrderList.call_args[0][0]
+        assert order_tuples[0][3] == expected_qty_wei  # quantity is index 3
+
     async def test_cancel_add_list(self, client):
         """Test cancel_add_list."""
         client.pairs = {
@@ -1210,6 +1352,48 @@ class TestCLOBClient:
         assert args[0][0] == bytes.fromhex("01").rjust(32, b"\0")
         assert args[1][0][1] == b"TPID"
         assert args[1][0][2] == 11000000  # 11.0 * 10^6
+
+    @pytest.mark.parametrize(
+        "amount,expected_qty_wei",
+        [
+            (2933.0, 2933000000000000000000),
+            (1840.0, 1840000000000000000000),
+            (0.1, 100000000000000000),
+        ],
+    )
+    async def test_cancel_add_list_quantity_precision(self, client, amount, expected_qty_wei):
+        """cancel_add_list (via _process_replacement) encodes quantity exactly."""
+        client.pairs = {
+            "AVAX/USDC": {
+                "pair": "AVAX/USDC",
+                "base_decimals": 18,
+                "quote_decimals": 6,
+                "base_display_decimals": 1,
+                "quote_display_decimals": 4,
+                "tradePairId": b"TPID",
+                "quote": "USDC",
+                "base": "AVAX",
+            }
+        }
+        self._stub_resolved_order(client, pair="AVAX/USDC", trade_pair_id=b"TPID")
+        client._ensure_pair_exists = AsyncMock(return_value=True)
+        client._send_trade_tx = AsyncMock(return_value=("0xTxHash", MagicMock(status=1)))
+
+        res = await client.cancel_add_list(
+            [
+                {
+                    "order_id": "0x01",
+                    "amount": amount,
+                    "price": 10.0,
+                    "pair": "AVAX/USDC",
+                    "side": "SELL",
+                }
+            ]
+        )
+        assert res.success
+        args = client.trade_pairs_contract.functions.cancelAddList.call_args[0]
+        # _newOrders[0] = (cid, tradePairId, price_wei, qty_wei, ...)
+        assert args[1][0][3] == expected_qty_wei
 
     async def test_cancel_add_list_infers_side_from_existing_order(self, client):
         """cancel_add_list infers side from existing order when not provided."""
@@ -2299,7 +2483,11 @@ class TestCLOBClient:
         client.pairs[VALID_PAIR]["quote_display_decimals"] = 2
 
     async def test_clob_rounding(self, client):
-        """Test rounding logic in add_order."""
+        """add_order rejects inputs whose precision exceeds display decimals.
+
+        Previously the SDK silently rounded; now it returns Result.fail to
+        prevent silent slippage. Callers must round explicitly.
+        """
         client.pairs = {
             VALID_PAIR: {
                 "pair": VALID_PAIR,
@@ -2318,17 +2506,17 @@ class TestCLOBClient:
         client._send_trade_tx = AsyncMock(return_value=("tx", MagicMock(status=1)))
         client._ensure_pair_exists = AsyncMock(return_value=True)
 
-        await client.add_order(VALID_PAIR, "BUY", 1.1234, 10.5678)
-        # Verify rounded values were passed to the contract function via _send_trade_tx
-        # We need to look at what was passed to addNewOrder before it reached _send_trade_tx
-        # But since _send_trade_tx is called with the RESULT of the contract function...
-        # Wait, the SDK does: func = self.trade_pairs_contract.functions.addNewOrder(...)
-        # So we should inspect call_args of addNewOrder.
+        # 4 decimals against a 2-decimal pair → rejected.
+        res = await client.add_order(VALID_PAIR, "BUY", 1.1234, 10.5678)
+        assert not res.success
+        assert "more than 2 decimals" in res.error
+
+        # Precision-clean values pass through.
+        res = await client.add_order(VALID_PAIR, "BUY", 1.12, 10.57)
+        assert res.success
         call_args = client.trade_pairs_contract.functions.addNewOrder.call_args[0][0]
-        # Price 10.57 * 10^6 = 10570000
-        assert call_args["price"] == 10570000
-        # Qty 1.12 * 10^18
-        assert call_args["quantity"] >= 1120000000000000000
+        assert call_args["price"] == 10570000  # 10.57 * 10^6
+        assert call_args["quantity"] == 1120000000000000000  # 1.12 * 10^18
 
     async def test_clob_order_utils(self, client):
         """Test various order utils and fallbacks."""
@@ -2496,11 +2684,19 @@ class TestCLOBClient:
         client._send_trade_tx = AsyncMock(return_value=("tx", MagicMock(status=1)))
         client._ensure_pair_exists = AsyncMock(return_value=True)
 
-        await client.add_limit_order_list(
+        # Inputs with extra precision are now rejected.
+        rejected = await client.add_limit_order_list(
             [{"pair": "ZZ/USDC", "side": "BUY", "amount": 1.1234, "price": 10.5678}]
         )
+        assert not rejected.success
+        assert "more than 2 decimals" in rejected.error
+
+        # Precision-clean values pass through.
+        await client.add_limit_order_list(
+            [{"pair": "ZZ/USDC", "side": "BUY", "amount": 1.12, "price": 10.57}]
+        )
         call_args = client.trade_pairs_contract.functions.addOrderList.call_args[0][0]
-        assert call_args[0][2] == 10570000
+        assert call_args[0][2] == 10570000  # 10.57 * 10^6
 
         client._send_trade_tx.side_effect = Exception("Transaction reverted")
         result = await client.add_limit_order_list(
@@ -2594,13 +2790,13 @@ class TestCLOBClient:
         client._ensure_pair_exists = AsyncMock(return_value=True)
 
         replacements = [
-            # Int ID, SELL side, Needs rounding
+            # Int ID, SELL side, precision-clean values (matches 2 display decimals)
             {
                 "order_id": 12345,
                 "pair": "ZZ/USDC",
                 "side": "SELL",
-                "amount": 1.1234,
-                "price": 10.5678,
+                "amount": 1.12,
+                "price": 10.57,
             },
             # Bytes ID
             {"order_id": b"\x01" * 32, "pair": "ZZ/USDC", "side": "BUY", "amount": 1, "price": 1},
@@ -3626,6 +3822,8 @@ class TestCLOBClient:
                 "quote": "USDC",
                 "base_decimals": 18,
                 "quote_decimals": 6,
+                "base_display_decimals": 1,
+                "quote_display_decimals": 4,
                 "min_trade_amount": "0.1",
                 "max_trade_amount": "10",
             },
@@ -3639,6 +3837,63 @@ class TestCLOBClient:
         before = dict(client.pairs)
         client._rehydrate_cached_get_clob_pairs(Result.fail("cache miss"))
         assert client.pairs == before
+
+    def test_store_clob_pairs_drops_pairs_missing_display_decimals(self, client):
+        """Pairs without display decimals are dropped (with a warning).
+
+        Display decimals are contractual: silently defaulting them would mask
+        the contract's T-TMDQ-01 rejection downstream. A pair missing these
+        fields cannot be safely used to place orders, so it's excluded from
+        the pair map and a warning is logged.
+        """
+        from dexalot_sdk.constants import ENV_FUJI_MULTI_SUBNET
+
+        transformed = [
+            # OK — has both display decimals.
+            {
+                "env": ENV_FUJI_MULTI_SUBNET,
+                "pair": "AVAX/USDC",
+                "base": "AVAX",
+                "quote": "USDC",
+                "base_decimals": 18,
+                "quote_decimals": 6,
+                "base_display_decimals": 1,
+                "quote_display_decimals": 4,
+            },
+            # Missing base_display_decimals → drop with warning.
+            {
+                "env": ENV_FUJI_MULTI_SUBNET,
+                "pair": "NOBASE/USDC",
+                "base": "NOBASE",
+                "quote": "USDC",
+                "base_decimals": 18,
+                "quote_decimals": 6,
+                "quote_display_decimals": 4,
+            },
+            # quote_display_decimals explicitly None → drop with warning.
+            {
+                "env": ENV_FUJI_MULTI_SUBNET,
+                "pair": "NULL/USDC",
+                "base": "NULL",
+                "quote": "USDC",
+                "base_decimals": 18,
+                "quote_decimals": 6,
+                "base_display_decimals": 1,
+                "quote_display_decimals": None,
+            },
+        ]
+
+        with patch("dexalot_sdk.core.clob._logger") as mock_logger:
+            pair_list = client._store_clob_pairs(transformed)
+
+        assert {p["pair"] for p in pair_list} == {"AVAX/USDC"}
+        assert "NOBASE/USDC" not in client.pairs
+        assert "NULL/USDC" not in client.pairs
+        # Two warnings, one per dropped pair.
+        assert mock_logger.warning.call_count == 2
+        warning_calls = [c.args[1] for c in mock_logger.warning.call_args_list]
+        assert "NOBASE/USDC" in warning_calls
+        assert "NULL/USDC" in warning_calls
 
     def test_order_normalization_helper_edge_cases(self, client):
         """Direct helper tests cover block coercion and pair-id resolution edge cases."""
@@ -3793,6 +4048,333 @@ class TestCLOBClient:
         )
         assert not cancel_add_result.success
         assert cancel_add_result.error == "Order formatting failed"
+
+    @pytest.mark.parametrize(
+        "value,display_decimals,should_accept",
+        [
+            # Precision-clean inputs accepted at exact display precision
+            (2933.0, 4, True),
+            (1840.0, 1, True),
+            (10.57, 2, True),
+            # Float-noise residuals are tolerated and snapped to the nearest
+            (0.30000000000000004, 4, True),  # = 0.3000 + 4e-17
+            (0.1 + 0.2, 4, True),  # = 0.30000000000000004
+            # Genuine extra precision is rejected (no silent slippage)
+            (10.5678, 2, False),
+            (1.123, 1, False),
+            (0.30001, 4, False),
+            # Borderline: residual just above tolerance → reject
+            (1.0000001, 0, False),  # residual 1e-7 > tolerance 1e-10
+            # Decimal and string inputs work the same
+            (Decimal("10.57"), 2, True),
+            ("10.5678", 2, False),
+        ],
+    )
+    def test_check_display_precision_reject_with_tolerance(
+        self, value, display_decimals, should_accept
+    ):
+        """_check_display_precision tolerates float noise; rejects real extra precision."""
+        res = CLOBClient._check_display_precision(value, display_decimals, "amount")
+        assert res.success == should_accept
+        if not should_accept:
+            assert res.error is not None
+            assert f"more than {display_decimals} decimals" in res.error
+
+    def test_check_display_precision_zero_short_circuits(self):
+        """Zero is valid at any precision and short-circuits before quantize."""
+        for val in (0, 0.0, Decimal("0"), "0"):
+            res = CLOBClient._check_display_precision(val, 4, "amount")
+            assert res.success
+            assert res.data == Decimal(0)
+
+    @pytest.mark.parametrize(
+        "price,amount,min_amt,max_amt,should_succeed,expected_error_fragment",
+        [
+            # Notional 10 * 1 = 10, between min=1 and max=100 → ok
+            (Decimal("10"), Decimal("1"), Decimal("1"), Decimal("100"), True, None),
+            # Notional 10 * 0.05 = 0.5, below min=1 → reject
+            (
+                Decimal("10"),
+                Decimal("0.05"),
+                Decimal("1"),
+                Decimal("100"),
+                False,
+                "below min_trade_amount",
+            ),
+            # Notional 10 * 20 = 200, above max=100 → reject
+            (
+                Decimal("10"),
+                Decimal("20"),
+                Decimal("1"),
+                Decimal("100"),
+                False,
+                "above max_trade_amount",
+            ),
+            # min == 0 means "no min bound" — tiny notional accepted
+            (Decimal("1"), Decimal("0.0001"), Decimal("0"), Decimal("100"), True, None),
+            # max == 0 means "no max bound" — huge notional accepted
+            (Decimal("1"), Decimal("9999999"), Decimal("1"), Decimal("0"), True, None),
+            # Boundary: notional == min is accepted (>=)
+            (Decimal("1"), Decimal("1"), Decimal("1"), Decimal("100"), True, None),
+            # Boundary: notional == max is accepted (<=)
+            (Decimal("1"), Decimal("100"), Decimal("1"), Decimal("100"), True, None),
+        ],
+    )
+    def test_check_trade_amount_bounds(
+        self, price, amount, min_amt, max_amt, should_succeed, expected_error_fragment
+    ):
+        """_check_trade_amount_bounds rejects notional outside [min, max] (quote-denominated)."""
+        pair_data = {
+            "pair": "AVAX/USDC",
+            "min_trade_amount": min_amt,
+            "max_trade_amount": max_amt,
+        }
+        res = CLOBClient._check_trade_amount_bounds(price, amount, pair_data)
+        assert res.success == should_succeed
+        if not should_succeed:
+            assert res.error is not None
+            assert expected_error_fragment in res.error
+
+    def test_check_trade_amount_bounds_skips_when_price_none(self):
+        """Market-order paths (price=None) skip the bound check."""
+        pair_data = {
+            "pair": "AVAX/USDC",
+            "min_trade_amount": Decimal("100"),
+            "max_trade_amount": Decimal("200"),
+        }
+        # amount alone is far outside the range, but price=None skips entirely.
+        res = CLOBClient._check_trade_amount_bounds(None, Decimal("0.001"), pair_data)
+        assert res.success
+
+    async def test_all_clob_write_paths_enforce_min_trade_amount(self, client):
+        """All four CLOB write paths reject sub-min trade notional consistently."""
+        from dexalot_sdk.utils.result import Result
+
+        pair_data = {
+            "pair": "AVAX/USDC",
+            "base": "AVAX",
+            "quote": "USDC",
+            "base_decimals": 18,
+            "quote_decimals": 6,
+            "base_display_decimals": 1,
+            "quote_display_decimals": 4,
+            # Notional must be >= 5 quote-tokens; price=1 * amount=0.1 = 0.1 → reject.
+            "min_trade_amount": Decimal("5"),
+            "max_trade_amount": Decimal("0"),
+            "tradePairId": b"PID",
+        }
+        client.pairs = {"AVAX/USDC": pair_data}
+        client._ensure_pair_exists = AsyncMock(return_value=True)
+        client.get_portfolio_balance = AsyncMock(return_value=Result.ok({"available": 1000.0}))
+        client._send_trade_tx = AsyncMock(return_value=("0xTxHash", MagicMock(status=1)))
+
+        a = await client.add_order("AVAX/USDC", "BUY", 0.1, 1.0)
+        assert not a.success and "below min_trade_amount" in a.error
+
+        b = await client.add_limit_order_list(
+            [{"pair": "AVAX/USDC", "side": "BUY", "amount": 0.1, "price": 1.0}]
+        )
+        assert not b.success and "below min_trade_amount" in b.error
+
+        self._stub_resolved_order(client, pair="AVAX/USDC", trade_pair_id=b"PID")
+        c = await client.replace_order("0x01", 1.0, 0.1)
+        assert not c.success and "below min_trade_amount" in c.error
+
+        self._stub_resolved_order(client, pair="AVAX/USDC", trade_pair_id=b"PID")
+        d = await client.cancel_add_list(
+            [
+                {
+                    "order_id": "0x01",
+                    "amount": 0.1,
+                    "price": 1.0,
+                    "pair": "AVAX/USDC",
+                    "side": "BUY",
+                }
+            ]
+        )
+        assert not d.success and "below min_trade_amount" in d.error
+
+    async def test_all_clob_write_paths_reject_extra_precision(self, client):
+        """All four CLOB write paths reject inputs that exceed display decimals.
+
+        Drift guard: each path must call _normalize_order_amounts so the
+        REJECT-with-tolerance gate is enforced consistently. A path that
+        skipped the helper would silently encode extra-precision amounts
+        and the contract would reject on-chain.
+        """
+        from dexalot_sdk.utils.result import Result
+
+        pair_data = {
+            "pair": "AVAX/USDC",
+            "base": "AVAX",
+            "quote": "USDC",
+            "base_decimals": 18,
+            "quote_decimals": 6,
+            "base_display_decimals": 1,
+            "quote_display_decimals": 4,
+            "tradePairId": b"PID",
+        }
+        client.pairs = {"AVAX/USDC": pair_data}
+        client._ensure_pair_exists = AsyncMock(return_value=True)
+        client.get_portfolio_balance = AsyncMock(return_value=Result.ok({"available": 1000.0}))
+        client._send_trade_tx = AsyncMock(return_value=("0xTxHash", MagicMock(status=1)))
+
+        # amount=1.99 has 2 fractional digits; pair allows 1 → rejected.
+        a = await client.add_order("AVAX/USDC", "BUY", 1.99, 10.0)
+        assert not a.success and "more than 1 decimals" in a.error
+
+        b = await client.add_limit_order_list(
+            [{"pair": "AVAX/USDC", "side": "BUY", "amount": 1.99, "price": 10.0}]
+        )
+        assert not b.success and "more than 1 decimals" in b.error
+
+        self._stub_resolved_order(client, pair="AVAX/USDC", trade_pair_id=b"PID")
+        c = await client.replace_order("0x01", 10.0, 1.99)
+        assert not c.success and "more than 1 decimals" in c.error
+
+        self._stub_resolved_order(client, pair="AVAX/USDC", trade_pair_id=b"PID")
+        d = await client.cancel_add_list(
+            [
+                {
+                    "order_id": "0x01",
+                    "amount": 1.99,
+                    "price": 10.0,
+                    "pair": "AVAX/USDC",
+                    "side": "BUY",
+                }
+            ]
+        )
+        assert not d.success and "more than 1 decimals" in d.error
+
+    async def test_all_clob_write_paths_encode_identically(self, client):
+        """All four CLOB write paths produce identical wei for identical input.
+
+        Drift guard: if any path bypasses _normalize_order_amounts → _to_wei,
+        precision can re-diverge (the original replace_order bug). Pair-clean
+        inputs must encode to the same wei across add_order,
+        add_limit_order_list, replace_order, cancel_add_list.
+        """
+        from dexalot_sdk.utils.result import Result
+
+        pair_data = {
+            "pair": "AVAX/USDC",
+            "base": "AVAX",
+            "quote": "USDC",
+            "base_decimals": 18,
+            "quote_decimals": 6,
+            "base_display_decimals": 1,
+            "quote_display_decimals": 4,
+            "tradePairId": b"PID",
+        }
+        client.pairs = {"AVAX/USDC": pair_data}
+        client._ensure_pair_exists = AsyncMock(return_value=True)
+        client.get_portfolio_balance = AsyncMock(return_value=Result.ok({"available": 1000.0}))
+        client._send_trade_tx = AsyncMock(return_value=("0xTxHash", MagicMock(status=1)))
+
+        # Precision-clean inputs (1 base dp, 4 quote dp).
+        expected_price_wei = 10567000  # 10.567 * 10^6
+        expected_qty_wei = 1900000000000000000  # 1.9 * 10^18
+
+        await client.add_order("AVAX/USDC", "BUY", 1.9, 10.567)
+        a = client.trade_pairs_contract.functions.addNewOrder.call_args[0][0]
+        assert a["price"] == expected_price_wei
+        assert a["quantity"] == expected_qty_wei
+
+        await client.add_limit_order_list(
+            [{"pair": "AVAX/USDC", "side": "BUY", "amount": 1.9, "price": 10.567}]
+        )
+        b = client.trade_pairs_contract.functions.addOrderList.call_args[0][0]
+        assert b[0][2] == expected_price_wei
+        assert b[0][3] == expected_qty_wei
+
+        self._stub_resolved_order(client, pair="AVAX/USDC", trade_pair_id=b"PID")
+        await client.replace_order("0x01", 10.567, 1.9)
+        c = client.trade_pairs_contract.functions.cancelReplaceOrder.call_args[0]
+        assert c[2] == expected_price_wei
+        assert c[3] == expected_qty_wei
+
+        self._stub_resolved_order(client, pair="AVAX/USDC", trade_pair_id=b"PID")
+        await client.cancel_add_list(
+            [
+                {
+                    "order_id": "0x01",
+                    "amount": 1.9,
+                    "price": 10.567,
+                    "pair": "AVAX/USDC",
+                    "side": "BUY",
+                }
+            ]
+        )
+        d = client.trade_pairs_contract.functions.cancelAddList.call_args[0][1]
+        assert d[0][2] == expected_price_wei
+        assert d[0][3] == expected_qty_wei
+
+    @pytest.mark.parametrize(
+        "value,expected",
+        [
+            (2933.0, "2933"),
+            (1840.0, "1840"),
+            (0.1, "0.1"),
+            (0.30000000000000004, "0.30000000000000004"),
+            ("2933", "2933"),
+            ("2933.5", "2933.5"),
+        ],
+    )
+    def test_to_decimal_preserves_user_intent(self, value, expected):
+        """_to_decimal routes floats through str() so user-typed values survive."""
+        from decimal import Decimal
+
+        assert CLOBClient._to_decimal(value) == Decimal(expected)
+
+    def test_to_decimal_passes_decimal_through(self):
+        """_to_decimal returns Decimal inputs unchanged."""
+        from decimal import Decimal
+
+        d = Decimal("1.23456789012345678901234567890")
+        assert CLOBClient._to_decimal(d) is d
+
+    @pytest.mark.parametrize(
+        "value,display_decimals,expected",
+        [
+            # Truncates (ROUND_DOWN) — never rounds up
+            (2.99, 1, "2.9"),
+            (2.51, 1, "2.5"),
+            (2.55, 1, "2.5"),
+            (2933.95, 1, "2933.9"),
+            (0.123456789, 4, "0.1234"),
+            # Exact values pass through cleanly
+            (2933.0, 1, "2933.0"),
+            (0.1, 4, "0.1000"),
+            # Display_decimals=0 truncates to integer
+            (2.99, 0, "2"),
+        ],
+    )
+    def test_quantize_to_display_truncates_round_down(self, value, display_decimals, expected):
+        """_quantize_to_display uses ROUND_DOWN — never overshoots user input."""
+        from decimal import Decimal
+
+        assert CLOBClient._quantize_to_display(value, display_decimals) == Decimal(expected)
+
+    @pytest.mark.parametrize(
+        "value,decimals,expected",
+        [
+            # The exact bug from the reporter: 2933.0 must round-trip cleanly
+            (2933.0, 18, 2933000000000000000000),
+            (1840.0, 18, 1840000000000000000000),
+            # USDC (6 decimals)
+            (1.5, 6, 1500000),
+            (100, 6, 100000000),
+            # Decimal inputs — pass through exactly
+            (__import__("decimal").Decimal("2933"), 18, 2933000000000000000000),
+            (__import__("decimal").Decimal("0.000001"), 6, 1),
+            # Numeric strings — pass through exactly
+            ("2933", 18, 2933000000000000000000),
+            ("0.1", 18, 100000000000000000),
+        ],
+    )
+    def test_to_wei_is_decimal_exact(self, value, decimals, expected):
+        """_to_wei never loses precision regardless of input type (the 2933.0 bug)."""
+        assert CLOBClient._to_wei(value, decimals) == expected
 
 
 class TestWebSocketManager:

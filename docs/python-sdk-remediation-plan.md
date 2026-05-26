@@ -817,6 +817,158 @@ pins. A major-version bump in any of them can silently break the SDK.
 
 ---
 
+## Order Precision & Display-Decimals Hardening
+
+### O-1: Float-multiplication precision loss in CLOB write paths
+
+**Status:** ✅ Resolved
+
+**Finding:**
+`add_order`, `_build_order_tuple` (`add_limit_order_list`), `replace_order`, and
+`_process_replacement` (`cancel_add_list`) all encoded prices and quantities as
+`int(value * (10**decimals))`. Floating-point multiplication silently truncates
+exact decimals — e.g. `int(2933.0 * 10**18) = 2932999999999999737856` instead of
+`2933000000000000000000`. The contract rejects these with `T-TMDQ-01`
+("too many decimals in quantity") and the order fails on-chain.
+
+**Affected files:**
+- [src/dexalot_sdk/core/clob.py](../src/dexalot_sdk/core/clob.py) — all four
+  CLOB write paths
+
+**Resolution:**
+Introduced `CLOBClient._to_wei` (Decimal-backed, wraps `Utils.unit_conversion`)
+and routed all four sites through it. The reporter's 2933.0 case and the
+parametrized `(1840, 0.1, USDC-6-decimal, Decimal, str)` regression cases all
+encode exactly. Commits: C1–C5 of PR.
+
+---
+
+### O-2: Display-decimal precision gate (REJECT-with-tolerance)
+
+**Status:** ✅ Resolved
+
+**Finding:**
+Three of the four CLOB write paths called `round(value, display_decimals)`
+before encoding; `replace_order` skipped this step entirely, letting the
+contract reject overly-precise inputs. Even the three paths that called
+`round()` did so on a float, which still produced binary-float noise
+downstream. Worse, silent rounding is dangerous in a trading SDK: a stop-loss
+at `99.99` quietly becoming `99.9` is silent slippage.
+
+**Resolution:**
+Consolidated all four write paths through `_normalize_order_amounts`. The
+helper now REJECTS inputs whose precision exceeds the pair's display decimals,
+with a `1e-10` tolerance band that absorbs binary-float-representation noise
+(e.g. `0.1 + 0.2 = 0.3 + 4e-17` is accepted; `0.30001` is rejected). Returns
+`Result.fail(...)` naming the offending parameter so callers can round
+explicitly. Adds a drift-guard test asserting all four paths produce
+identical wei for the same input. Commit: C6 of PR.
+
+---
+
+### O-3: Pairs without display decimals silently defaulted to 18
+
+**Status:** ✅ Resolved
+
+**Finding:**
+`_store_clob_pairs` did `.get('base_display_decimals', 18)` /
+`.get('quote_display_decimals', 18)` when the API record omitted these
+fields. That default effectively disabled the precision gate for those
+pairs and reproduced the original contract-rejection scenario.
+
+**Resolution:**
+`_store_clob_pairs` now drops any pair missing either display-decimal field
+and logs a WARNING. Downstream callers will see "pair not found" — the
+correct fail-fast behavior. Commit: C7 of PR.
+
+---
+
+### O-4: Validators rejected Decimal and numeric-string inputs
+
+**Status:** ✅ Resolved
+
+**Finding:**
+`validate_positive_float` only accepted `int` and `float`, forcing callers
+wanting precision-exact arithmetic to pre-convert to float and risk the
+binary-float precision bugs.
+
+**Resolution:**
+Renamed to `validate_positive_number` and extended to accept `int`, `float`,
+`Decimal`, and numeric `str`. `bool` is explicitly rejected (would have
+leaked through as `int=0/1` otherwise). `validate_positive_float` remains as
+a backwards-compatible alias for one release. Commit: C8 of PR.
+
+---
+
+### O-5: `min_trade_amount` / `max_trade_amount` not enforced client-side
+
+**Status:** ✅ Resolved
+
+**Finding:**
+Each Dexalot trading pair carries `min_trade_amount` and `max_trade_amount`
+bounds (quote-token notional). The contract enforces these but the SDK
+ingested the values and never checked them — wasting a gas-paid transaction
+on a bound-violation that could be detected locally.
+
+**Resolution:**
+Added `_check_trade_amount_bounds` and folded it into
+`_normalize_order_amounts` so all four CLOB write paths gain the check.
+Computes `notional = price * amount` in Decimal and rejects when outside
+`[min, max]`. A bound of `0` means "no bound" (some pairs legitimately
+omit). Bounds stored as `Decimal` (previously `float`) for exact comparison.
+Commit: C9 of PR.
+
+---
+
+### O-6: Float-multiplication precision loss in TRANSFER write paths
+
+**Status:** ✅ Resolved
+
+**Finding:**
+`transfer_portfolio`, `deposit`, `withdraw`, `get_deposit_bridge_fee`, and
+`transfer_token` had the same `int(amount * (10**decimals))` precision bug as
+the CLOB paths.
+
+**Resolution:**
+Replaced all five sites with `Utils.unit_conversion`. Parametrized regression
+tests cover the 2933.0 case, USDC-6-decimal token, `Decimal`/`str` inputs.
+Commit: C10 of PR.
+
+---
+
+### O-7: Balance display conversion used float division
+
+**Status:** ✅ Resolved
+
+**Finding:**
+`get_portfolio_balance` and `_get_all_portfolio_balances_cached` returned
+balance dicts built from `balance_wei / (10**decimals)` — a Python float
+division that loses precision for balances above ~2^53 wei.
+
+**Resolution:**
+Routed through `Utils.unit_conversion(..., to_base=False)`. Public return
+type unchanged. Regression test asserts a 25-digit wei value round-trips
+exactly. Commit: C11 of PR.
+
+---
+
+### O-8: `add_gas` / `remove_gas` used `w3.to_wei` instead of SDK helper
+
+**Status:** 🔶 Mitigated (consistency only)
+
+**Finding:**
+`add_gas` and `remove_gas` used `w3.to_wei(amount, "ether")`. web3.py's
+`to_wei` is itself Decimal-backed (calls `Decimal(str(value))` internally) so
+no behavior bug — but the SDK's other six transfer write paths use
+`Utils.unit_conversion`. Inconsistent idioms invite future drift to less
+safe patterns.
+
+**Resolution:**
+Standardized both sites on `Utils.unit_conversion(amount, 18, to_base=True)`.
+No behavior change; parametrized parity test. Commit: C12 of PR.
+
+---
+
 ## Suggested Implementation Order
 
 This ordering balances risk reduction, effort, and interdependency:

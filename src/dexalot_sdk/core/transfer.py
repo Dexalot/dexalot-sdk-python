@@ -700,9 +700,9 @@ class TransferClient(DexalotBaseClient):
 
             return Result.ok(
                 {
-                    "total": balance_data[0] / (10**decimals),
-                    "available": balance_data[1] / (10**decimals),
-                    "locked": balance_data[2] / (10**decimals),
+                    "total": Utils.unit_conversion(balance_data[0], decimals, to_base=False),
+                    "available": Utils.unit_conversion(balance_data[1], decimals, to_base=False),
+                    "locked": Utils.unit_conversion(balance_data[2], decimals, to_base=False),
                 }
             )
         except Exception as e:
@@ -772,8 +772,8 @@ class TransferClient(DexalotBaseClient):
                         decimals = self._get_token_decimals(symbol, self.subnet_chain_id)
                         if decimals is None:
                             decimals = self._get_token_decimals(symbol, self.chain_id) or 18
-                        total = totals[i] / (10**decimals)
-                        available = availables[i] / (10**decimals)
+                        total = Utils.unit_conversion(totals[i], decimals, to_base=False)
+                        available = Utils.unit_conversion(availables[i], decimals, to_base=False)
                         all_balances[symbol] = {
                             "total": total,
                             "available": available,
@@ -818,7 +818,7 @@ class TransferClient(DexalotBaseClient):
             return Result.fail("Subnet Provider or Portfolio Contract not initialized.")
 
         try:
-            amount_wei = w3.to_wei(amount, "ether")
+            amount_wei = Utils.unit_conversion(amount, 18, to_base=True)
             tx_hash = await self._build_and_send_tx(
                 w3,
                 contract.functions.withdrawNative(from_addr, amount_wei),
@@ -856,7 +856,7 @@ class TransferClient(DexalotBaseClient):
             return Result.fail("Subnet Provider or Portfolio Contract not initialized.")
 
         try:
-            amount_wei = w3.to_wei(amount, "ether")
+            amount_wei = Utils.unit_conversion(amount, 18, to_base=True)
             tx_hash = await self._build_and_send_tx(
                 w3,
                 contract.functions.depositNative(from_addr, 0),
@@ -901,7 +901,7 @@ class TransferClient(DexalotBaseClient):
 
         try:
             decimals = self._get_token_decimals(token, self.subnet_chain_id) or 18
-            amount_wei = int(amount * (10**decimals))
+            amount_wei = Utils.unit_conversion(amount, decimals, to_base=True)
             symbol_bytes32 = Utils.to_bytes32(token)
 
             # Check balance first
@@ -1147,7 +1147,7 @@ class TransferClient(DexalotBaseClient):
                 return Result.fail("Could not resolve token decimals")
             decimals = decimals_result.data
 
-            amount_wei = int(amount * (10**decimals))
+            amount_wei = Utils.unit_conversion(amount, decimals, to_base=True)
             bridge_id = self._get_bridge_id(canonical_source_chain, use_layerzero)
             symbol_bytes32 = Utils.to_bytes32(token)
 
@@ -1266,7 +1266,7 @@ class TransferClient(DexalotBaseClient):
                     f"{canonical_destination_chain} (ID {dest_chain_id})."
                 )
 
-            amount_wei = int(amount * (10**decimals))
+            amount_wei = Utils.unit_conversion(amount, decimals, to_base=True)
             bridge_id = self._get_bridge_id(canonical_destination_chain, use_layerzero)
             symbol_bytes32 = Utils.to_bytes32(token)
 
@@ -1350,7 +1350,7 @@ class TransferClient(DexalotBaseClient):
                     f"{canonical_source_chain} (ID {src_chain_id})."
                 )
 
-            amount_wei = int(amount * (10**decimals))
+            amount_wei = Utils.unit_conversion(amount, decimals, to_base=True)
             symbol_bytes32 = Utils.to_bytes32(token)
             bridge_id = self._get_bridge_id(
                 canonical_source_chain, False
@@ -1403,7 +1403,7 @@ class TransferClient(DexalotBaseClient):
             if decimals is None:
                 decimals = self._get_token_decimals(token, self.chain_id) or 18
 
-            amount_wei = int(amount * (10**decimals))
+            amount_wei = Utils.unit_conversion(amount, decimals, to_base=True)
             symbol_bytes32 = Utils.to_bytes32(token)
 
             tx_hash = await self._build_and_send_tx(

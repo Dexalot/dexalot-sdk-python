@@ -1,0 +1,30 @@
+---
+description: Use Decimal-backed Utils.unit_conversion for all wei conversions; never float * 10**N
+globs: "src/dexalot_sdk/**/*.py"
+alwaysApply: true
+---
+
+# Precision-safe arithmetic
+
+Never multiply user-supplied amounts by `10**N` using Python's `*` operator on floats. The binary-float multiplication silently truncates exact decimals — e.g. `int(2933.0 * 10**18) = 2932999999999999737856` instead of `2933000000000000000000`, and the contract rejects the order with `T-TMDQ-01`.
+
+Always route through `Utils.unit_conversion` (Decimal-backed) for amount → wei or wei → amount conversion:
+
+```python
+# YES — Decimal-exact, handles int / float / Decimal / numeric-str inputs
+amount_wei = Utils.unit_conversion(amount, decimals, to_base=True)
+amount_human = Utils.unit_conversion(balance_wei, decimals, to_base=False)
+
+# NO — float-multiplication precision loss
+amount_wei = int(amount * (10 ** decimals))           # ❌
+amount_wei = int(amount * 1e18)                       # ❌
+amount_human = balance_wei / (10 ** decimals)         # ❌ float division
+```
+
+In CLOB-specific code (`src/dexalot_sdk/core/clob.py`) prefer `CLOBClient._to_wei`, which wraps `Utils.unit_conversion` and is the single conversion entry point used by all four write paths (`add_order`, `_build_order_tuple`, `replace_order`, `_process_replacement`).
+
+# Display-decimal precision is REJECT-with-tolerance, not silent rounding
+
+Display decimals (`base_display_decimals` / `quote_display_decimals` on `pair_data`) are enforced by `_normalize_order_amounts`, which REJECTS inputs whose precision exceeds the bound with a `1e-10` tolerance for binary-float noise. Do not add silent-rounding shortcuts (`round(amount, display_decimals)`) — for a trading SDK, silent rounding causes silent slippage.
+
+All four CLOB write paths must route through `_normalize_order_amounts` so the precision gate is enforced consistently. Bypassing it re-introduces the kind of drift that caused the original missing-rounding bug in `replace_order`.

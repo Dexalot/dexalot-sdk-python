@@ -1,5 +1,6 @@
 import asyncio
 import os
+from decimal import Decimal
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -594,6 +595,24 @@ class TestTransferClient:
         assert res.data["total"] == 10.0
         assert res.data["available"] == 5.0
 
+    async def test_get_portfolio_balance_large_wei_precision(self, client):
+        """Large wei values convert back to human units exactly (Decimal path).
+
+        With the previous float division, balance_wei // (10**18) for very
+        large balances would lose the last digit or two of precision. Routing
+        through Utils.unit_conversion (Decimal-backed) preserves them.
+        """
+        # A balance just at the edge where float division starts to drift
+        # (much larger than 2**53). Routing through Decimal keeps it exact.
+        large_wei = 12345678901234567890123456  # 25 digits
+        client.portfolio_sub_contract.functions.getBalance.return_value.call = AsyncMock(
+            return_value=(large_wei, large_wei, large_wei)
+        )
+        res = await client.get_portfolio_balance("USDC")
+        assert res.success
+        # 6-decimal token (USDC): divide by 10^6
+        assert res.data["total"] == float(Decimal(large_wei) / Decimal(10**6))
+
     async def test_get_portfolio_balance_empty_token(self, client):
         result = await client.get_portfolio_balance("")
         assert not result.success
@@ -662,6 +681,28 @@ class TestTransferClient:
         assert res.data["tx_hash"] == "0x74785f68617368"
         assert res.data["operation"] == "remove_gas"
 
+    @pytest.mark.parametrize(
+        "amount,expected_wei",
+        [
+            # web3.py's to_wei also uses Decimal(str(...)) internally, so this
+            # commit is a no-op for behavior — these assertions confirm that.
+            (2933.0, 2933000000000000000000),
+            (1.0, 10**18),
+            (Decimal("0.000000000000000001"), 1),  # 1 wei
+        ],
+    )
+    async def test_add_gas_precision(self, client, amount, expected_wei):
+        """add_gas encodes amount via Utils.unit_conversion (consistency with
+        other transfer write paths)."""
+        client.portfolio_sub_contract.functions.withdrawNative.return_value.fn_name = (
+            "withdrawNative"
+        )
+        res = await client.add_gas(amount)
+        assert res.success
+        call_args = client.portfolio_sub_contract.functions.withdrawNative.call_args
+        # withdrawNative(_from, _amount)
+        assert call_args[0][1] == expected_wei
+
     async def test_transfer_portfolio(self, client):
         from dexalot_sdk.utils.result import Result
 
@@ -673,6 +714,30 @@ class TestTransferClient:
         call_args = client.portfolio_sub_contract.functions.transferToken.call_args
         assert call_args[0][1] == Utils.to_bytes32("USDC")
         assert call_args[0][2] == 1000000
+
+    @pytest.mark.parametrize(
+        "amount,decimals,expected_wei",
+        [
+            (2933.0, 18, 2933000000000000000000),
+            (100.0, 6, 100_000_000),
+            (Decimal("0.000001"), 6, 1),
+        ],
+    )
+    async def test_transfer_portfolio_precision(self, client, amount, decimals, expected_wei):
+        """transfer_portfolio encodes amount via Decimal arithmetic."""
+        from unittest.mock import patch
+
+        from dexalot_sdk.core.transfer import TransferClient
+        from dexalot_sdk.utils.result import Result
+
+        client.get_portfolio_balance = AsyncMock(
+            return_value=Result.ok({"available": float(amount) + 1})
+        )
+        with patch.object(TransferClient, "_get_token_decimals", return_value=decimals):
+            res = await client.transfer_portfolio("USDC", amount, VALID_RECIPIENT)
+        assert res.success
+        call_args = client.portfolio_sub_contract.functions.transferToken.call_args
+        assert call_args[0][2] == expected_wei
 
     async def test_transfer_token(self, client):
         res = await client.transfer_token("USDC", VALID_RECIPIENT, 1.0)
@@ -686,6 +751,34 @@ class TestTransferClient:
         assert call_args[0][1] == VALID_RECIPIENT
         assert call_args[0][2] == Utils.to_bytes32("USDC")
         assert call_args[0][3] == 1000000  # 1.0 * 10^6
+
+    @pytest.mark.parametrize(
+        "amount,decimals,expected_wei",
+        [
+            # The 2933.0 case from the bug report — 18-decimal token
+            (2933.0, 18, 2933000000000000000000),
+            (1840.0, 18, 1840000000000000000000),
+            # USDC-style 6-decimal token
+            (100.0, 6, 100_000_000),
+            # Sub-unit values
+            (0.1, 6, 100_000),
+            # Decimal / string inputs
+            (Decimal("2933"), 18, 2933000000000000000000),
+            ("2933.5", 18, 2933500000000000000000),
+        ],
+    )
+    async def test_transfer_token_precision(self, client, amount, decimals, expected_wei):
+        """transfer_token encodes amount via Decimal arithmetic (no float-mul drift)."""
+        from unittest.mock import patch
+
+        from dexalot_sdk.core.transfer import TransferClient
+
+        with patch.object(TransferClient, "_get_token_decimals", return_value=decimals):
+            res = await client.transfer_token("USDC", VALID_RECIPIENT, amount)
+        assert res.success
+        call_args = client.portfolio_sub_contract.functions.transferToken.call_args
+        # transferToken(_from, _to, _symbol, _quantity)
+        assert call_args[0][3] == expected_wei
 
     async def test_transfer_token_errors(self, client):
         """Test transfer_token errors."""
@@ -722,6 +815,37 @@ class TestTransferClient:
         assert fee.success
         assert fee.data == 0.005
 
+    @pytest.mark.parametrize(
+        "amount,decimals,expected_wei",
+        [
+            (2933.0, 18, 2933000000000000000000),
+            (Decimal("0.000001"), 6, 1),
+        ],
+    )
+    async def test_get_deposit_bridge_fee_precision(self, client, amount, decimals, expected_wei):
+        """get_deposit_bridge_fee encodes amount via Decimal arithmetic."""
+        from unittest.mock import patch
+
+        from dexalot_sdk.core.transfer import TransferClient
+
+        captured_amount_wei = []
+
+        async def capture_internal(w3, contract, bridge_id, symbol, amt_wei):
+            captured_amount_wei.append(amt_wei)
+            return 5000000000000000
+
+        client._get_bridge_fee_internal = capture_internal
+        mock_bridge = MagicMock()
+        client.portfolio_main_avax_contract.functions.portfolioBridge.return_value.call = AsyncMock(
+            return_value="0xBridge"
+        )
+        client.connected_chain_providers["Avalanche"].eth.contract.side_effect = None
+        client.connected_chain_providers["Avalanche"].eth.contract.return_value = mock_bridge
+        with patch.object(TransferClient, "_get_token_decimals", return_value=decimals):
+            res = await client.get_deposit_bridge_fee("AVAX", amount, "Avalanche")
+        assert res.success
+        assert captured_amount_wei == [expected_wei]
+
     async def test_deposit(self, client):
         from dexalot_sdk.utils.result import Result
 
@@ -744,6 +868,62 @@ class TestTransferClient:
         # depositToken(_from, _symbol, _quantity, _bridgeId)
         assert call_args[0][2] == 10000000  # 10.0 * 10^6
         assert call_args[0][3] == 2  # Bridge ID for Avalanche
+
+    @pytest.mark.parametrize(
+        "amount,decimals,expected_wei",
+        [
+            (2933.0, 18, 2933000000000000000000),
+            (1840.0, 18, 1840000000000000000000),
+            (100.0, 6, 100_000_000),
+        ],
+    )
+    async def test_deposit_precision(self, client, amount, decimals, expected_wei):
+        """deposit encodes amount via Decimal arithmetic."""
+        from unittest.mock import patch
+
+        from dexalot_sdk.core.transfer import TransferClient
+        from dexalot_sdk.utils.result import Result
+
+        client.get_deposit_bridge_fee = AsyncMock(return_value=Result.ok(0.01))
+        mock_token = MagicMock()
+        mock_token.functions.allowance.return_value.call = AsyncMock(return_value=10**40)
+        mock_token.functions.getBridgeFee.return_value.call = AsyncMock(return_value=0)
+        client.connected_chain_providers["Avalanche"].eth.contract.side_effect = None
+        client.connected_chain_providers["Avalanche"].eth.contract.return_value = mock_token
+        client.portfolio_main_avax_contract.functions.depositToken.return_value.fn_name = (
+            "depositToken"
+        )
+        with patch.object(TransferClient, "_get_token_decimals", return_value=decimals):
+            res = await client.deposit("USDC", amount, "Avalanche")
+        assert res.success
+        call_args = client.portfolio_main_avax_contract.functions.depositToken.call_args
+        # depositToken(_from, _symbol, _quantity, _bridgeId)
+        assert call_args[0][2] == expected_wei
+
+    @pytest.mark.parametrize(
+        "amount,decimals,expected_wei",
+        [
+            (2933.0, 18, 2933000000000000000000),
+            (5.0, 6, 5_000_000),
+            (Decimal("0.123456"), 6, 123_456),
+        ],
+    )
+    async def test_withdraw_precision(self, client, amount, decimals, expected_wei):
+        """withdraw encodes amount via Decimal arithmetic."""
+        from unittest.mock import patch
+
+        from dexalot_sdk.core.transfer import TransferClient
+
+        mock_token = MagicMock()
+        mock_token.functions.allowance.return_value.call = AsyncMock(return_value=10**40)
+        client.w3_l1.eth.contract.side_effect = None
+        client.w3_l1.eth.contract.return_value = mock_token
+        with patch.object(TransferClient, "_get_token_decimals", return_value=decimals):
+            res = await client.withdraw("USDC", amount, "Avalanche")
+        assert res.success
+        call_args = client.portfolio_sub_contract.functions.withdrawToken.call_args
+        # withdrawToken(_to, _symbol, _quantity, _feeType, _chainId)
+        assert call_args[0][2] == expected_wei
 
     async def test_deposit_native(self, client):
         """Test deposit of native token (AVAX)."""
