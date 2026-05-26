@@ -1,7 +1,7 @@
 import asyncio
 import time
 from collections.abc import Callable
-from decimal import ROUND_DOWN, Decimal
+from decimal import ROUND_DOWN, ROUND_HALF_EVEN, Decimal
 from typing import Any, SupportsInt, cast
 
 from ..constants import (
@@ -482,11 +482,13 @@ class CLOBClient(DexalotBaseClient):
             if validation_error is not None:
                 return cast(Result[dict[Any, Any]], validation_error)
 
-            # Rounding to display decimals
-            if "quote_display_decimals" in pair_data and price:
-                price = round(price, pair_data["quote_display_decimals"])
-            if "base_display_decimals" in pair_data:
-                amount = round(amount, pair_data["base_display_decimals"])
+            # Validate precision against the pair's display decimals.
+            # Inputs with extra precision are rejected (no silent slippage).
+            norm_res = self._normalize_order_amounts(price, amount, pair_data)
+            if not norm_res.success:
+                return cast(Result[dict[Any, Any]], norm_res)
+            assert norm_res.data is not None
+            price, amount = norm_res.data  # type: ignore[assignment]
 
             # Portfolio Balance Check
             required_token = pair_data["quote"] if side_enum == 0 else pair_data["base"]
@@ -1366,19 +1368,75 @@ class CLOBClient(DexalotBaseClient):
         """Truncate ``value`` to ``display_decimals`` fractional digits (ROUND_DOWN).
 
         Truncation (never rounding up) ensures the SDK never submits an order
-        that exceeds the user's typed amount or notional.
+        that exceeds the user's typed amount or notional. Used by callers that
+        have already validated precision; see :meth:`_check_display_precision`
+        for the precision gate used by the public order-placement paths.
         """
         d = CLOBClient._to_decimal(value)
         quantum = Decimal(10) ** -display_decimals
         return d.quantize(quantum, rounding=ROUND_DOWN)
 
-    def _normalize_order_amounts(self, price, amount, pair_data):
-        """Normalize price and amount based on display decimals."""
+    # Tolerance for float-noise residuals when checking display-decimal
+    # precision. Genuine binary-float noise from operations like 0.1 + 0.2
+    # produces residuals on the order of 1e-17; human-typed extra precision
+    # produces residuals >= 1e-6. 1e-10 sits in the gap with margin.
+    _DISPLAY_PRECISION_TOLERANCE = Decimal("1e-10")
+
+    @staticmethod
+    def _check_display_precision(
+        value: Any, display_decimals: int, param_name: str
+    ) -> "Result[Decimal]":
+        """Validate that ``value`` fits in ``display_decimals`` fractional digits.
+
+        Returns ``Result.ok(quantized)`` if the input is at display precision
+        (or differs from it only by float-representation noise — see
+        :attr:`_DISPLAY_PRECISION_TOLERANCE`). Returns ``Result.fail(msg)``
+        when the input has genuinely more decimals than the pair allows;
+        callers must round explicitly rather than have the SDK silently
+        truncate and slip the order.
+        """
+        d = CLOBClient._to_decimal(value)
+        if d == 0:
+            return Result.ok(d)
+        quantum = Decimal(10) ** -display_decimals
+        nearest = d.quantize(quantum, rounding=ROUND_HALF_EVEN)
+        if abs(d - nearest) > CLOBClient._DISPLAY_PRECISION_TOLERANCE:
+            return Result.fail(
+                f"Invalid {param_name}: {value} has more than {display_decimals} "
+                f"decimals; pair allows {display_decimals}. Round before passing "
+                f"(e.g. Decimal('{nearest}'))."
+            )
+        return Result.ok(nearest)
+
+    def _normalize_order_amounts(
+        self, price: Any, amount: Any, pair_data: dict
+    ) -> "Result[tuple[Decimal | None, Decimal]]":
+        """Validate and quantize price/amount against the pair's display decimals.
+
+        Inputs whose precision exceeds the pair's display decimals are
+        rejected — the SDK does not silently round, because that would
+        silently slip orders (e.g. a stop at 99.99 quietly becoming 99.9).
+        Float-representation noise (residual <= 1e-10) is tolerated and
+        snapped to the nearest displayable value.
+
+        Returns ``Result.ok((price, amount))`` as Decimals, or
+        ``Result.fail(...)`` describing which parameter exceeded precision.
+        """
         if "quote_display_decimals" in pair_data and price:
-            price = round(price, pair_data["quote_display_decimals"])
+            price_res = self._check_display_precision(
+                price, pair_data["quote_display_decimals"], "price"
+            )
+            if not price_res.success:
+                return cast("Result[tuple[Decimal | None, Decimal]]", price_res)
+            price = price_res.data
         if "base_display_decimals" in pair_data:
-            amount = round(amount, pair_data["base_display_decimals"])
-        return price, amount
+            amount_res = self._check_display_precision(
+                amount, pair_data["base_display_decimals"], "amount"
+            )
+            if not amount_res.success:
+                return cast("Result[tuple[Decimal | None, Decimal]]", amount_res)
+            amount = amount_res.data
+        return Result.ok((price, amount))
 
     @staticmethod
     def _to_wei(value: Any, decimals: int) -> int:
@@ -1392,11 +1450,20 @@ class CLOBClient(DexalotBaseClient):
 
     def _build_order_tuple(
         self, order, pair_data, side_enum, w3, client_order_id_bytes: bytes | None = None
-    ):
-        """Build order tuple for contract call."""
+    ) -> Result[tuple]:
+        """Build order tuple for contract call.
+
+        Returns ``Result.ok((order_tuple, client_order_id_hex))`` or
+        ``Result.fail(msg)`` when price/amount precision exceeds the pair's
+        display decimals.
+        """
         import secrets
 
-        price, amount = self._normalize_order_amounts(order["price"], order["amount"], pair_data)
+        norm_res = self._normalize_order_amounts(order["price"], order["amount"], pair_data)
+        if not norm_res.success:
+            return cast(Result[tuple], norm_res)
+        assert norm_res.data is not None
+        price, amount = norm_res.data
 
         price_wei = self._to_wei(price, pair_data["quote_decimals"])
         qty_wei = self._to_wei(amount, pair_data["base_decimals"])
@@ -1419,7 +1486,7 @@ class CLOBClient(DexalotBaseClient):
             0,  # STP
         )
 
-        return order_tuple, client_order_id_hex
+        return Result.ok((order_tuple, client_order_id_hex))
 
     async def _check_balance_for_token(self, token, req_amt):
         """Check if sufficient balance exists for a token.
@@ -1485,9 +1552,13 @@ class CLOBClient(DexalotBaseClient):
                     return None, None, None, cid_result.error or "Invalid client_order_id"
                 cid_bytes = self._get_order_id_bytes(raw_cid)
 
-            order_tuple, client_order_id_hex = self._build_order_tuple(
+            build_res = self._build_order_tuple(
                 order, pair_data, side_enum, w3, client_order_id_bytes=cid_bytes
             )
+            if not build_res.success:
+                return None, None, None, build_res.error or "Order build failed"
+            assert build_res.data is not None
+            order_tuple, client_order_id_hex = build_res.data
             order_tuples.append(order_tuple)
             client_order_ids.append(client_order_id_hex)
 
@@ -1669,12 +1740,14 @@ class CLOBClient(DexalotBaseClient):
 
             pair_data = self.pairs[pair_name]
 
-            # Truncate to the pair's display decimals before encoding, matching
-            # what add_order / _build_order_tuple do — otherwise the contract
-            # rejects with T-TMDQ-01 even on a precision-clean float input.
-            new_price, new_amount = self._normalize_order_amounts(
-                new_price, new_amount, pair_data
-            )
+            # Validate precision against the pair's display decimals before
+            # encoding. The other write paths do the same — replace_order
+            # previously skipped this and let the contract reject the order.
+            norm_res = self._normalize_order_amounts(new_price, new_amount, pair_data)
+            if not norm_res.success:
+                return cast(Result[dict], norm_res)
+            assert norm_res.data is not None
+            new_price, new_amount = norm_res.data  # type: ignore[assignment]
             price_wei = self._to_wei(new_price, pair_data["quote_decimals"])
             qty_wei = self._to_wei(new_amount, pair_data["base_decimals"])
 
@@ -1870,11 +1943,11 @@ class CLOBClient(DexalotBaseClient):
 
         required_balances[req_token] = required_balances.get(req_token, 0) + req_amt
 
-        price, amount = rep["price"], rep["amount"]
-        if "quote_display_decimals" in pair_data and price:
-            price = round(price, pair_data["quote_display_decimals"])
-        if "base_display_decimals" in pair_data:
-            amount = round(amount, pair_data["base_display_decimals"])
+        norm_res = self._normalize_order_amounts(rep["price"], rep["amount"], pair_data)
+        if not norm_res.success:
+            return cast(Result[dict], norm_res)
+        assert norm_res.data is not None
+        price, amount = norm_res.data
 
         if raw_cid := rep.get("client_order_id"):
             cid_result = validate_order_id_format(raw_cid, "client_order_id")
