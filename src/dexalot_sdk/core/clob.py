@@ -1669,8 +1669,14 @@ class CLOBClient(DexalotBaseClient):
 
             pair_data = self.pairs[pair_name]
 
-            price_wei = int(new_price * (10 ** pair_data["quote_decimals"]))
-            qty_wei = int(new_amount * (10 ** pair_data["base_decimals"]))
+            # Truncate to the pair's display decimals before encoding, matching
+            # what add_order / _build_order_tuple do — otherwise the contract
+            # rejects with T-TMDQ-01 even on a precision-clean float input.
+            new_price, new_amount = self._normalize_order_amounts(
+                new_price, new_amount, pair_data
+            )
+            price_wei = self._to_wei(new_price, pair_data["quote_decimals"])
+            qty_wei = self._to_wei(new_amount, pair_data["base_decimals"])
 
             import secrets
 

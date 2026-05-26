@@ -727,6 +727,77 @@ class TestCLOBClient:
         assert args[2] == 10000000  # 10.0 * 10^6
         assert args[3] == 1000000000000000000  # 1.0 * 10^18
 
+    @pytest.mark.parametrize(
+        "new_amount,expected_qty_wei",
+        [
+            (2933.0, 2933000000000000000000),
+            (1840.0, 1840000000000000000000),
+            (0.1, 100000000000000000),
+        ],
+    )
+    async def test_replace_order_quantity_precision(
+        self, client, new_amount, expected_qty_wei
+    ):
+        """replace_order encodes via Decimal arithmetic (the 2933.0 case)."""
+        client.pairs = {
+            "AVAX/USDC": {
+                "pair": "AVAX/USDC",
+                "base": "AVAX",
+                "quote": "USDC",
+                "base_decimals": 18,
+                "quote_decimals": 6,
+                "base_display_decimals": 1,
+                "quote_display_decimals": 4,
+                "tradePairId": b"TPID",
+            }
+        }
+        self._stub_resolved_order(client, pair="AVAX/USDC", trade_pair_id=b"TPID")
+        client._send_trade_tx = AsyncMock(
+            return_value=("0xTxHash", MagicMock(status=1))
+        )
+
+        res = await client.replace_order("0x01", 10.0, new_amount)
+        assert res.success
+        args = client.trade_pairs_contract.functions.cancelReplaceOrder.call_args[0]
+        assert args[3] == expected_qty_wei
+
+    async def test_replace_order_applies_display_decimal_rounding(self, client):
+        """replace_order rounds inputs to the pair's display decimals.
+
+        Before this fix, replace_order skipped the display-decimal rounding
+        step that the other write paths performed — so an input like
+        new_price=0.1234 with quote_decimals=6 used to encode via
+        int(0.1234 * 10**6), giving 123399 wei (the float-precision bug).
+        With the rounding step + Decimal arithmetic, the result is 123400.
+
+        Values chosen so banker's-rounding and ROUND_DOWN agree at the
+        display-decimal precision — this test stays stable across the
+        rounding-mode switch in a later commit.
+        """
+        client.pairs = {
+            "AVAX/USDC": {
+                "pair": "AVAX/USDC",
+                "base": "AVAX",
+                "quote": "USDC",
+                "base_decimals": 18,
+                "quote_decimals": 6,
+                "base_display_decimals": 1,
+                "quote_display_decimals": 4,
+                "tradePairId": b"TPID",
+            }
+        }
+        self._stub_resolved_order(client, pair="AVAX/USDC", trade_pair_id=b"TPID")
+        client._send_trade_tx = AsyncMock(
+            return_value=("0xTxHash", MagicMock(status=1))
+        )
+
+        # 0.1234 is already at 4 dp; 1.94 truncates to 1.9 under both modes.
+        res = await client.replace_order("0x01", 0.1234, 1.94)
+        assert res.success
+        args = client.trade_pairs_contract.functions.cancelReplaceOrder.call_args[0]
+        assert args[2] == 123400  # 0.1234 * 10^6 (precision-exact)
+        assert args[3] == 1900000000000000000  # 1.9 * 10^18 (rounded then exact)
+
     async def test_get_open_orders(self, client):
         """Test get_open_orders."""
         mock_orders = [
