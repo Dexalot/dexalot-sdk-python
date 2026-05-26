@@ -818,7 +818,7 @@ class TransferClient(DexalotBaseClient):
             return Result.fail("Subnet Provider or Portfolio Contract not initialized.")
 
         try:
-            amount_wei = w3.to_wei(amount, "ether")
+            amount_wei = Utils.unit_conversion(amount, 18, to_base=True)
             tx_hash = await self._build_and_send_tx(
                 w3,
                 contract.functions.withdrawNative(from_addr, amount_wei),
@@ -856,7 +856,7 @@ class TransferClient(DexalotBaseClient):
             return Result.fail("Subnet Provider or Portfolio Contract not initialized.")
 
         try:
-            amount_wei = w3.to_wei(amount, "ether")
+            amount_wei = Utils.unit_conversion(amount, 18, to_base=True)
             tx_hash = await self._build_and_send_tx(
                 w3,
                 contract.functions.depositNative(from_addr, 0),

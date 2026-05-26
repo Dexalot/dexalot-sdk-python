@@ -681,6 +681,28 @@ class TestTransferClient:
         assert res.data["tx_hash"] == "0x74785f68617368"
         assert res.data["operation"] == "remove_gas"
 
+    @pytest.mark.parametrize(
+        "amount,expected_wei",
+        [
+            # web3.py's to_wei also uses Decimal(str(...)) internally, so this
+            # commit is a no-op for behavior — these assertions confirm that.
+            (2933.0, 2933000000000000000000),
+            (1.0, 10**18),
+            (Decimal("0.000000000000000001"), 1),  # 1 wei
+        ],
+    )
+    async def test_add_gas_precision(self, client, amount, expected_wei):
+        """add_gas encodes amount via Utils.unit_conversion (consistency with
+        other transfer write paths)."""
+        client.portfolio_sub_contract.functions.withdrawNative.return_value.fn_name = (
+            "withdrawNative"
+        )
+        res = await client.add_gas(amount)
+        assert res.success
+        call_args = client.portfolio_sub_contract.functions.withdrawNative.call_args
+        # withdrawNative(_from, _amount)
+        assert call_args[0][1] == expected_wei
+
     async def test_transfer_portfolio(self, client):
         from dexalot_sdk.utils.result import Result
 
