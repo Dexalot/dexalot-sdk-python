@@ -3794,6 +3794,75 @@ class TestCLOBClient:
         assert not cancel_add_result.success
         assert cancel_add_result.error == "Order formatting failed"
 
+    @pytest.mark.parametrize(
+        "value,expected",
+        [
+            (2933.0, "2933"),
+            (1840.0, "1840"),
+            (0.1, "0.1"),
+            (0.30000000000000004, "0.30000000000000004"),
+            ("2933", "2933"),
+            ("2933.5", "2933.5"),
+        ],
+    )
+    def test_to_decimal_preserves_user_intent(self, value, expected):
+        """_to_decimal routes floats through str() so user-typed values survive."""
+        from decimal import Decimal
+
+        assert CLOBClient._to_decimal(value) == Decimal(expected)
+
+    def test_to_decimal_passes_decimal_through(self):
+        """_to_decimal returns Decimal inputs unchanged."""
+        from decimal import Decimal
+
+        d = Decimal("1.23456789012345678901234567890")
+        assert CLOBClient._to_decimal(d) is d
+
+    @pytest.mark.parametrize(
+        "value,display_decimals,expected",
+        [
+            # Truncates (ROUND_DOWN) — never rounds up
+            (2.99, 1, "2.9"),
+            (2.51, 1, "2.5"),
+            (2.55, 1, "2.5"),
+            (2933.95, 1, "2933.9"),
+            (0.123456789, 4, "0.1234"),
+            # Exact values pass through cleanly
+            (2933.0, 1, "2933.0"),
+            (0.1, 4, "0.1000"),
+            # Display_decimals=0 truncates to integer
+            (2.99, 0, "2"),
+        ],
+    )
+    def test_quantize_to_display_truncates_round_down(
+        self, value, display_decimals, expected
+    ):
+        """_quantize_to_display uses ROUND_DOWN — never overshoots user input."""
+        from decimal import Decimal
+
+        assert CLOBClient._quantize_to_display(value, display_decimals) == Decimal(expected)
+
+    @pytest.mark.parametrize(
+        "value,decimals,expected",
+        [
+            # The exact bug from the reporter: 2933.0 must round-trip cleanly
+            (2933.0, 18, 2933000000000000000000),
+            (1840.0, 18, 1840000000000000000000),
+            # USDC (6 decimals)
+            (1.5, 6, 1500000),
+            (100, 6, 100000000),
+            # Decimal inputs — pass through exactly
+            (__import__("decimal").Decimal("2933"), 18, 2933000000000000000000),
+            (__import__("decimal").Decimal("0.000001"), 6, 1),
+            # Numeric strings — pass through exactly
+            ("2933", 18, 2933000000000000000000),
+            ("0.1", 18, 100000000000000000),
+        ],
+    )
+    def test_to_wei_is_decimal_exact(self, value, decimals, expected):
+        """_to_wei never loses precision regardless of input type (the 2933.0 bug)."""
+        assert CLOBClient._to_wei(value, decimals) == expected
+
 
 class TestWebSocketManager:
     """Tests for WebSocketManager (async websockets-based implementation)."""

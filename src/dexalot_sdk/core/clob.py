@@ -1,6 +1,7 @@
 import asyncio
 import time
 from collections.abc import Callable
+from decimal import ROUND_DOWN, Decimal
 from typing import Any, SupportsInt, cast
 
 from ..constants import (
@@ -1349,6 +1350,28 @@ class CLOBClient(DexalotBaseClient):
             )
         return None
 
+    @staticmethod
+    def _to_decimal(value: Any) -> Decimal:
+        """Coerce a numeric value (int, float, str, Decimal) to Decimal exactly.
+
+        Floats route through ``str(value)`` so the user's intended decimal
+        representation is preserved (``str(0.1) == "0.1"``).
+        """
+        if isinstance(value, Decimal):
+            return value
+        return Decimal(str(value))
+
+    @staticmethod
+    def _quantize_to_display(value: Any, display_decimals: int) -> Decimal:
+        """Truncate ``value`` to ``display_decimals`` fractional digits (ROUND_DOWN).
+
+        Truncation (never rounding up) ensures the SDK never submits an order
+        that exceeds the user's typed amount or notional.
+        """
+        d = CLOBClient._to_decimal(value)
+        quantum = Decimal(10) ** -display_decimals
+        return d.quantize(quantum, rounding=ROUND_DOWN)
+
     def _normalize_order_amounts(self, price, amount, pair_data):
         """Normalize price and amount based on display decimals."""
         if "quote_display_decimals" in pair_data and price:
@@ -1356,6 +1379,16 @@ class CLOBClient(DexalotBaseClient):
         if "base_display_decimals" in pair_data:
             amount = round(amount, pair_data["base_display_decimals"])
         return price, amount
+
+    @staticmethod
+    def _to_wei(value: Any, decimals: int) -> int:
+        """Precision-safe conversion of a human-readable amount to integer wei.
+
+        Routes through :meth:`Utils.unit_conversion`, which performs
+        ``int(Decimal(str(value)) * Decimal(10)**decimals)``. Never multiply
+        floats by ``10**N`` in write paths.
+        """
+        return cast(int, Utils.unit_conversion(value, decimals, to_base=True))
 
     def _build_order_tuple(
         self, order, pair_data, side_enum, w3, client_order_id_bytes: bytes | None = None
