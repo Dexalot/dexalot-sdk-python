@@ -1358,6 +1358,52 @@ class TestCLOBClient:
         assert args[1][0][1] == b"TPID"
         assert args[1][0][2] == 11000000  # 11.0 * 10^6
 
+    @pytest.mark.parametrize(
+        "amount,expected_qty_wei",
+        [
+            (2933.0, 2933000000000000000000),
+            (1840.0, 1840000000000000000000),
+            (0.1, 100000000000000000),
+        ],
+    )
+    async def test_cancel_add_list_quantity_precision(
+        self, client, amount, expected_qty_wei
+    ):
+        """cancel_add_list (via _process_replacement) encodes quantity exactly."""
+        client.pairs = {
+            "AVAX/USDC": {
+                "pair": "AVAX/USDC",
+                "base_decimals": 18,
+                "quote_decimals": 6,
+                "base_display_decimals": 1,
+                "quote_display_decimals": 4,
+                "tradePairId": b"TPID",
+                "quote": "USDC",
+                "base": "AVAX",
+            }
+        }
+        self._stub_resolved_order(client, pair="AVAX/USDC", trade_pair_id=b"TPID")
+        client._ensure_pair_exists = AsyncMock(return_value=True)
+        client._send_trade_tx = AsyncMock(
+            return_value=("0xTxHash", MagicMock(status=1))
+        )
+
+        res = await client.cancel_add_list(
+            [
+                {
+                    "order_id": "0x01",
+                    "amount": amount,
+                    "price": 10.0,
+                    "pair": "AVAX/USDC",
+                    "side": "SELL",
+                }
+            ]
+        )
+        assert res.success
+        args = client.trade_pairs_contract.functions.cancelAddList.call_args[0]
+        # _newOrders[0] = (cid, tradePairId, price_wei, qty_wei, ...)
+        assert args[1][0][3] == expected_qty_wei
+
     async def test_cancel_add_list_infers_side_from_existing_order(self, client):
         """cancel_add_list infers side from existing order when not provided."""
         client.pairs = {

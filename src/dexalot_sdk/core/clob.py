@@ -1887,8 +1887,8 @@ class CLOBClient(DexalotBaseClient):
         new_order_tuple = (
             client_order_id,
             pair_data["tradePairId"],
-            int(price * (10 ** pair_data["quote_decimals"])),
-            int(amount * (10 ** pair_data["base_decimals"])),
+            self._to_wei(price, pair_data["quote_decimals"]),
+            self._to_wei(amount, pair_data["base_decimals"]),
             from_addr,
             side_enum,
             1,  # LIMIT
