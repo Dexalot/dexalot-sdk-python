@@ -4087,6 +4087,113 @@ class TestCLOBClient:
             assert res.success
             assert res.data == Decimal(0)
 
+    @pytest.mark.parametrize(
+        "price,amount,min_amt,max_amt,should_succeed,expected_error_fragment",
+        [
+            # Notional 10 * 1 = 10, between min=1 and max=100 → ok
+            (Decimal("10"), Decimal("1"), Decimal("1"), Decimal("100"), True, None),
+            # Notional 10 * 0.05 = 0.5, below min=1 → reject
+            (
+                Decimal("10"),
+                Decimal("0.05"),
+                Decimal("1"),
+                Decimal("100"),
+                False,
+                "below min_trade_amount",
+            ),
+            # Notional 10 * 20 = 200, above max=100 → reject
+            (
+                Decimal("10"),
+                Decimal("20"),
+                Decimal("1"),
+                Decimal("100"),
+                False,
+                "above max_trade_amount",
+            ),
+            # min == 0 means "no min bound" — tiny notional accepted
+            (Decimal("1"), Decimal("0.0001"), Decimal("0"), Decimal("100"), True, None),
+            # max == 0 means "no max bound" — huge notional accepted
+            (Decimal("1"), Decimal("9999999"), Decimal("1"), Decimal("0"), True, None),
+            # Boundary: notional == min is accepted (>=)
+            (Decimal("1"), Decimal("1"), Decimal("1"), Decimal("100"), True, None),
+            # Boundary: notional == max is accepted (<=)
+            (Decimal("1"), Decimal("100"), Decimal("1"), Decimal("100"), True, None),
+        ],
+    )
+    def test_check_trade_amount_bounds(
+        self, price, amount, min_amt, max_amt, should_succeed, expected_error_fragment
+    ):
+        """_check_trade_amount_bounds rejects notional outside [min, max] (quote-denominated)."""
+        pair_data = {
+            "pair": "AVAX/USDC",
+            "min_trade_amount": min_amt,
+            "max_trade_amount": max_amt,
+        }
+        res = CLOBClient._check_trade_amount_bounds(price, amount, pair_data)
+        assert res.success == should_succeed
+        if not should_succeed:
+            assert res.error is not None
+            assert expected_error_fragment in res.error
+
+    def test_check_trade_amount_bounds_skips_when_price_none(self):
+        """Market-order paths (price=None) skip the bound check."""
+        pair_data = {
+            "pair": "AVAX/USDC",
+            "min_trade_amount": Decimal("100"),
+            "max_trade_amount": Decimal("200"),
+        }
+        # amount alone is far outside the range, but price=None skips entirely.
+        res = CLOBClient._check_trade_amount_bounds(None, Decimal("0.001"), pair_data)
+        assert res.success
+
+    async def test_all_clob_write_paths_enforce_min_trade_amount(self, client):
+        """All four CLOB write paths reject sub-min trade notional consistently."""
+        from dexalot_sdk.utils.result import Result
+
+        pair_data = {
+            "pair": "AVAX/USDC",
+            "base": "AVAX",
+            "quote": "USDC",
+            "base_decimals": 18,
+            "quote_decimals": 6,
+            "base_display_decimals": 1,
+            "quote_display_decimals": 4,
+            # Notional must be >= 5 quote-tokens; price=1 * amount=0.1 = 0.1 → reject.
+            "min_trade_amount": Decimal("5"),
+            "max_trade_amount": Decimal("0"),
+            "tradePairId": b"PID",
+        }
+        client.pairs = {"AVAX/USDC": pair_data}
+        client._ensure_pair_exists = AsyncMock(return_value=True)
+        client.get_portfolio_balance = AsyncMock(return_value=Result.ok({"available": 1000.0}))
+        client._send_trade_tx = AsyncMock(return_value=("0xTxHash", MagicMock(status=1)))
+
+        a = await client.add_order("AVAX/USDC", "BUY", 0.1, 1.0)
+        assert not a.success and "below min_trade_amount" in a.error
+
+        b = await client.add_limit_order_list(
+            [{"pair": "AVAX/USDC", "side": "BUY", "amount": 0.1, "price": 1.0}]
+        )
+        assert not b.success and "below min_trade_amount" in b.error
+
+        self._stub_resolved_order(client, pair="AVAX/USDC", trade_pair_id=b"PID")
+        c = await client.replace_order("0x01", 1.0, 0.1)
+        assert not c.success and "below min_trade_amount" in c.error
+
+        self._stub_resolved_order(client, pair="AVAX/USDC", trade_pair_id=b"PID")
+        d = await client.cancel_add_list(
+            [
+                {
+                    "order_id": "0x01",
+                    "amount": 0.1,
+                    "price": 1.0,
+                    "pair": "AVAX/USDC",
+                    "side": "BUY",
+                }
+            ]
+        )
+        assert not d.success and "below min_trade_amount" in d.error
+
     async def test_all_clob_write_paths_reject_extra_precision(self, client):
         """All four CLOB write paths reject inputs that exceed display decimals.
 

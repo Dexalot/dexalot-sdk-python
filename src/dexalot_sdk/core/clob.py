@@ -195,6 +195,8 @@ class CLOBClient(DexalotBaseClient):
                     quote_disp,
                 )
                 continue
+            # min/max trade amounts are quote-token notional bounds; store as
+            # Decimal so we can compare against Decimal price*amount exactly.
             pair_map[pair_name] = {
                 "pair": pair_name,
                 "base": item["base"],
@@ -203,8 +205,8 @@ class CLOBClient(DexalotBaseClient):
                 "quote_decimals": item.get("quote_decimals"),
                 "base_display_decimals": base_disp,
                 "quote_display_decimals": quote_disp,
-                "min_trade_amount": float(item.get("min_trade_amount", 0)),
-                "max_trade_amount": float(item.get("max_trade_amount", 0)),
+                "min_trade_amount": Decimal(str(item.get("min_trade_amount", 0))),
+                "max_trade_amount": Decimal(str(item.get("max_trade_amount", 0))),
                 "tradePairId": Utils.to_bytes32(pair_name),
             }
 
@@ -1429,10 +1431,41 @@ class CLOBClient(DexalotBaseClient):
             )
         return Result.ok(nearest)
 
+    @staticmethod
+    def _check_trade_amount_bounds(
+        price: Decimal | None, amount: Decimal, pair_data: dict
+    ) -> "Result[None]":
+        """Enforce the pair's min/max trade-amount bounds (quote-token notional).
+
+        Computes ``notional = price * amount`` and rejects orders outside
+        ``[min_trade_amount, max_trade_amount]``. A bound of ``0`` is treated
+        as "no bound" (some pairs omit the cap).
+
+        Skipped entirely when ``price`` is ``None`` (market orders without
+        a price; the contract enforces its own protections for those).
+        """
+        if price is None:
+            return Result.ok(None)
+        notional = price * amount
+        min_amt = pair_data.get("min_trade_amount", Decimal(0))
+        max_amt = pair_data.get("max_trade_amount", Decimal(0))
+        if min_amt > 0 and notional < min_amt:
+            return Result.fail(
+                f"Trade notional {notional} below min_trade_amount {min_amt} "
+                f"(quote-token) for pair {pair_data.get('pair')}."
+            )
+        if max_amt > 0 and notional > max_amt:
+            return Result.fail(
+                f"Trade notional {notional} above max_trade_amount {max_amt} "
+                f"(quote-token) for pair {pair_data.get('pair')}."
+            )
+        return Result.ok(None)
+
     def _normalize_order_amounts(
         self, price: Any, amount: Any, pair_data: dict
     ) -> "Result[tuple[Decimal | None, Decimal]]":
-        """Validate and quantize price/amount against the pair's display decimals.
+        """Validate and quantize price/amount against the pair's display decimals
+        and min/max trade-amount bounds.
 
         Inputs whose precision exceeds the pair's display decimals are
         rejected — the SDK does not silently round, because that would
@@ -1440,8 +1473,14 @@ class CLOBClient(DexalotBaseClient):
         Float-representation noise (residual <= 1e-10) is tolerated and
         snapped to the nearest displayable value.
 
+        After display-decimal validation, the resulting notional
+        (``price * amount``) is checked against the pair's
+        ``min_trade_amount`` / ``max_trade_amount`` bounds (quote-token
+        denominated) so the SDK fails fast instead of waiting for the
+        contract to reject.
+
         Returns ``Result.ok((price, amount))`` as Decimals, or
-        ``Result.fail(...)`` describing which parameter exceeded precision.
+        ``Result.fail(...)`` describing which check failed.
         """
         if "quote_display_decimals" in pair_data and price:
             price_res = self._check_display_precision(
@@ -1457,6 +1496,9 @@ class CLOBClient(DexalotBaseClient):
             if not amount_res.success:
                 return cast("Result[tuple[Decimal | None, Decimal]]", amount_res)
             amount = amount_res.data
+        bounds_res = self._check_trade_amount_bounds(price, amount, pair_data)
+        if not bounds_res.success:
+            return cast("Result[tuple[Decimal | None, Decimal]]", bounds_res)
         return Result.ok((price, amount))
 
     @staticmethod
