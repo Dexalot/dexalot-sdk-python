@@ -496,9 +496,9 @@ class CLOBClient(DexalotBaseClient):
             if balance_error is not None:
                 return cast(Result[dict[Any, Any]], balance_error)
 
-            # Decimals
-            price_wei = int(price * (10 ** pair_data["quote_decimals"])) if price else 0
-            qty_wei = int(amount * (10 ** pair_data["base_decimals"]))
+            # Decimals (Decimal-backed; never multiply floats by 10**N here)
+            price_wei = self._to_wei(price, pair_data["quote_decimals"]) if price else 0
+            qty_wei = self._to_wei(amount, pair_data["base_decimals"])
 
             # Use caller-provided client_order_id or generate a random one
             import secrets

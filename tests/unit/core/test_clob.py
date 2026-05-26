@@ -455,6 +455,49 @@ class TestCLOBClient:
         assert call_args["quantity"] == 1000000000000000000  # 1.0 * 10^18
         assert call_args["side"] == 0  # BUY
 
+    @pytest.mark.parametrize(
+        "amount,base_decimals,expected_qty_wei",
+        [
+            # The exact reporter case: 2933.0 * 1e18 used to truncate to ...934464.
+            (2933.0, 18, 2933000000000000000000),
+            (1840.0, 18, 1840000000000000000000),
+            # USDC-style 6-decimal token
+            (100.0, 6, 100_000_000),
+            # Sub-unit values
+            (0.1, 18, 100000000000000000),
+        ],
+    )
+    async def test_add_order_quantity_precision(
+        self, client, amount, base_decimals, expected_qty_wei
+    ):
+        """add_order encodes quantity via Decimal arithmetic — no float-mul drift."""
+        from dexalot_sdk.utils.result import Result
+
+        client.pairs = {
+            "AVAX/USDC": {
+                "pair": "AVAX/USDC",
+                "base": "AVAX",
+                "quote": "USDC",
+                "base_decimals": base_decimals,
+                "quote_decimals": 6,
+                "base_display_decimals": 1,
+                "quote_display_decimals": 4,
+                "tradePairId": b"TPID",
+            }
+        }
+        mock_receipt = MagicMock()
+        mock_receipt.status = 1
+        client._send_trade_tx = AsyncMock(return_value=("0xTxHash", mock_receipt))
+        client.get_portfolio_balance = AsyncMock(
+            return_value=Result.ok({"available": amount + 1})
+        )
+
+        res = await client.add_order("AVAX/USDC", "SELL", amount, 10.0)
+
+        assert res.success
+        call_args = client.trade_pairs_contract.functions.addNewOrder.call_args[0][0]
+        assert call_args["quantity"] == expected_qty_wei
+
     async def test_add_order_validations(self, client):
         """Test add_order validations."""
         # No account
