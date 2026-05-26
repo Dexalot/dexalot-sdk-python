@@ -488,9 +488,7 @@ class TestCLOBClient:
         mock_receipt = MagicMock()
         mock_receipt.status = 1
         client._send_trade_tx = AsyncMock(return_value=("0xTxHash", mock_receipt))
-        client.get_portfolio_balance = AsyncMock(
-            return_value=Result.ok({"available": amount + 1})
-        )
+        client.get_portfolio_balance = AsyncMock(return_value=Result.ok({"available": amount + 1}))
 
         res = await client.add_order("AVAX/USDC", "SELL", amount, 10.0)
 
@@ -1214,6 +1212,41 @@ class TestCLOBClient:
         assert len(order_tuples) == 1
         assert order_tuples[0][5] == 0  # side BUY
         assert order_tuples[0][3] == 1000000000000000000  # amount
+
+    @pytest.mark.parametrize(
+        "amount,expected_qty_wei",
+        [
+            (2933.0, 2933000000000000000000),
+            (1840.0, 1840000000000000000000),
+            (0.1, 100000000000000000),
+        ],
+    )
+    async def test_add_limit_order_list_quantity_precision(self, client, amount, expected_qty_wei):
+        """add_limit_order_list (via _build_order_tuple) encodes quantity exactly."""
+        from dexalot_sdk.utils.result import Result
+
+        client.pairs = {
+            "AVAX/USDC": {
+                "tradePairId": b"TPID",
+                "pair": "AVAX/USDC",
+                "base_decimals": 18,
+                "quote_decimals": 6,
+                "base_display_decimals": 1,
+                "quote_display_decimals": 4,
+                "quote": "USDC",
+                "base": "AVAX",
+            }
+        }
+        client.get_portfolio_balance = AsyncMock(return_value=Result.ok({"available": amount + 1}))
+        client._ensure_pair_exists = AsyncMock(return_value=True)
+        client._send_trade_tx = AsyncMock(return_value=("0xTxHash", MagicMock(status=1)))
+
+        res = await client.add_limit_order_list(
+            [{"pair": "AVAX/USDC", "side": "SELL", "amount": amount, "price": 10.0}]
+        )
+        assert res.success
+        order_tuples = client.trade_pairs_contract.functions.addOrderList.call_args[0][0]
+        assert order_tuples[0][3] == expected_qty_wei  # quantity is index 3
 
     async def test_cancel_add_list(self, client):
         """Test cancel_add_list."""
@@ -3877,9 +3910,7 @@ class TestCLOBClient:
             (2.99, 0, "2"),
         ],
     )
-    def test_quantize_to_display_truncates_round_down(
-        self, value, display_decimals, expected
-    ):
+    def test_quantize_to_display_truncates_round_down(self, value, display_decimals, expected):
         """_quantize_to_display uses ROUND_DOWN — never overshoots user input."""
         from decimal import Decimal
 

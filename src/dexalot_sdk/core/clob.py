@@ -1398,8 +1398,8 @@ class CLOBClient(DexalotBaseClient):
 
         price, amount = self._normalize_order_amounts(order["price"], order["amount"], pair_data)
 
-        price_wei = int(price * (10 ** pair_data["quote_decimals"]))
-        qty_wei = int(amount * (10 ** pair_data["base_decimals"]))
+        price_wei = self._to_wei(price, pair_data["quote_decimals"])
+        qty_wei = self._to_wei(amount, pair_data["base_decimals"])
         if client_order_id_bytes is None:
             client_order_id_bytes = secrets.token_bytes(32)
         client_order_id_hex = "0x" + client_order_id_bytes.hex()
