@@ -901,7 +901,7 @@ class TransferClient(DexalotBaseClient):
 
         try:
             decimals = self._get_token_decimals(token, self.subnet_chain_id) or 18
-            amount_wei = int(amount * (10**decimals))
+            amount_wei = Utils.unit_conversion(amount, decimals, to_base=True)
             symbol_bytes32 = Utils.to_bytes32(token)
 
             # Check balance first
@@ -1147,7 +1147,7 @@ class TransferClient(DexalotBaseClient):
                 return Result.fail("Could not resolve token decimals")
             decimals = decimals_result.data
 
-            amount_wei = int(amount * (10**decimals))
+            amount_wei = Utils.unit_conversion(amount, decimals, to_base=True)
             bridge_id = self._get_bridge_id(canonical_source_chain, use_layerzero)
             symbol_bytes32 = Utils.to_bytes32(token)
 
@@ -1266,7 +1266,7 @@ class TransferClient(DexalotBaseClient):
                     f"{canonical_destination_chain} (ID {dest_chain_id})."
                 )
 
-            amount_wei = int(amount * (10**decimals))
+            amount_wei = Utils.unit_conversion(amount, decimals, to_base=True)
             bridge_id = self._get_bridge_id(canonical_destination_chain, use_layerzero)
             symbol_bytes32 = Utils.to_bytes32(token)
 
@@ -1350,7 +1350,7 @@ class TransferClient(DexalotBaseClient):
                     f"{canonical_source_chain} (ID {src_chain_id})."
                 )
 
-            amount_wei = int(amount * (10**decimals))
+            amount_wei = Utils.unit_conversion(amount, decimals, to_base=True)
             symbol_bytes32 = Utils.to_bytes32(token)
             bridge_id = self._get_bridge_id(
                 canonical_source_chain, False
@@ -1403,7 +1403,7 @@ class TransferClient(DexalotBaseClient):
             if decimals is None:
                 decimals = self._get_token_decimals(token, self.chain_id) or 18
 
-            amount_wei = int(amount * (10**decimals))
+            amount_wei = Utils.unit_conversion(amount, decimals, to_base=True)
             symbol_bytes32 = Utils.to_bytes32(token)
 
             tx_hash = await self._build_and_send_tx(
