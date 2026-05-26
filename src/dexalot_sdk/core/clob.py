@@ -1,4 +1,5 @@
 import asyncio
+import logging
 import time
 from collections.abc import Callable
 from decimal import ROUND_DOWN, ROUND_HALF_EVEN, Decimal
@@ -25,6 +26,8 @@ from ..utils.result import Result
 from ..utils.retry import async_retry
 from ..utils.websocket_manager import WebSocketManager
 from .base import _ORDERBOOK_CACHE, _SEMI_STATIC_CACHE, DexalotBaseClient
+
+_logger = logging.getLogger("dexalot_sdk")
 
 _CANDLE_INTERVALS: dict[str, tuple[int, str]] = {
     "1m": (1, "minute"),
@@ -167,21 +170,39 @@ class CLOBClient(DexalotBaseClient):
             return Result.fail(error_msg)
 
     def _store_clob_pairs(self, transformed_data: list[dict[str, Any]]) -> list[dict[str, Any]]:
-        """Normalize pair metadata into both list and keyed lookup forms."""
+        """Normalize pair metadata into both list and keyed lookup forms.
+
+        Pairs whose API record omits ``base_display_decimals`` or
+        ``quote_display_decimals`` are dropped with a warning. Display
+        decimals are contractual — silently defaulting them would mask
+        contract rejections (T-TMDQ-01) downstream.
+        """
         pair_map: dict[str, dict[str, Any]] = {}
         for item in transformed_data:
             if item.get("env") not in [ENV_PROD_MULTI_SUBNET, ENV_FUJI_MULTI_SUBNET]:
                 continue
 
             pair_name = item["pair"]
+            base_disp = item.get("base_display_decimals")
+            quote_disp = item.get("quote_display_decimals")
+            if base_disp is None or quote_disp is None:
+                _logger.warning(
+                    "Dropping pair %s: missing display decimals "
+                    "(base_display_decimals=%r, quote_display_decimals=%r). "
+                    "Pair will not be available for order placement.",
+                    pair_name,
+                    base_disp,
+                    quote_disp,
+                )
+                continue
             pair_map[pair_name] = {
                 "pair": pair_name,
                 "base": item["base"],
                 "quote": item["quote"],
                 "base_decimals": item.get("base_decimals"),
                 "quote_decimals": item.get("quote_decimals"),
-                "base_display_decimals": item.get("base_display_decimals", 18),
-                "quote_display_decimals": item.get("quote_display_decimals", 18),
+                "base_display_decimals": base_disp,
+                "quote_display_decimals": quote_disp,
                 "min_trade_amount": float(item.get("min_trade_amount", 0)),
                 "max_trade_amount": float(item.get("max_trade_amount", 0)),
                 "tradePairId": Utils.to_bytes32(pair_name),

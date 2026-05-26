@@ -3832,6 +3832,8 @@ class TestCLOBClient:
                 "quote": "USDC",
                 "base_decimals": 18,
                 "quote_decimals": 6,
+                "base_display_decimals": 1,
+                "quote_display_decimals": 4,
                 "min_trade_amount": "0.1",
                 "max_trade_amount": "10",
             },
@@ -3845,6 +3847,63 @@ class TestCLOBClient:
         before = dict(client.pairs)
         client._rehydrate_cached_get_clob_pairs(Result.fail("cache miss"))
         assert client.pairs == before
+
+    def test_store_clob_pairs_drops_pairs_missing_display_decimals(self, client):
+        """Pairs without display decimals are dropped (with a warning).
+
+        Display decimals are contractual: silently defaulting them would mask
+        the contract's T-TMDQ-01 rejection downstream. A pair missing these
+        fields cannot be safely used to place orders, so it's excluded from
+        the pair map and a warning is logged.
+        """
+        from dexalot_sdk.constants import ENV_FUJI_MULTI_SUBNET
+
+        transformed = [
+            # OK — has both display decimals.
+            {
+                "env": ENV_FUJI_MULTI_SUBNET,
+                "pair": "AVAX/USDC",
+                "base": "AVAX",
+                "quote": "USDC",
+                "base_decimals": 18,
+                "quote_decimals": 6,
+                "base_display_decimals": 1,
+                "quote_display_decimals": 4,
+            },
+            # Missing base_display_decimals → drop with warning.
+            {
+                "env": ENV_FUJI_MULTI_SUBNET,
+                "pair": "NOBASE/USDC",
+                "base": "NOBASE",
+                "quote": "USDC",
+                "base_decimals": 18,
+                "quote_decimals": 6,
+                "quote_display_decimals": 4,
+            },
+            # quote_display_decimals explicitly None → drop with warning.
+            {
+                "env": ENV_FUJI_MULTI_SUBNET,
+                "pair": "NULL/USDC",
+                "base": "NULL",
+                "quote": "USDC",
+                "base_decimals": 18,
+                "quote_decimals": 6,
+                "base_display_decimals": 1,
+                "quote_display_decimals": None,
+            },
+        ]
+
+        with patch("dexalot_sdk.core.clob._logger") as mock_logger:
+            pair_list = client._store_clob_pairs(transformed)
+
+        assert {p["pair"] for p in pair_list} == {"AVAX/USDC"}
+        assert "NOBASE/USDC" not in client.pairs
+        assert "NULL/USDC" not in client.pairs
+        # Two warnings, one per dropped pair.
+        assert mock_logger.warning.call_count == 2
+        warning_calls = [c.args[1] for c in mock_logger.warning.call_args_list]
+        assert "NOBASE/USDC" in warning_calls
+        assert "NULL/USDC" in warning_calls
 
     def test_order_normalization_helper_edge_cases(self, client):
         """Direct helper tests cover block coercion and pair-id resolution edge cases."""
