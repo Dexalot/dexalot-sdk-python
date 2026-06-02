@@ -289,24 +289,29 @@ class DexalotBaseClient:
         self.portfolio_sub_contract = None
 
     def _configure_caches(self):
-        """Configure module-level caches with custom TTL if provided."""
+        """Configure module-level caches with custom TTL if provided.
+
+        Mutates the existing ``MemoryCache`` instances in place rather
+        than rebinding the globals.  Subscriber modules (``transfer.py``,
+        ``swap.py``, ``clob.py``) import these by name at module-load
+        time, so the decorators they apply capture stale references if
+        the globals are reassigned later — leaving the cache the
+        decorator writes to disconnected from the cache test fixtures
+        clear.  In-place mutation preserves identity across all
+        importers.
+        """
         self._cache_enabled = self.config.enable_cache
         if not self._cache_enabled:
             return
 
-        global _STATIC_CACHE, _SEMI_STATIC_CACHE, _BALANCE_CACHE, _ORDERBOOK_CACHE
         if self.config.cache_ttl_static != 3600:
-            _STATIC_CACHE = MemoryCache(ttl_seconds=self.config.cache_ttl_static, max_size=128)
+            _STATIC_CACHE.ttl = self.config.cache_ttl_static
         if self.config.cache_ttl_semi_static != 900:
-            _SEMI_STATIC_CACHE = MemoryCache(
-                ttl_seconds=self.config.cache_ttl_semi_static, max_size=256
-            )
+            _SEMI_STATIC_CACHE.ttl = self.config.cache_ttl_semi_static
         if self.config.cache_ttl_balance != 10:
-            _BALANCE_CACHE = MemoryCache(ttl_seconds=self.config.cache_ttl_balance, max_size=512)
+            _BALANCE_CACHE.ttl = self.config.cache_ttl_balance
         if self.config.cache_ttl_orderbook != 1:
-            _ORDERBOOK_CACHE = MemoryCache(
-                ttl_seconds=self.config.cache_ttl_orderbook, max_size=256
-            )
+            _ORDERBOOK_CACHE.ttl = self.config.cache_ttl_orderbook
 
     def _setup_rate_limiters(self):
         """Set up rate limiters if enabled."""

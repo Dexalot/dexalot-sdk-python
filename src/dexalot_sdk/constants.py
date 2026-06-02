@@ -47,6 +47,10 @@ ENDPOINT_RFQ_PAIR_PRICE = "/api/rfq/pairprice"
 # /api/ tree on the backend (not duplicated under /privapi/).
 ENDPOINT_TRADING_CANDLE_CHUNK = "/api/trading/candle-chunk"
 ENDPOINT_STATS_MARKET_SNAPSHOT = "/api/stats/market-snapshot"
+# Public info tree (no auth, no `env` query at the backend — the host
+# determines the network — but the SDK still forwards `env` for parity
+# with the TypeScript SDK and cache-key namespacing on the client).
+ENDPOINT_INFO_USD_PRICES = "/api/info/usd-prices"
 
 # Default Values
 DEFAULT_DECIMALS = 18

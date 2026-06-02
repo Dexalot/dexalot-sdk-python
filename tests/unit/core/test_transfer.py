@@ -2213,3 +2213,182 @@ class TestTransferClient:
         w3 = self.create_w3()
         with pytest.raises(ValueError, match="Account is required"):
             await client._ensure_allowance(w3, "0xToken", "0xSpender", 1000)
+
+    # ----------------------------------------------------------------------
+    # get_token_usd_prices — public REST endpoint /api/info/usd-prices
+    # ----------------------------------------------------------------------
+    # Mirrors TypeScript SDK commit ea9f4a4. Backend returns a flat
+    # ``dict[str, str]`` map (prices are numeric strings, scientific notation
+    # supported). SDK coerces to floats and silently drops malformed rows.
+    # An array-of-objects shape is also tolerated as forward-compat.
+
+    async def test_get_token_usd_prices_flat_map_success(self, client):
+        """get_token_usd_prices parses flat ``dict[str, str]`` map into floats."""
+        api_spy = AsyncMock(
+            return_value={
+                "ETH": "1976.908750955006",
+                "ALOT": "0.041165219801",
+                "COQ": "1.04662e-7",
+            }
+        )
+        with patch.object(client, "_api_call", api_spy):
+            result = await client.get_token_usd_prices()
+
+        assert result.success
+        assert result.data == {
+            "ETH": 1976.908750955006,
+            "ALOT": 0.041165219801,
+            "COQ": 1.04662e-7,
+        }
+
+    async def test_get_token_usd_prices_forwards_env_query(self, client):
+        """``env`` arg overrides default and is forwarded as a query param."""
+        api_spy = AsyncMock(return_value={"ETH": "1.0"})
+        with patch.object(client, "_api_call", api_spy):
+            await client.get_token_usd_prices(env="production-multi")
+
+        args, kwargs = api_spy.call_args
+        assert kwargs["params"] == {"env": "production-multi"}
+        # Endpoint path must be the hyphenated /api/info/usd-prices
+        assert "/api/info/usd-prices" in args[1]
+
+    async def test_get_token_usd_prices_defaults_env_to_parent_env(self, client):
+        """When ``env`` is None, fall back to ``self.parent_env``."""
+        api_spy = AsyncMock(return_value={})
+        with patch.object(client, "_api_call", api_spy):
+            await client.get_token_usd_prices()
+
+        _, kwargs = api_spy.call_args
+        assert kwargs["params"] == {"env": client.parent_env}
+
+    async def test_get_token_usd_prices_array_of_objects_fallback(self, client):
+        """Array-of-objects shape ``[{symbol, price}, ...]`` is also accepted."""
+        api_spy = AsyncMock(
+            return_value=[
+                {"symbol": "ETH", "price": "1976.91"},
+                {"symbol": "ALOT", "price": 0.04},
+            ]
+        )
+        with patch.object(client, "_api_call", api_spy):
+            result = await client.get_token_usd_prices()
+
+        assert result.success
+        assert result.data == {"ETH": 1976.91, "ALOT": 0.04}
+
+    async def test_get_token_usd_prices_drops_malformed_rows(self, client):
+        """Empty symbol, missing symbol, NaN, negative, non-numeric — silently dropped."""
+        api_spy = AsyncMock(
+            return_value={
+                "ETH": "1.0",
+                "": "5.0",  # empty symbol
+                "  ": "9.0",  # whitespace symbol
+                "BAD": "not-a-number",
+                "NEG": "-1.5",
+                "NAN": "NaN",
+                "INF": "Infinity",
+                "NONE_VAL": None,
+                "EMPTY": "",
+                "WHITESPACE": "   ",
+                "GOOD": "2.5",
+            }
+        )
+        with patch.object(client, "_api_call", api_spy):
+            result = await client.get_token_usd_prices()
+
+        assert result.success
+        assert result.data == {"ETH": 1.0, "GOOD": 2.5}
+
+    async def test_get_token_usd_prices_array_drops_malformed_rows(self, client):
+        """Array shape: missing/empty symbol or bad price silently dropped."""
+        api_spy = AsyncMock(
+            return_value=[
+                {"symbol": "ETH", "price": "1.0"},
+                {"symbol": "", "price": "5.0"},  # empty symbol
+                {"price": "9.0"},  # missing symbol
+                {"symbol": "BAD"},  # missing price
+                {"symbol": "BAD2", "price": "abc"},
+                None,
+                "not-a-dict",
+                {"symbol": "GOOD", "price": 2.5},
+            ]
+        )
+        with patch.object(client, "_api_call", api_spy):
+            result = await client.get_token_usd_prices()
+
+        assert result.success
+        assert result.data == {"ETH": 1.0, "GOOD": 2.5}
+
+    async def test_get_token_usd_prices_accepts_numeric_price(self, client):
+        """Pure numeric prices (already coerced) are accepted."""
+        api_spy = AsyncMock(return_value={"ETH": 1.5, "ALOT": 0.04})
+        with patch.object(client, "_api_call", api_spy):
+            result = await client.get_token_usd_prices()
+        assert result.success
+        assert result.data == {"ETH": 1.5, "ALOT": 0.04}
+
+    async def test_get_token_usd_prices_numeric_nan_dropped(self, client):
+        """Numeric NaN/Infinity/negative values are silently dropped."""
+        api_spy = AsyncMock(
+            return_value={
+                "GOOD": 1.5,
+                "NAN": float("nan"),
+                "INF": float("inf"),
+                "NEG_INF": float("-inf"),
+                "NEG": -1.0,
+            }
+        )
+        with patch.object(client, "_api_call", api_spy):
+            result = await client.get_token_usd_prices()
+        assert result.success
+        assert result.data == {"GOOD": 1.5}
+
+    async def test_get_token_usd_prices_unexpected_shape_fails(self, client):
+        """Non-dict, non-array response returns ``Result.fail``."""
+        api_spy = AsyncMock(return_value="unexpected-string-body")
+        with patch.object(client, "_api_call", api_spy):
+            result = await client.get_token_usd_prices()
+        assert not result.success
+        assert "USD prices response shape" in result.error
+
+    async def test_get_token_usd_prices_api_error(self, client):
+        """REST failure is caught and surfaced as Result.fail."""
+        api_spy = AsyncMock(side_effect=RuntimeError("network down"))
+        with patch.object(client, "_api_call", api_spy):
+            result = await client.get_token_usd_prices()
+        assert not result.success
+
+    async def test_get_token_usd_prices_cached_per_env(self, client):
+        """Cache key namespaced by env so testnet/mainnet do not collide."""
+        client._cache_enabled = True
+        api_spy = AsyncMock(return_value={"ETH": "1.0"})
+        with patch.object(client, "_api_call", api_spy):
+            await client.get_token_usd_prices(env="fuji-multi")
+            await client.get_token_usd_prices(env="fuji-multi")  # cache hit
+            await client.get_token_usd_prices(env="production-multi")  # distinct slot
+
+        assert api_spy.await_count == 2
+
+    async def test_get_token_usd_prices_cache_bypass_when_disabled(self, client):
+        """When _cache_enabled is False, every call hits REST."""
+        client._cache_enabled = False
+        api_spy = AsyncMock(return_value={"ETH": "1.0"})
+        with patch.object(client, "_api_call", api_spy):
+            await client.get_token_usd_prices(env="fuji-multi")
+            await client.get_token_usd_prices(env="fuji-multi")
+        assert api_spy.await_count == 2
+
+    def test_coerce_usd_price_rejects_bool(self):
+        """``True``/``False`` must not be coerced to 1/0 prices."""
+        from dexalot_sdk.core.transfer import TransferClient
+
+        assert TransferClient._coerce_usd_price(True) is None
+        assert TransferClient._coerce_usd_price(False) is None
+
+    async def test_get_token_usd_prices_drops_non_string_keys(self, client):
+        """Flat-map keys that are not strings are skipped."""
+        # Backend never emits these but be defensive against pathological proxies.
+        api_spy = AsyncMock(return_value={123: "1.0", "GOOD": "2.0"})
+        with patch.object(client, "_api_call", api_spy):
+            result = await client.get_token_usd_prices()
+        assert result.success
+        assert result.data == {"GOOD": 2.0}

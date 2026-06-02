@@ -1,9 +1,11 @@
 import asyncio
+import math
 from typing import Any, cast
 
 from ..constants import (
     BRIDGE_ID_ICM,
     BRIDGE_ID_LZ,
+    ENDPOINT_INFO_USD_PRICES,
     ENDPOINT_TRADING_TOKENS,
     GAS_BUFFER,
     ICM_CHAINS,
@@ -1636,3 +1638,119 @@ class TransferClient(DexalotBaseClient):
             return w3.to_hex(tx_hash)
 
         return w3.to_hex(tx_hash)
+
+    # ----------------------------------------------------------------------
+    # USD price endpoints (public /api/info/...)
+    # ----------------------------------------------------------------------
+
+    @staticmethod
+    def _coerce_usd_price(raw: Any) -> float | None:
+        """Coerce a single raw price value into a finite non-negative float.
+
+        Returns ``None`` for anything we cannot confidently interpret as a
+        price (non-string/non-number, empty string, NaN, ±Infinity,
+        negative).  The backend currently emits decimal strings (including
+        scientific notation e.g. ``"1.04662e-7"``), so :func:`float` is
+        the right primitive — but we tolerate plain numbers too in case
+        the shape ever flips.
+        """
+        if isinstance(raw, bool):
+            # bool is a subclass of int — disallow explicitly to avoid
+            # treating ``True``/``False`` as 1/0 prices.
+            return None
+        if isinstance(raw, int | float):
+            n = float(raw)
+            if not math.isfinite(n) or n < 0:
+                return None
+            return n
+        if not isinstance(raw, str):
+            return None
+        trimmed = raw.strip()
+        if trimmed == "":
+            return None
+        try:
+            n = float(trimmed)
+        except (ValueError, TypeError):
+            return None
+        if not math.isfinite(n) or n < 0:
+            return None
+        return n
+
+    @track_method("transfer")
+    async def get_token_usd_prices(self, env: str | None = None) -> Result[dict[str, float]]:
+        """Fetch current USD prices for every Dexalot-listed token.
+
+        Public endpoint, no signed auth required.  Cached for 15 minutes
+        (semi-static cache tier).
+
+        The backend currently emits the price map as a flat
+        ``dict[str, str]`` (string prices, including scientific notation
+        for very small values); the SDK coerces to ``float`` and silently
+        drops entries it cannot interpret.  An array-of-objects fallback
+        (``[{"symbol", "price"}, ...]``) is also accepted in case the
+        backend shape ever changes.
+
+        The ``env`` query parameter is forwarded for parity with the
+        TypeScript SDK and to namespace the cache key per network; the
+        backend itself currently determines the network from the API host
+        and does not consult the parameter.
+
+        Args:
+            env: Optional environment label override.  Defaults to
+                ``self.parent_env``.
+
+        Returns:
+            ``Result.ok({symbol: price})`` on success,
+            ``Result.fail(msg)`` on network failure or unexpected response
+            shape.
+        """
+        target_env = env if env is not None else self.parent_env
+        return cast(
+            Result[dict[str, float]],
+            await self._get_token_usd_prices_cached(target_env),
+        )
+
+    @async_ttl_cached(_SEMI_STATIC_CACHE)
+    async def _get_token_usd_prices_cached(self, env: str) -> Result[dict[str, float]]:
+        """Internal cached implementation of get_token_usd_prices."""
+        try:
+            data = await self._api_call(
+                "get",
+                f"{self.api_base_url}{ENDPOINT_INFO_USD_PRICES}",
+                params={"env": env},
+            )
+            out: dict[str, float] = {}
+            if isinstance(data, list):
+                # Forward-compat: array-of-objects shape.
+                for row in data:
+                    if not isinstance(row, dict):
+                        continue
+                    raw_symbol = row.get("symbol")
+                    if not isinstance(raw_symbol, str):
+                        continue
+                    symbol = raw_symbol.strip()
+                    if not symbol:
+                        continue
+                    price = self._coerce_usd_price(row.get("price"))
+                    if price is None:
+                        continue
+                    out[symbol] = price
+                return Result.ok(out)
+            if isinstance(data, dict):
+                # Current shape: flat ``Record<string, string>`` map.
+                for symbol, raw in data.items():
+                    if not isinstance(symbol, str):
+                        continue
+                    trimmed_sym = symbol.strip()
+                    if not trimmed_sym:
+                        continue
+                    price = self._coerce_usd_price(raw)
+                    if price is None:
+                        continue
+                    out[trimmed_sym] = price
+                return Result.ok(out)
+            return Result.fail(
+                f"Unexpected USD prices response shape: expected object or array, got {type(data).__name__}."
+            )
+        except Exception as e:
+            return Result.fail(self._sanitize_error(e, "fetching token USD prices"))
