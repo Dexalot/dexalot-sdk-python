@@ -59,6 +59,12 @@ ENDPOINT_INFO_USD_PRICES = "/api/info/usd-prices"
 # useful when the backend gains range support.
 ENDPOINT_INFO_PRICE_HISTORY = "/api/info/token-usd-price-history"
 ENDPOINT_INFO_HOURLY_PRICE_HISTORY = "/api/info/token-usd-price-history-hourly"
+# Unified transfer history (deposits + withdrawals + p2p + gas) under the
+# `/api/trading/signed/` mountpoint. Requires the `x-signature` header.
+# The backend route does not exist under `/privapi/...` — confirmed
+# empirically (404 on /privapi/trading/signed/transferscombined,
+# 204 OPTIONS on /api/trading/signed/transferscombined).
+ENDPOINT_TRADING_COMBINED_TRANSFERS = "/api/trading/signed/transferscombined"
 
 # Default Values
 DEFAULT_DECIMALS = 18

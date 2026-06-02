@@ -2578,3 +2578,357 @@ class TestTransferClient:
         assert TransferClient._coerce_timestamp_seconds("1700000000") == 1700000000
         # plain number passthrough
         assert TransferClient._coerce_timestamp_seconds(1700000000) == 1700000000
+
+    # ----------------------------------------------------------------------
+    # get_combined_transfers — signed REST /api/trading/signed/transferscombined
+    # ----------------------------------------------------------------------
+    # Mirrors TypeScript SDK commit f7a9945.
+
+    async def test_get_combined_transfers_no_wallet_returns_fail(self, client):
+        """No configured account → Result.fail without any REST call."""
+        client.account = None
+        api_spy = AsyncMock(return_value={"count": 0, "rows": []})
+        with patch.object(client, "_api_call", api_spy):
+            result = await client.get_combined_transfers()
+        assert not result.success
+        assert "wallet" in result.error.lower()
+        api_spy.assert_not_called()
+
+    async def test_get_combined_transfers_basic_envelope(self, client):
+        """Envelope ``{count, rows}`` parsed, each row normalized to Transfer."""
+        from dexalot_sdk.core.transfer import Transfer
+
+        api_spy = AsyncMock(
+            return_value={
+                "count": 1,
+                "rows": [
+                    {
+                        "action_type": 1,
+                        "status": 0,
+                        "symbol": "USDC",
+                        "quantity": "100.5",
+                        "fee": "0.25",
+                        "traderaddress": VALID_ADDRESS,
+                        "bridge": 2,
+                        "bridge_url": "https://bridge.example/x",
+                        "nonce": 7,
+                        "source_env": "fuji-multi-avax",
+                        "source_chain_id": 43113,
+                        "source_tx": "0xabc",
+                        "source_ts": 1700000000,
+                        "target_env": "fuji-multi-subnet",
+                        "target_chain_id": 12345,
+                        "target_tx": "0xdef",
+                        "target_ts": 1700000010,
+                    }
+                ],
+            }
+        )
+        with patch.object(client, "_api_call", api_spy):
+            result = await client.get_combined_transfers()
+        assert result.success
+        assert len(result.data) == 1
+        t = result.data[0]
+        assert isinstance(t, Transfer)
+        assert t.action_type == "DEPOSITED"
+        assert t.status == "COMPLETED"
+        assert t.bridge == "ICM"
+        assert t.symbol == "USDC"
+        assert t.quantity == 100.5
+        assert t.fee == 0.25
+        assert t.nonce == 7
+        assert t.source_chain_id == 43113
+        assert t.target_chain_id == 12345
+
+    async def test_get_combined_transfers_bare_array_fallback(self, client):
+        """Bare list response also accepted as forward-compat."""
+        api_spy = AsyncMock(
+            return_value=[
+                {
+                    "action_type": 0,
+                    "status": 1,
+                    "symbol": "ALOT",
+                    "quantity": "1.0",
+                    "fee": "0",
+                    "traderaddress": VALID_ADDRESS,
+                    "bridge": -1,
+                    "source_chain_id": 12345,
+                }
+            ]
+        )
+        with patch.object(client, "_api_call", api_spy):
+            result = await client.get_combined_transfers()
+        assert result.success
+        assert len(result.data) == 1
+        assert result.data[0].action_type == "WITHDRAWN"
+        assert result.data[0].status == "INFLIGHT"
+        assert result.data[0].bridge == "NATIVE"
+
+    async def test_get_combined_transfers_unexpected_shape_fails(self, client):
+        """Non-object, non-array response surfaces Result.fail."""
+        api_spy = AsyncMock(return_value="bad")
+        with patch.object(client, "_api_call", api_spy):
+            result = await client.get_combined_transfers()
+        assert not result.success
+        assert "transfers response shape" in result.error
+
+    async def test_get_combined_transfers_empty_rows(self, client):
+        """Empty rows list returns Result.ok([])."""
+        api_spy = AsyncMock(return_value={"count": 0, "rows": []})
+        with patch.object(client, "_api_call", api_spy):
+            result = await client.get_combined_transfers()
+        assert result.success
+        assert result.data == []
+
+    async def test_get_combined_transfers_envelope_missing_rows(self, client):
+        """``{count}`` without ``rows`` is tolerated as empty list."""
+        api_spy = AsyncMock(return_value={"count": 0})
+        with patch.object(client, "_api_call", api_spy):
+            result = await client.get_combined_transfers()
+        assert result.success
+        assert result.data == []
+
+    async def test_get_combined_transfers_drops_unknown_enums(self, client):
+        """Rows with unknown numeric action_type / status are silently dropped."""
+        api_spy = AsyncMock(
+            return_value={
+                "count": 4,
+                "rows": [
+                    {
+                        "action_type": 99,
+                        "status": 0,
+                        "symbol": "X",
+                        "quantity": "1",
+                        "traderaddress": VALID_ADDRESS,
+                    },
+                    {
+                        "action_type": 1,
+                        "status": 99,
+                        "symbol": "X",
+                        "quantity": "1",
+                        "traderaddress": VALID_ADDRESS,
+                    },
+                    {
+                        "action_type": 1,
+                        "status": 0,
+                        "symbol": "GOOD",
+                        "quantity": "5",
+                        "traderaddress": VALID_ADDRESS,
+                        "bridge": 999,  # Unknown bridge → falls back to NATIVE
+                    },
+                    None,
+                ],
+            }
+        )
+        with patch.object(client, "_api_call", api_spy):
+            result = await client.get_combined_transfers()
+        assert result.success
+        assert len(result.data) == 1
+        assert result.data[0].symbol == "GOOD"
+        assert result.data[0].bridge == "NATIVE"
+
+    async def test_get_combined_transfers_drops_missing_required_fields(self, client):
+        """Rows missing action_type / status / symbol / quantity dropped."""
+        api_spy = AsyncMock(
+            return_value=[
+                {"status": 0, "symbol": "X", "quantity": "1"},  # missing action_type
+                {"action_type": 1, "symbol": "X", "quantity": "1"},  # missing status
+                {"action_type": 1, "status": 0, "quantity": "1"},  # missing symbol
+                {"action_type": 1, "status": 0, "symbol": "X"},  # missing quantity
+                {
+                    "action_type": 1,
+                    "status": 0,
+                    "symbol": "X",
+                    "quantity": "abc",  # non-numeric quantity
+                },
+                {
+                    "action_type": "1",  # action_type as string (not numeric)
+                    "status": 0,
+                    "symbol": "X",
+                    "quantity": "1",
+                },
+                {
+                    "action_type": 1,
+                    "status": "0",  # status as string (not numeric)
+                    "symbol": "X",
+                    "quantity": "1",
+                },
+                {
+                    "action_type": 1,
+                    "status": 0,
+                    "symbol": 42,  # symbol not a string
+                    "quantity": "1",
+                },
+                {
+                    "action_type": 1,
+                    "status": 0,
+                    "symbol": "GOOD",
+                    "quantity": "1",
+                },
+            ]
+        )
+        with patch.object(client, "_api_call", api_spy):
+            result = await client.get_combined_transfers()
+        assert result.success
+        assert len(result.data) == 1
+        assert result.data[0].symbol == "GOOD"
+
+    async def test_get_combined_transfers_quantity_and_fee_numeric_or_string(self, client):
+        """quantity/fee accepted as either numeric string or numeric."""
+        api_spy = AsyncMock(
+            return_value=[
+                {
+                    "action_type": 1,
+                    "status": 0,
+                    "symbol": "X",
+                    "quantity": 12.5,
+                    "fee": 0.01,
+                    "traderaddress": VALID_ADDRESS,
+                }
+            ]
+        )
+        with patch.object(client, "_api_call", api_spy):
+            result = await client.get_combined_transfers()
+        assert result.success
+        assert result.data[0].quantity == 12.5
+        assert result.data[0].fee == 0.01
+
+    async def test_get_combined_transfers_fee_missing_defaults_zero(self, client):
+        """fee absent → defaults to 0.0."""
+        api_spy = AsyncMock(
+            return_value=[
+                {
+                    "action_type": 1,
+                    "status": 0,
+                    "symbol": "X",
+                    "quantity": "10",
+                    "traderaddress": VALID_ADDRESS,
+                }
+            ]
+        )
+        with patch.object(client, "_api_call", api_spy):
+            result = await client.get_combined_transfers()
+        assert result.success
+        assert result.data[0].fee == 0.0
+
+    async def test_get_combined_transfers_default_pagination(self, client):
+        """Defaults: limit=100 → itemsperpage=100, offset=0 → pageno=1."""
+        api_spy = AsyncMock(return_value={"count": 0, "rows": []})
+        with patch.object(client, "_api_call", api_spy):
+            await client.get_combined_transfers()
+        _, kwargs = api_spy.call_args
+        assert kwargs["params"]["itemsperpage"] == 100
+        assert kwargs["params"]["pageno"] == 1
+
+    async def test_get_combined_transfers_custom_pagination_translation(self, client):
+        """limit → itemsperpage, offset → pageno (offset/limit = page index, 1-indexed)."""
+        api_spy = AsyncMock(return_value={"count": 0, "rows": []})
+        with patch.object(client, "_api_call", api_spy):
+            await client.get_combined_transfers(limit=50, offset=100)
+        _, kwargs = api_spy.call_args
+        # offset 100 with limit 50 → page 3 (1-indexed)
+        assert kwargs["params"]["itemsperpage"] == 50
+        assert kwargs["params"]["pageno"] == 3
+
+    async def test_get_combined_transfers_forwards_kind_and_period(self, client):
+        """kind → symbol; from_ts → periodfrom; to_ts → periodto."""
+        api_spy = AsyncMock(return_value={"count": 0, "rows": []})
+        with patch.object(client, "_api_call", api_spy):
+            await client.get_combined_transfers(
+                kind="ALOT", from_ts=1700000000, to_ts=1700864000
+            )
+        _, kwargs = api_spy.call_args
+        assert kwargs["params"]["symbol"] == "ALOT"
+        assert kwargs["params"]["periodfrom"] == 1700000000
+        assert kwargs["params"]["periodto"] == 1700864000
+
+    async def test_get_combined_transfers_attaches_signature_header(self, client):
+        """``x-signature`` header attached via _get_auth_headers."""
+        api_spy = AsyncMock(return_value={"count": 0, "rows": []})
+        with patch.object(client, "_api_call", api_spy):
+            with patch.object(
+                client, "_get_auth_headers", return_value={"x-signature": "sig"}
+            ):
+                await client.get_combined_transfers()
+        _, kwargs = api_spy.call_args
+        assert kwargs["headers"] == {"x-signature": "sig"}
+
+    async def test_get_combined_transfers_endpoint_path(self, client):
+        """Path is /api/trading/signed/transferscombined (NOT under /privapi/)."""
+        api_spy = AsyncMock(return_value={"count": 0, "rows": []})
+        with patch.object(client, "_api_call", api_spy):
+            await client.get_combined_transfers()
+        args, _ = api_spy.call_args
+        assert "/api/trading/signed/transferscombined" in args[1]
+        assert "/privapi/" not in args[1]
+
+    async def test_get_combined_transfers_signer_rejection_returns_fail(self, client):
+        """Auth header generation failure surfaces as Result.fail."""
+        api_spy = AsyncMock(return_value={"count": 0, "rows": []})
+        with patch.object(client, "_api_call", api_spy):
+            with patch.object(
+                client,
+                "_get_auth_headers",
+                side_effect=Exception("Private key not configured."),
+            ):
+                result = await client.get_combined_transfers()
+        assert not result.success
+
+    async def test_get_combined_transfers_api_error(self, client):
+        """REST failure surfaced as Result.fail."""
+        api_spy = AsyncMock(side_effect=RuntimeError("network boom"))
+        with patch.object(client, "_api_call", api_spy):
+            result = await client.get_combined_transfers()
+        assert not result.success
+
+    async def test_get_combined_transfers_cache_distinct_per_address_and_opts(self, client):
+        """Cache key includes (address, all opts); distinct combos do not collide."""
+        client._cache_enabled = True
+        api_spy = AsyncMock(return_value={"count": 0, "rows": []})
+        with patch.object(client, "_api_call", api_spy):
+            await client.get_combined_transfers()
+            await client.get_combined_transfers()  # cache hit (same addr + opts)
+            await client.get_combined_transfers(kind="ALOT")  # distinct slot
+            await client.get_combined_transfers(limit=50)  # distinct slot
+            # Change address → distinct slot
+            other_addr = "0x" + "b" * 40
+            client.account.address = other_addr
+            await client.get_combined_transfers()
+
+        assert api_spy.await_count == 4
+
+    async def test_get_combined_transfers_cache_bypass_when_disabled(self, client):
+        """When _cache_enabled is False every call hits REST."""
+        client._cache_enabled = False
+        api_spy = AsyncMock(return_value={"count": 0, "rows": []})
+        with patch.object(client, "_api_call", api_spy):
+            await client.get_combined_transfers()
+            await client.get_combined_transfers()
+        assert api_spy.await_count == 2
+
+    async def test_get_combined_transfers_normalizes_user_symbol(self, client):
+        """``kind`` is run through _normalize_user_token before being forwarded."""
+        api_spy = AsyncMock(return_value={"count": 0, "rows": []})
+        with patch.object(
+            client, "_normalize_user_token", return_value="USDC"
+        ) as norm_spy:
+            with patch.object(client, "_api_call", api_spy):
+                await client.get_combined_transfers(kind="usdc")
+        norm_spy.assert_called_once_with("usdc")
+        _, kwargs = api_spy.call_args
+        assert kwargs["params"]["symbol"] == "USDC"
+
+    async def test_get_combined_transfers_address_lookup_failure(self, client):
+        """A signer that raises when address is read surfaces Result.fail."""
+
+        class BrokenAccount:
+            @property
+            def address(self):  # type: ignore[no-untyped-def]
+                raise RuntimeError("signer is broken")
+
+        client.account = BrokenAccount()
+        api_spy = AsyncMock(return_value={"count": 0, "rows": []})
+        with patch.object(client, "_api_call", api_spy):
+            result = await client.get_combined_transfers()
+        assert not result.success
+        api_spy.assert_not_called()

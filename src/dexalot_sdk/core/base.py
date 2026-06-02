@@ -4,6 +4,7 @@ import logging
 import os
 import re
 import sys
+import time
 from dataclasses import dataclass
 from functools import lru_cache
 from typing import Any, cast
@@ -682,6 +683,40 @@ class DexalotBaseClient:
         from ..utils.token_normalization import normalize_trading_pair_for_sdk
 
         return normalize_trading_pair_for_sdk(pair)
+
+    def _get_auth_headers(self) -> dict[str, str]:
+        """Generate authentication headers for signed endpoints.
+
+        Lifted from ``CLOBClient`` so non-CLOB surfaces (transfer history,
+        future signed endpoints) can use the same helper without depending
+        on the CLOB mixin.
+
+        When ``config.timestamped_auth`` is True, the signed message is
+        ``f"dexalot{ts}"`` (millisecond timestamp) and an ``x-timestamp``
+        header is included alongside ``x-signature``.  This prevents
+        replay attacks but requires backend support — default is
+        ``False`` until the backend confirms timestamp window validation.
+        See ``docs/python-sdk-remediation-plan.md`` C-2.
+        """
+        if not self.account:
+            raise Exception("Private key not configured.")
+
+        from eth_account.messages import encode_defunct
+
+        addr = cast(str, cast(Any, self.account).address)
+
+        if self.config.timestamped_auth:
+            ts = int(time.time() * 1000)
+            message = encode_defunct(text=f"dexalot{ts}")
+            signature = self.account.sign_message(message).signature.hex()
+            return {
+                "x-signature": f"{addr}:0x{signature}",
+                "x-timestamp": str(ts),
+            }
+
+        message = encode_defunct(text="dexalot")
+        signature = self.account.sign_message(message).signature.hex()
+        return {"x-signature": f"{addr}:0x{signature}"}
 
     def resolve_chain_reference(
         self, chain_reference: str | int, include_dexalot_l1: bool = False
