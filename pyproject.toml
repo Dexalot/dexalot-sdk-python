@@ -8,7 +8,7 @@ license = "MIT"
 license-files = [
     "LICENSE.txt"
 ]
-version = "0.5.14"
+version = "0.5.16"
 description = "Dexalot Python SDK - Core library for Dexalot interaction"
 readme = "README.md"
 requires-python = ">=3.12,<3.15"
