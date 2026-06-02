@@ -51,6 +51,14 @@ ENDPOINT_STATS_MARKET_SNAPSHOT = "/api/stats/market-snapshot"
 # determines the network — but the SDK still forwards `env` for parity
 # with the TypeScript SDK and cache-key namespacing on the client).
 ENDPOINT_INFO_USD_PRICES = "/api/info/usd-prices"
+# Daily and hourly USD price history per token.  Backend ignores
+# `from`/`to`/`env` query params today (host determines network, range
+# is fixed window) but the SDK forwards them for forward-compat and
+# cache-key namespacing; if a caller supplies `from_ts`/`to_ts` the
+# response is additionally filtered client-side so the contract remains
+# useful when the backend gains range support.
+ENDPOINT_INFO_PRICE_HISTORY = "/api/info/token-usd-price-history"
+ENDPOINT_INFO_HOURLY_PRICE_HISTORY = "/api/info/token-usd-price-history-hourly"
 
 # Default Values
 DEFAULT_DECIMALS = 18

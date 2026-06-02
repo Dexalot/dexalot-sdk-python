@@ -1,10 +1,14 @@
 import asyncio
 import math
+from dataclasses import dataclass
+from datetime import datetime
 from typing import Any, cast
 
 from ..constants import (
     BRIDGE_ID_ICM,
     BRIDGE_ID_LZ,
+    ENDPOINT_INFO_HOURLY_PRICE_HISTORY,
+    ENDPOINT_INFO_PRICE_HISTORY,
     ENDPOINT_INFO_USD_PRICES,
     ENDPOINT_TRADING_TOKENS,
     GAS_BUFFER,
@@ -20,7 +24,23 @@ from ..utils.input_validators import (
 )
 from ..utils.observability import track_method
 from ..utils.result import Result
-from .base import _BALANCE_CACHE, _SEMI_STATIC_CACHE, DexalotBaseClient
+from .base import _BALANCE_CACHE, _SEMI_STATIC_CACHE, _STATIC_CACHE, DexalotBaseClient
+
+
+@dataclass(frozen=True)
+class PricePoint:
+    """One USD price observation in a price-history series.
+
+    Returned by :meth:`TransferClient.get_token_price_history` (daily) and
+    :meth:`TransferClient.get_token_hourly_price_history` (hourly).  The
+    backend ships rows as ``{date: ISO-8601-string, price: stringified-decimal}``
+    sorted descending by date; the SDK normalizes to ascending unix-seconds
+    + numeric price so callers can chart, filter, or interpolate without
+    re-parsing.
+    """
+
+    timestamp: int  # unix seconds (UTC)
+    price: float
 
 
 class TransferClient(DexalotBaseClient):
@@ -1754,3 +1774,183 @@ class TransferClient(DexalotBaseClient):
             )
         except Exception as e:
             return Result.fail(self._sanitize_error(e, "fetching token USD prices"))
+
+    # ----------------------------------------------------------------------
+    # USD price history (daily + hourly, public /api/info/...)
+    # ----------------------------------------------------------------------
+
+    @staticmethod
+    def _coerce_timestamp_seconds(raw: Any) -> int | None:
+        """Coerce a raw numeric / numeric-string timestamp to unix seconds.
+
+        Values ``>= 1e12`` are treated as milliseconds and divided by 1000
+        (a 32-bit second-precision unix epoch maxes out at ``2^31 ≈ 2.1e9``,
+        so 1e12 is a safe boundary).
+        """
+        if isinstance(raw, bool):
+            return None
+        if isinstance(raw, int | float):
+            n = float(raw)
+        elif isinstance(raw, str):
+            trimmed = raw.strip()
+            if trimmed == "":
+                return None
+            try:
+                n = float(trimmed)
+            except ValueError:
+                return None
+        else:
+            return None
+        if not math.isfinite(n) or n < 0:
+            return None
+        if n >= 1e12:
+            n = math.floor(n / 1000)
+        return int(math.floor(n))
+
+    @staticmethod
+    def _extract_history_timestamp(row: dict[str, Any]) -> int | None:
+        """Pull a timestamp out of one raw price-history row.
+
+        Backend ships ``date`` as ISO-8601; we additionally accept the
+        numeric aliases ``ts`` / ``timestamp`` / ``time`` (value treated
+        as milliseconds when ``>= 1e12``) so the contract is stable if
+        the shape ever flips.  Returns unix seconds (UTC) or ``None``.
+        """
+        raw_date = row.get("date")
+        if isinstance(raw_date, str) and raw_date.strip():
+            try:
+                # Accept ``...Z`` and timezone-naive ISO strings.  Python
+                # 3.11+ ``fromisoformat`` handles ``Z`` directly via the
+                # explicit ``+00:00`` replacement.
+                dt = datetime.fromisoformat(raw_date.replace("Z", "+00:00"))
+            except ValueError:
+                dt = None
+            if dt is not None:
+                return int(dt.timestamp())
+        for key in ("ts", "timestamp", "time"):
+            if key in row:
+                coerced = TransferClient._coerce_timestamp_seconds(row[key])
+                if coerced is not None:
+                    return coerced
+        return None
+
+    @track_method("transfer")
+    async def get_token_price_history(
+        self,
+        token: str,
+        *,
+        from_ts: int | None = None,
+        to_ts: int | None = None,
+    ) -> Result[list[PricePoint]]:
+        """Daily USD price history for one token.
+
+        Returns an ascending-time ordered ``list[PricePoint]`` from the
+        public ``/api/info/token-usd-price-history`` endpoint.  Past
+        prices do not change, so results are cached in the static tier
+        (1 hour TTL); the cache key is path-namespaced so daily and
+        hourly never collide.
+
+        The optional ``from_ts`` / ``to_ts`` window is in unix seconds.
+        The backend currently ignores it (the host fixes the network and
+        the lookback) but the SDK forwards both for forward-compat and
+        additionally filters the returned series client-side so the
+        caller's range contract holds regardless of backend behavior.
+
+        No authentication required (public endpoint).
+        """
+        return await self._fetch_price_history(
+            ENDPOINT_INFO_PRICE_HISTORY, token, from_ts, to_ts
+        )
+
+    @track_method("transfer")
+    async def get_token_hourly_price_history(
+        self,
+        token: str,
+        *,
+        from_ts: int | None = None,
+        to_ts: int | None = None,
+    ) -> Result[list[PricePoint]]:
+        """Hourly USD price history for one token.
+
+        Same contract as :meth:`get_token_price_history` (ascending-time
+        ``list[PricePoint]``, static-tier 1 h cache, optional
+        ``from_ts``/``to_ts`` window applied client-side) but routes
+        through the hourly endpoint.  Useful when more granular series
+        is needed than the daily variant — backend currently returns the
+        trailing ~24 h at 3-hour granularity.
+
+        No authentication required (public endpoint).
+        """
+        return await self._fetch_price_history(
+            ENDPOINT_INFO_HOURLY_PRICE_HISTORY, token, from_ts, to_ts
+        )
+
+    async def _fetch_price_history(
+        self,
+        path: str,
+        token: str,
+        from_ts: int | None,
+        to_ts: int | None,
+    ) -> Result[list[PricePoint]]:
+        """Shared validation + cache delegation for daily / hourly history.
+
+        Validates the token symbol up-front (avoids polluting the cache
+        with validation failures) then delegates to the cached helper.
+        """
+        token_result = validate_token_symbol(token, "token")
+        if not token_result.success:
+            return cast(Result[list[PricePoint]], token_result)
+        sym = self._normalize_user_token(token)
+        return cast(
+            Result[list[PricePoint]],
+            await self._fetch_price_history_cached(path, sym, from_ts, to_ts),
+        )
+
+    @async_ttl_cached(_STATIC_CACHE)
+    async def _fetch_price_history_cached(
+        self,
+        path: str,
+        token: str,
+        from_ts: int | None,
+        to_ts: int | None,
+    ) -> Result[list[PricePoint]]:
+        """Internal cached implementation of price-history fetch.
+
+        Cache key includes ``(path, token, from_ts, to_ts)`` so daily
+        and hourly never collide on the same slot even with identical
+        ``(token, from_ts, to_ts)`` tuples.
+        """
+        try:
+            params: dict[str, Any] = {"token": token}
+            if from_ts is not None:
+                params["from"] = from_ts
+            if to_ts is not None:
+                params["to"] = to_ts
+            data = await self._api_call(
+                "get",
+                f"{self.api_base_url}{path}",
+                params=params,
+            )
+            if not isinstance(data, list):
+                return Result.fail(
+                    f"Unexpected price history response shape: expected array, got {type(data).__name__}."
+                )
+            points: list[PricePoint] = []
+            for row in data:
+                if not isinstance(row, dict):
+                    continue
+                ts = self._extract_history_timestamp(row)
+                if ts is None:
+                    continue
+                price = self._coerce_usd_price(row.get("price"))
+                if price is None:
+                    continue
+                if from_ts is not None and ts < from_ts:
+                    continue
+                if to_ts is not None and ts > to_ts:
+                    continue
+                points.append(PricePoint(timestamp=ts, price=price))
+            points.sort(key=lambda p: p.timestamp)
+            return Result.ok(points)
+        except Exception as e:
+            return Result.fail(self._sanitize_error(e, "fetching token price history"))

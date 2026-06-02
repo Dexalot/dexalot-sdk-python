@@ -2392,3 +2392,189 @@ class TestTransferClient:
             result = await client.get_token_usd_prices()
         assert result.success
         assert result.data == {"GOOD": 2.0}
+
+    # ----------------------------------------------------------------------
+    # get_token_price_history / get_token_hourly_price_history
+    # ----------------------------------------------------------------------
+    # Mirrors TypeScript SDK commit 63b2e61.
+
+    async def test_get_token_price_history_normalizes_and_sorts(self, client):
+        """ISO dates → unix seconds, prices → float, sorted ascending."""
+        from dexalot_sdk.core.transfer import PricePoint
+
+        api_spy = AsyncMock(
+            return_value=[
+                {"date": "2026-06-02T00:00:00Z", "price": "10.5"},
+                {"date": "2026-06-01T00:00:00Z", "price": "9.0"},
+                {"date": "2026-05-31T00:00:00Z", "price": "8.25"},
+            ]
+        )
+        with patch.object(client, "_api_call", api_spy):
+            result = await client.get_token_price_history("ALOT")
+
+        assert result.success
+        assert isinstance(result.data[0], PricePoint)
+        # Ascending by timestamp
+        assert [p.timestamp for p in result.data] == sorted(
+            p.timestamp for p in result.data
+        )
+        assert result.data[0].price == 8.25
+        assert result.data[-1].price == 10.5
+
+    async def test_get_token_price_history_endpoint_path(self, client):
+        """Daily method hits the daily endpoint with ``token`` param."""
+        api_spy = AsyncMock(return_value=[])
+        with patch.object(client, "_api_call", api_spy):
+            await client.get_token_price_history("ALOT")
+        args, kwargs = api_spy.call_args
+        assert "/api/info/token-usd-price-history" in args[1]
+        assert "hourly" not in args[1]
+        assert kwargs["params"]["token"] == "ALOT"
+
+    async def test_get_token_hourly_price_history_endpoint_path(self, client):
+        """Hourly method hits the hourly endpoint with ``token`` param."""
+        api_spy = AsyncMock(return_value=[])
+        with patch.object(client, "_api_call", api_spy):
+            await client.get_token_hourly_price_history("ALOT")
+        args, kwargs = api_spy.call_args
+        assert args[1].endswith("/api/info/token-usd-price-history-hourly")
+        assert kwargs["params"]["token"] == "ALOT"
+
+    async def test_get_token_price_history_forwards_from_and_to(self, client):
+        """``from_ts``/``to_ts`` forwarded as ``from``/``to`` query params."""
+        api_spy = AsyncMock(return_value=[])
+        with patch.object(client, "_api_call", api_spy):
+            await client.get_token_price_history(
+                "ALOT", from_ts=1700000000, to_ts=1700864000
+            )
+        _, kwargs = api_spy.call_args
+        assert kwargs["params"] == {
+            "token": "ALOT",
+            "from": 1700000000,
+            "to": 1700864000,
+        }
+
+    async def test_get_token_price_history_client_side_filter(self, client):
+        """Backend ignores ``from``/``to``; SDK filters client-side."""
+        # 2026-06-01 00:00 UTC = 1780272000
+        # 2026-06-02 00:00 UTC = 1780358400
+        # 2026-06-03 00:00 UTC = 1780444800
+        api_spy = AsyncMock(
+            return_value=[
+                {"date": "2026-06-01T00:00:00Z", "price": "9.0"},
+                {"date": "2026-06-02T00:00:00Z", "price": "10.0"},
+                {"date": "2026-06-03T00:00:00Z", "price": "11.0"},
+            ]
+        )
+        with patch.object(client, "_api_call", api_spy):
+            result = await client.get_token_price_history(
+                "ALOT", from_ts=1780358400, to_ts=1780358400
+            )
+        assert result.success
+        # Only the middle row falls inside [from, to] inclusively
+        assert len(result.data) == 1
+        assert result.data[0].price == 10.0
+
+    async def test_get_token_price_history_drops_malformed_rows(self, client):
+        """Invalid date / NaN price / non-dict rows silently dropped."""
+        api_spy = AsyncMock(
+            return_value=[
+                {"date": "2026-06-01T00:00:00Z", "price": "9.0"},
+                {"date": "not-a-date", "price": "10.0"},
+                {"date": "2026-06-02T00:00:00Z", "price": "abc"},
+                {"date": "2026-06-03T00:00:00Z", "price": "-1.0"},
+                {"price": "5.0"},  # missing date
+                {"date": "2026-06-04T00:00:00Z"},  # missing price
+                None,
+                "not-a-dict",
+            ]
+        )
+        with patch.object(client, "_api_call", api_spy):
+            result = await client.get_token_price_history("ALOT")
+        assert result.success
+        assert len(result.data) == 1
+        assert result.data[0].price == 9.0
+
+    async def test_get_token_price_history_rejects_non_array_response(self, client):
+        """A non-list response surfaces as Result.fail with a shape hint."""
+        api_spy = AsyncMock(return_value={"unexpected": "object"})
+        with patch.object(client, "_api_call", api_spy):
+            result = await client.get_token_price_history("ALOT")
+        assert not result.success
+        assert "price history response shape" in result.error
+
+    async def test_get_token_price_history_invalid_token_returns_fail(self, client):
+        """Invalid token symbol fails validation before any REST call."""
+        api_spy = AsyncMock(return_value=[])
+        with patch.object(client, "_api_call", api_spy):
+            result = await client.get_token_price_history("")
+        assert not result.success
+        api_spy.assert_not_called()
+
+    async def test_get_token_price_history_api_error(self, client):
+        """REST failure is caught and surfaced as Result.fail."""
+        api_spy = AsyncMock(side_effect=RuntimeError("network boom"))
+        with patch.object(client, "_api_call", api_spy):
+            result = await client.get_token_price_history("ALOT")
+        assert not result.success
+
+    async def test_price_history_cache_key_distinguishes_daily_vs_hourly(self, client):
+        """Daily and hourly methods do not share the same cache slot."""
+        client._cache_enabled = True
+        api_spy = AsyncMock(return_value=[])
+        with patch.object(client, "_api_call", api_spy):
+            await client.get_token_price_history("ALOT")
+            await client.get_token_price_history("ALOT")  # cache hit
+            await client.get_token_hourly_price_history("ALOT")  # distinct slot
+        assert api_spy.await_count == 2
+
+    async def test_price_history_cache_key_distinguishes_opts(self, client):
+        """Different (token, from_ts, to_ts) tuples use distinct cache slots."""
+        client._cache_enabled = True
+        api_spy = AsyncMock(return_value=[])
+        with patch.object(client, "_api_call", api_spy):
+            await client.get_token_price_history("ALOT")
+            await client.get_token_price_history("ALOT", from_ts=100)
+            await client.get_token_price_history("ALOT", from_ts=100, to_ts=200)
+            await client.get_token_price_history("ETH")
+        assert api_spy.await_count == 4
+
+    async def test_get_token_price_history_accepts_ts_numeric_alias(self, client):
+        """A row with no ``date`` but a numeric ``ts`` is accepted."""
+        api_spy = AsyncMock(
+            return_value=[
+                {"ts": 1700000000, "price": "5.0"},
+                {"timestamp": "1700000100", "price": "6.0"},
+                {"time": 1700000200000, "price": "7.0"},  # milliseconds
+            ]
+        )
+        with patch.object(client, "_api_call", api_spy):
+            result = await client.get_token_price_history("ALOT")
+        assert result.success
+        assert len(result.data) == 3
+        assert result.data[0].timestamp == 1700000000
+        assert result.data[1].timestamp == 1700000100
+        assert result.data[2].timestamp == 1700000200  # 1.7e12 / 1000
+
+    def test_coerce_timestamp_seconds_edge_cases(self):
+        """Direct coverage for the timestamp coercer's branches."""
+        from dexalot_sdk.core.transfer import TransferClient
+
+        # bool → None
+        assert TransferClient._coerce_timestamp_seconds(True) is None
+        # whitespace-only string → None
+        assert TransferClient._coerce_timestamp_seconds("   ") is None
+        # non-numeric string → None
+        assert TransferClient._coerce_timestamp_seconds("not-a-number") is None
+        # non-string/non-number → None
+        assert TransferClient._coerce_timestamp_seconds([1, 2]) is None
+        # negative → None
+        assert TransferClient._coerce_timestamp_seconds(-1) is None
+        # NaN → None
+        assert TransferClient._coerce_timestamp_seconds(float("nan")) is None
+        # milliseconds boundary
+        assert TransferClient._coerce_timestamp_seconds(1700000000000) == 1700000000
+        # numeric string is accepted
+        assert TransferClient._coerce_timestamp_seconds("1700000000") == 1700000000
+        # plain number passthrough
+        assert TransferClient._coerce_timestamp_seconds(1700000000) == 1700000000
