@@ -2871,3 +2871,141 @@ class TestDexalotBaseClient:
         client._provider_manager = None
         with pytest.raises(RuntimeError, match="Provider manager is required"):
             await client._rpc_call_with_failover("Avalanche", "eth.get_block", "latest")
+
+    # -------------------------------------------------------------------- #
+    # _api_call — REST error body preservation                             #
+    # -------------------------------------------------------------------- #
+    # The Dexalot REST API encodes failures as
+    # ``{"reasonCode": "...", "reason": "..."}`` (also tolerates the
+    # snake_case ``reason_code`` and the ``message`` alias that some
+    # endpoints emit). ``_api_call`` must lift these into the raised
+    # exception so callers' ``Result.fail`` strings surface the backend
+    # reason instead of collapsing to ``"... HTTP status N"``.
+
+    @staticmethod
+    def _http_error_response(status: int, body):
+        """Build a context-manager mock that yields a response with the given body."""
+
+        async def _json(content_type=None):
+            if isinstance(body, Exception):
+                raise body
+            return body
+
+        mock_resp = AsyncMock()
+        mock_resp.status = status
+        mock_resp.json = _json
+
+        if status >= 400:
+            import aiohttp
+
+            def _raise():
+                raise aiohttp.ClientResponseError(
+                    request_info=MagicMock(),
+                    history=(),
+                    status=status,
+                    message=f"Request failed with status code {status}",
+                )
+
+            mock_resp.raise_for_status = MagicMock(side_effect=_raise)
+        else:
+            mock_resp.raise_for_status = MagicMock()
+
+        mock_cm = AsyncMock()
+        mock_cm.__aenter__.return_value = mock_resp
+        mock_cm.__aexit__.return_value = None
+        return mock_cm
+
+    async def test_api_call_lifts_reason_code_and_reason(self, client):
+        """_api_call surfaces backend reasonCode + reason from response body."""
+        cm = self._http_error_response(
+            400, {"reasonCode": "FQ-015", "reason": "insufficient liquidity"}
+        )
+        with patch.object(client, "_make_http_request", AsyncMock(return_value=cm)):
+            with pytest.raises(RuntimeError, match=r"^FQ-015: insufficient liquidity$"):
+                await client._api_call("get", "https://api/x")
+
+    async def test_api_call_lifts_snake_case_aliases(self, client):
+        """``reason_code`` + ``message`` aliases are also lifted."""
+        cm = self._http_error_response(
+            400, {"reason_code": "T-TMDQ-01", "message": "amount too small"}
+        )
+        with patch.object(client, "_make_http_request", AsyncMock(return_value=cm)):
+            with pytest.raises(RuntimeError, match=r"^T-TMDQ-01: amount too small$"):
+                await client._api_call("get", "https://api/x")
+
+    async def test_api_call_reason_code_without_reason_uses_generic_tail(self, client):
+        """When reasonCode is set but reason is missing, fall back to a generic tail."""
+        cm = self._http_error_response(500, {"reasonCode": "P-OK01"})
+        with patch.object(client, "_make_http_request", AsyncMock(return_value=cm)):
+            with pytest.raises(RuntimeError, match=r"^P-OK01: Request failed with status code 500$"):
+                await client._api_call("get", "https://api/x")
+
+    async def test_api_call_reason_alone_without_reason_code(self, client):
+        """Reason alone (no reasonCode) is used as the full message."""
+        cm = self._http_error_response(400, {"reason": "something else"})
+        with patch.object(client, "_make_http_request", AsyncMock(return_value=cm)):
+            with pytest.raises(RuntimeError, match=r"^something else$"):
+                await client._api_call("get", "https://api/x")
+
+    async def test_api_call_message_alias_alone(self, client):
+        """``message`` alias alone (no reasonCode) is used as the full message."""
+        cm = self._http_error_response(400, {"message": "plain reason from message field"})
+        with patch.object(client, "_make_http_request", AsyncMock(return_value=cm)):
+            with pytest.raises(RuntimeError, match=r"^plain reason from message field$"):
+                await client._api_call("get", "https://api/x")
+
+    async def test_api_call_empty_body_falls_through_to_aiohttp_error(self, client):
+        """Empty ``{}`` body falls through to the generic aiohttp error."""
+        import aiohttp
+
+        cm = self._http_error_response(500, {})
+        with patch.object(client, "_make_http_request", AsyncMock(return_value=cm)):
+            with pytest.raises(aiohttp.ClientResponseError):
+                await client._api_call("get", "https://api/x")
+
+    async def test_api_call_non_dict_body_falls_through(self, client):
+        """HTML / non-JSON-object body falls through to the generic aiohttp error."""
+        import aiohttp
+
+        cm = self._http_error_response(502, "<html>502 Bad Gateway</html>")
+        with patch.object(client, "_make_http_request", AsyncMock(return_value=cm)):
+            with pytest.raises(aiohttp.ClientResponseError):
+                await client._api_call("get", "https://api/x")
+
+    async def test_api_call_body_parse_failure_falls_through(self, client):
+        """When body parsing raises, fall through to the generic aiohttp error."""
+        import aiohttp
+
+        cm = self._http_error_response(502, ValueError("not json"))
+        with patch.object(client, "_make_http_request", AsyncMock(return_value=cm)):
+            with pytest.raises(aiohttp.ClientResponseError):
+                await client._api_call("get", "https://api/x")
+
+    async def test_api_call_network_error_propagates(self, client):
+        """Network-level failure (no response) propagates unchanged."""
+        import aiohttp
+
+        with patch.object(
+            client,
+            "_make_http_request",
+            AsyncMock(side_effect=aiohttp.ClientConnectionError("Network Error")),
+        ):
+            with pytest.raises(aiohttp.ClientConnectionError, match="Network Error"):
+                await client._api_call("get", "https://api/x")
+
+    async def test_api_call_non_http_error_propagates(self, client):
+        """Non-HTTP exceptions raised inside the request propagate unchanged."""
+        with patch.object(
+            client,
+            "_make_http_request",
+            AsyncMock(side_effect=RuntimeError("generic non-http failure")),
+        ):
+            with pytest.raises(RuntimeError, match="generic non-http failure"):
+                await client._api_call("get", "https://api/x")
+
+    async def test_api_call_success_returns_json(self, client):
+        """Happy path: returns parsed JSON body."""
+        cm = self._http_error_response(200, [{"id": 1}])
+        with patch.object(client, "_make_http_request", AsyncMock(return_value=cm)):
+            data = await client._api_call("get", "https://api/x")
+        assert data == [{"id": 1}]

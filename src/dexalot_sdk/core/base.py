@@ -828,6 +828,46 @@ class DexalotBaseClient:
         else:
             return cast(aiohttp.ClientResponse, await _do_request())
 
+    async def _api_call(self, method: str, url: str, **kwargs: Any) -> Any:
+        """Make a REST API call and return its parsed JSON body.
+
+        On failure, lifts backend ``reasonCode`` + ``reason`` from the
+        response body (when present) into the raised exception's message.
+        The Dexalot REST API encodes failures as
+        ``{"reasonCode": "FQ-015", "reason": "..."}`` (also tolerates the
+        snake_case ``reason_code`` and the ``message`` alias that some
+        endpoints emit). Without this lift the raw aiohttp message
+        collapses everything to ``"Request failed with status code N"``,
+        which swallows the backend-level reason and makes user-visible
+        ``Result.fail`` strings useless for diagnosis.
+
+        Network-level failures (no response) and non-HTTP exceptions are
+        propagated unchanged.
+        """
+        async with await self._make_http_request(method, url, **kwargs) as response:
+            if response.status >= 400:
+                body: Any = None
+                try:
+                    body = await response.json(content_type=None)
+                except Exception:
+                    body = None
+                if isinstance(body, dict):
+                    reason_code = body.get("reasonCode") or body.get("reason_code")
+                    reason = body.get("reason") or body.get("message")
+                    if isinstance(reason_code, str):
+                        tail = (
+                            reason
+                            if isinstance(reason, str)
+                            else f"Request failed with status code {response.status}"
+                        )
+                        raise RuntimeError(f"{reason_code}: {tail}")
+                    if isinstance(reason, str):
+                        raise RuntimeError(reason)
+                # Empty body, non-dict body, or parse failure — fall through
+                # to the generic aiohttp error.
+                response.raise_for_status()
+            return await response.json(content_type=None)
+
     def _find_chain_for_provider(self, w3: AsyncWeb3) -> str | None:
         """
         Find which chain a provider belongs to (for backwards compatibility).
