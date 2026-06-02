@@ -1,5 +1,4 @@
 import asyncio
-import copy
 import json
 import logging
 import os
@@ -1715,94 +1714,73 @@ class DexalotBaseClient:
             return Result.fail(error_msg)
 
     @async_ttl_cached(_STATIC_CACHE)
-    async def get_deployment(self) -> Result[dict]:
-        """Fetch contract deployment configuration (addresses and ABIs) from the API.
+    async def get_deployment(
+        self,
+        *,
+        env: str | None = None,
+        contract_type: str = "All",
+        return_abi: bool = True,
+    ) -> Result[list[Any]]:
+        """Fetch deployment configuration from the REST API.
 
-        Populates and returns ``self.deployments`` with entries for
-        ``TradePairs``, ``PortfolioMain``, ``PortfolioSub``, and ``MainnetRFQ``.
-        Also wires up on-chain contract instances (``trade_pairs_contract``,
-        ``portfolio_sub_contract``, ``portfolio_main_avax_contract``).
+        Backward-compatible: no-args call still resolves successfully and
+        uses defaults (``env=config.parent_env``, ``contract_type='All'``,
+        ``return_abi=True``).  The backend expects lowercase query param
+        names (``contracttype``, ``returnabi``).
+
+        Cached for 1 hour (static cache tier).  The cache key includes
+        all three resolved params so filter variants do not collide on
+        the same cache slot.
 
         Note:
-            Cached for 1 hour (static cache tier).
+            This method no longer mutates ``self.deployments`` or the
+            contract handles.  Those are populated by
+            ``initialize_client`` / ``reinitialize`` via the internal
+            ``_fetch_deployments`` helper.  Mirrors TypeScript SDK
+            commit 14265ad.
+
+        Args:
+            env: Parent environment (e.g. ``'fuji-multi'``).  Defaults to
+                ``self.parent_env``.
+            contract_type: One of ``'All'``, ``'Portfolio'``,
+                ``'TradePairs'``, ``'MainnetRFQ'``, ``'PortfolioMain'``,
+                ``'PortfolioSub'``, ``'OrderBooks'``.  Defaults to ``'All'``.
+            return_abi: Whether the backend should include ABI payloads.
+                Defaults to ``True``.
 
         Returns:
-            Result containing the ``deployments`` dictionary on success, or an
-            error message on failure.
+            ``Result.ok(list)`` of raw deployment entries on success,
+            ``Result.fail(msg)`` on REST or network failure.
         """
+        resolved_env = env if env is not None else self.parent_env
+
         if not self._cache_enabled:
-            # Bypass cache by clearing it for this call
-            key: tuple[Any, ...] = ("get_deployment", (self,), frozenset())
-            _STATIC_CACHE._store.pop(key, None)
+            # Bypass cache by clearing this call's slot
+            cache_key: tuple[Any, ...] = (
+                "get_deployment",
+                self.api_base_url,
+                (),
+                frozenset(
+                    {
+                        "env": resolved_env,
+                        "contract_type": contract_type,
+                        "return_abi": return_abi,
+                    }.items()
+                ),
+            )
+            _STATIC_CACHE._store.pop(cache_key, None)
 
         try:
-            # Ensure environments are fetched first (needed for w3_l1, w3_connected_chain)
-            if not self.chain_config:
-                envs_result = await self.get_environments()
-                if not envs_result.success:
-                    return Result.fail(f"Failed to fetch environments: {envs_result.error}")
-
-            # Always fetch fresh from API (cache decorator handles TTL)
-            # Rebuild deployments dict from API
-            deploy_url = f"{self.api_base_url}{ENDPOINT_TRADING_DEPLOYMENT}"
-
-            # Initialize deployments structure if not already initialized
-            if not self.deployments:
-                self.deployments = {
-                    "TradePairs": {},
-                    "PortfolioMain": {},
-                    "PortfolioSub": {},
-                    "MainnetRFQ": {},
-                }
-            else:
-                # Clear existing deployments to rebuild fresh
-                self.deployments = {
-                    "TradePairs": {},
-                    "PortfolioMain": {},
-                    "PortfolioSub": {},
-                    "MainnetRFQ": {},
-                }
-
-            # Fetch all contract types in parallel
-            await asyncio.gather(
-                self._fetch_contract_deployment(deploy_url, "TradePairs"),
-                self._fetch_contract_deployment(deploy_url, "Portfolio"),
-                self._fetch_contract_deployment(deploy_url, "MainnetRFQ"),
+            data = await self._api_call(
+                "get",
+                f"{self.api_base_url}{ENDPOINT_TRADING_DEPLOYMENT}",
+                params={
+                    "env": resolved_env,
+                    "contracttype": contract_type,
+                    "returnabi": "true" if return_abi else "false",
+                },
             )
-
-            return Result.ok(self.deployments)
+            return Result.ok(data)
         except Exception as e:
             error_msg = self._sanitize_error(e, "getting deployment")
             return Result.fail(error_msg)
-
-    def _apply_deployment_state(self, deployments: dict[str, Any]) -> None:
-        """Restore deployment mappings and contract handles from cached data."""
-        self.deployments = copy.deepcopy(deployments)
-        if self.w3_l1 and self.deployments.get("TradePairs"):
-            trade_pairs = self.deployments["TradePairs"]
-            if trade_pairs.get("address") and trade_pairs.get("abi") is not None:
-                self.trade_pairs_contract = self.w3_l1.eth.contract(
-                    address=trade_pairs["address"], abi=trade_pairs["abi"]
-                )
-        if self.w3_l1 and self.deployments.get("PortfolioSub"):
-            portfolio_sub = self.deployments["PortfolioSub"]
-            if portfolio_sub.get("address") and portfolio_sub.get("abi") is not None:
-                self.portfolio_sub_contract = self.w3_l1.eth.contract(
-                    address=portfolio_sub["address"], abi=portfolio_sub["abi"]
-                )
-        if self.w3_connected_chain and self.deployments.get("PortfolioMain", {}).get("Avalanche"):
-            portfolio_main = self.deployments["PortfolioMain"]["Avalanche"]
-            if portfolio_main.get("address") and portfolio_main.get("abi") is not None:
-                self.portfolio_main_avax_contract = self.w3_connected_chain.eth.contract(
-                    address=portfolio_main["address"], abi=portfolio_main["abi"]
-                )
-
-    async def _rehydrate_cached_get_deployment(self, cached: Result[dict]) -> None:
-        """Restore deployment state when ``get_deployment`` is served from cache."""
-        if not cached.success or cached.data is None:
-            return
-        if not self.chain_config or not self.w3_l1:
-            envs_result = await self.get_environments()
-            if not envs_result.success:
-                return
-        self._apply_deployment_state(cached.data)
