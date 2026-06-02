@@ -1057,6 +1057,318 @@ class TestCLOBClient:
         assert transformed["quantity"] is None
         assert transformed["total_amount"] is None
 
+    # ----------------------------------------------------------------------
+    # get_order_history — signed REST /api/trading/signed/orders
+    # ----------------------------------------------------------------------
+    # Mirrors TypeScript SDK commit ece5dcd.  Distinct from
+    # /privapi/signed/orders (get_open_orders, open-only).  Same canonical
+    # Order shape via the shared _transform_order_from_api helper.
+
+    def _make_api_order_row(self, **overrides):
+        """Build a raw REST-API order row (lowercase aliases + numeric enums)."""
+        base = {
+            "id": "0x" + "a" * 64,
+            "clientordid": "0x" + "b" * 64,
+            "tradepairid": "0xPairId_AVAX_USDC",
+            "price": "100",
+            "quantity": "1.5",
+            "quantityfilled": "0.5",
+            "status": 4,  # CANCELED
+            "side": 1,  # SELL
+            "type1": 1,  # LIMIT
+            "type2": 0,  # GTC
+            "pair": "AVAX/USDC",
+            "totalamount": "150",
+            "totalfee": "0.1",
+            "traderaddress": VALID_ADDRESS,
+            "createBlock": 100,
+            "updateBlock": 101,
+            "timestamp": "2024-01-01T00:00:00.000Z",
+            "update_ts": "2024-01-01T00:01:00.000Z",
+            "tx": "0xfeed",
+        }
+        base.update(overrides)
+        return base
+
+    async def test_get_order_history_no_wallet_and_no_account_returns_fail(self, client):
+        """No configured account and no explicit account → Result.fail without any REST call."""
+        client.account = None
+        api_spy = AsyncMock(return_value={"count": 0, "rows": []})
+        with patch.object(client, "_api_call", api_spy):
+            result = await client.get_order_history()
+        assert not result.success
+        assert "get_order_history" in result.error
+        api_spy.assert_not_called()
+
+    async def test_get_order_history_envelope_returns_canonical_orders(self, client):
+        """``{count, rows}`` envelope parsed; each row normalized to canonical Order."""
+        api_spy = AsyncMock(
+            return_value={"count": 1, "rows": [self._make_api_order_row()]}
+        )
+        with patch.object(client, "_api_call", api_spy):
+            result = await client.get_order_history()
+        assert result.success
+        assert len(result.data) == 1
+        order = result.data[0]
+        assert order["internal_order_id"] == "0x" + "a" * 64
+        assert order["client_order_id"] == "0x" + "b" * 64
+        assert order["trade_pair_id"] == "0xPairId_AVAX_USDC"
+        assert order["pair"] == "AVAX/USDC"
+        assert order["price"] == 100.0
+        assert order["total_amount"] == 150.0
+        assert order["quantity"] == 1.5
+        assert order["quantity_filled"] == 0.5
+        assert order["total_fee"] == 0.1
+        assert order["trader_address"] == VALID_ADDRESS
+        assert order["side"] == "SELL"
+        assert order["type1"] == "LIMIT"
+        assert order["type2"] == "GTC"
+        assert order["status"] == "CANCELED"
+        assert order["create_block"] == 100
+        assert order["update_block"] == 101
+        assert order["create_ts"] == "2024-01-01T00:00:00.000Z"
+        assert order["update_ts"] == "2024-01-01T00:01:00.000Z"
+        assert order["tx"] == "0xfeed"
+        # raw aliases stripped
+        assert "id" not in order
+        assert "clientordid" not in order
+        assert "tradepairid" not in order
+
+    async def test_get_order_history_bare_list_response(self, client):
+        """Bare list response also accepted as forward-compat."""
+        api_spy = AsyncMock(return_value=[self._make_api_order_row()])
+        with patch.object(client, "_api_call", api_spy):
+            result = await client.get_order_history()
+        assert result.success
+        assert len(result.data) == 1
+        assert result.data[0]["pair"] == "AVAX/USDC"
+
+    async def test_get_order_history_empty_rows(self, client):
+        """Empty rows list returns Result.ok([])."""
+        api_spy = AsyncMock(return_value={"count": 0, "rows": []})
+        with patch.object(client, "_api_call", api_spy):
+            result = await client.get_order_history()
+        assert result.success
+        assert result.data == []
+
+    async def test_get_order_history_single_dict_wrapped(self, client):
+        """A single non-array object response is wrapped as a one-row result."""
+        api_spy = AsyncMock(return_value=self._make_api_order_row())
+        with patch.object(client, "_api_call", api_spy):
+            result = await client.get_order_history()
+        assert result.success
+        assert len(result.data) == 1
+        assert result.data[0]["pair"] == "AVAX/USDC"
+
+    async def test_get_order_history_unexpected_shape_fails(self, client):
+        """Non-object, non-array response surfaces Result.fail."""
+        api_spy = AsyncMock(return_value="just a string")
+        with patch.object(client, "_api_call", api_spy):
+            result = await client.get_order_history()
+        assert not result.success
+        assert "order history response shape" in result.error
+
+    async def test_get_order_history_explicit_account_overrides_wallet(self, client):
+        """Explicit account argument overrides the connected wallet's address."""
+        other_addr = "0x" + "c" * 40
+        api_spy = AsyncMock(return_value={"count": 0, "rows": []})
+        with patch.object(client, "_api_call", api_spy):
+            await client.get_order_history(other_addr)
+        _, kwargs = api_spy.call_args
+        assert kwargs["params"]["traderaddress"] == other_addr
+
+    async def test_get_order_history_no_wallet_but_explicit_account(self, client):
+        """Without a signer but with an explicit account, the call still works
+        (auth header is omitted; backend may reject — SDK doesn't guard)."""
+        client.account = None
+        api_spy = AsyncMock(return_value={"count": 0, "rows": []})
+        with patch.object(client, "_api_call", api_spy):
+            result = await client.get_order_history("0x" + "d" * 40)
+        assert result.success
+        assert result.data == []
+        _, kwargs = api_spy.call_args
+        # No auth header when no signer
+        assert kwargs["headers"] == {}
+        assert kwargs["params"]["traderaddress"] == "0x" + "d" * 40
+
+    async def test_get_order_history_forwards_filters(self, client):
+        """pair / status / limit / offset all forwarded as query params."""
+        api_spy = AsyncMock(return_value={"count": 0, "rows": []})
+        with patch.object(client, "_api_call", api_spy):
+            await client.get_order_history(
+                pair="AVAX/USDC", status="FILLED", limit=25, offset=50
+            )
+        _, kwargs = api_spy.call_args
+        params = kwargs["params"]
+        assert params["traderaddress"] == VALID_ADDRESS
+        assert params["pair"] == "AVAX/USDC"
+        assert params["status"] == "FILLED"
+        assert params["limit"] == 25
+        assert params["offset"] == 50
+
+    async def test_get_order_history_default_pagination(self, client):
+        """Defaults: limit=100, offset=0."""
+        api_spy = AsyncMock(return_value={"count": 0, "rows": []})
+        with patch.object(client, "_api_call", api_spy):
+            await client.get_order_history()
+        _, kwargs = api_spy.call_args
+        assert kwargs["params"]["limit"] == 100
+        assert kwargs["params"]["offset"] == 0
+
+    async def test_get_order_history_endpoint_path(self, client):
+        """Path is /api/trading/signed/orders (NOT /privapi/signed/orders)."""
+        api_spy = AsyncMock(return_value={"count": 0, "rows": []})
+        with patch.object(client, "_api_call", api_spy):
+            await client.get_order_history()
+        args, _ = api_spy.call_args
+        assert "/api/trading/signed/orders" in args[1]
+        assert "/privapi/" not in args[1]
+
+    async def test_get_order_history_attaches_auth_header_when_signer_present(self, client):
+        """x-signature header attached via _get_auth_headers when a signer exists."""
+        api_spy = AsyncMock(return_value={"count": 0, "rows": []})
+        with patch.object(client, "_api_call", api_spy):
+            with patch.object(
+                client, "_get_auth_headers", return_value={"x-signature": "sig"}
+            ):
+                await client.get_order_history()
+        _, kwargs = api_spy.call_args
+        assert kwargs["headers"] == {"x-signature": "sig"}
+
+    async def test_get_order_history_signer_rejection_returns_fail(self, client):
+        """Auth header generation failure surfaces as Result.fail."""
+        api_spy = AsyncMock(return_value={"count": 0, "rows": []})
+        with patch.object(client, "_api_call", api_spy):
+            with patch.object(
+                client,
+                "_get_auth_headers",
+                side_effect=Exception("Private key not configured."),
+            ):
+                result = await client.get_order_history()
+        assert not result.success
+        api_spy.assert_not_called()
+
+    async def test_get_order_history_api_error_preserves_reason_code(self, client):
+        """REST failure (with backend reason code) surfaced as Result.fail."""
+        api_spy = AsyncMock(side_effect=RuntimeError("FQ-123: upstream down"))
+        with patch.object(client, "_api_call", api_spy):
+            result = await client.get_order_history()
+        assert not result.success
+        assert "FQ-123" in result.error
+
+    async def test_get_order_history_address_lookup_failure(self, client):
+        """A signer that raises when address is read surfaces Result.fail."""
+
+        class BrokenAccount:
+            @property
+            def address(self):
+                raise RuntimeError("signer is broken")
+
+        client.account = BrokenAccount()
+        api_spy = AsyncMock(return_value={"count": 0, "rows": []})
+        with patch.object(client, "_api_call", api_spy):
+            result = await client.get_order_history()
+        assert not result.success
+        api_spy.assert_not_called()
+
+    async def test_get_order_history_invalid_pair_returns_fail(self, client):
+        """Malformed pair filter rejected before any REST call."""
+        api_spy = AsyncMock(return_value={"count": 0, "rows": []})
+        with patch.object(client, "_api_call", api_spy):
+            result = await client.get_order_history(pair="INVALID")
+        assert not result.success
+        assert "pair" in result.error
+        api_spy.assert_not_called()
+
+    async def test_get_order_history_hydrates_pairs_when_row_missing_pair_info(self, client):
+        """Row without trade_pair_id triggers a get_clob_pairs() hydration."""
+        from dexalot_sdk.utils.result import Result
+
+        client.pairs = {}
+        get_pairs_spy = AsyncMock(return_value=Result.ok([{"pair": "AVAX/USDC"}]))
+        api_spy = AsyncMock(
+            return_value={
+                "count": 1,
+                "rows": [
+                    {
+                        # No tradePairId — forces hydration
+                        "id": "0x" + "a" * 64,
+                        "pair": "AVAX/USDC",
+                        "price": "1",
+                        "quantity": "1",
+                        "side": 0,
+                        "type1": 1,
+                        "type2": 0,
+                        "status": 3,
+                        "createBlock": 1,
+                        "updateBlock": 2,
+                    }
+                ],
+            }
+        )
+        with patch.object(client, "_api_call", api_spy):
+            with patch.object(client, "get_clob_pairs", get_pairs_spy):
+                result = await client.get_order_history()
+        assert result.success
+        assert len(result.data) == 1
+        get_pairs_spy.assert_awaited_once()
+
+    async def test_get_order_history_pair_hydration_failure_propagates(self, client):
+        """If hydration of pairs fails, error is propagated."""
+        from dexalot_sdk.utils.result import Result
+
+        client.pairs = {}
+        get_pairs_spy = AsyncMock(return_value=Result.fail("pair fetch down"))
+        api_spy = AsyncMock(
+            return_value={
+                "count": 1,
+                "rows": [
+                    {
+                        # No tradePairId — forces hydration
+                        "id": "0x" + "a" * 64,
+                        "price": "1",
+                        "quantity": "1",
+                        "side": 0,
+                        "type1": 1,
+                        "type2": 0,
+                        "status": 3,
+                        "createBlock": 1,
+                        "updateBlock": 2,
+                    }
+                ],
+            }
+        )
+        with patch.object(client, "_api_call", api_spy):
+            with patch.object(client, "get_clob_pairs", get_pairs_spy):
+                result = await client.get_order_history()
+        assert not result.success
+        assert "pair fetch down" in result.error
+
+    async def test_get_order_history_caches_per_address_and_opts(self, client):
+        """Cache key includes (address, all opts); distinct combos do not collide."""
+        client._cache_enabled = True
+        api_spy = AsyncMock(return_value={"count": 0, "rows": []})
+        with patch.object(client, "_api_call", api_spy):
+            await client.get_order_history()
+            await client.get_order_history()  # cache hit (same addr + opts)
+            await client.get_order_history(pair="AVAX/USDC")  # distinct slot
+            await client.get_order_history(status="FILLED")  # distinct slot
+            await client.get_order_history(limit=50)  # distinct slot
+            await client.get_order_history(offset=10)  # distinct slot
+            # Change address → distinct slot
+            other_addr = "0x" + "e" * 40
+            await client.get_order_history(other_addr)
+        assert api_spy.await_count == 6
+
+    async def test_get_order_history_cache_bypass_when_disabled(self, client):
+        """When _cache_enabled is False every call hits REST."""
+        client._cache_enabled = False
+        api_spy = AsyncMock(return_value={"count": 0, "rows": []})
+        with patch.object(client, "_api_call", api_spy):
+            await client.get_order_history()
+            await client.get_order_history()
+        assert api_spy.await_count == 2
+
     async def test_cancel_all_orders(self, client):
         """Test cancel_all_orders."""
         # Mock get_open_orders

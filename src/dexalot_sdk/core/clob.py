@@ -7,6 +7,7 @@ from ..constants import (
     ENDPOINT_STATS_MARKET_SNAPSHOT,
     ENDPOINT_TRADING_CANDLE_CHUNK,
     ENDPOINT_TRADING_PAIRS,
+    ENDPOINT_TRADING_SIGNED_ORDERS_HISTORY,
     ENV_FUJI_MULTI_SUBNET,
     ENV_PROD_MULTI_SUBNET,
     ws_api_url_for_rest_base,
@@ -22,7 +23,7 @@ from ..utils.observability import track_method
 from ..utils.result import Result
 from ..utils.retry import async_retry
 from ..utils.websocket_manager import WebSocketManager
-from .base import _ORDERBOOK_CACHE, _SEMI_STATIC_CACHE, DexalotBaseClient
+from .base import _BALANCE_CACHE, _ORDERBOOK_CACHE, _SEMI_STATIC_CACHE, DexalotBaseClient
 
 _CANDLE_INTERVALS: dict[str, tuple[int, str]] = {
     "1m": (1, "minute"),
@@ -1108,6 +1109,155 @@ class CLOBClient(DexalotBaseClient):
         except Exception as e:
             error_msg = self._sanitize_error(e, "fetching open orders")
             return Result.fail(error_msg)
+
+    @track_method("clob")
+    async def get_order_history(
+        self,
+        account: str | None = None,
+        *,
+        pair: str | None = None,
+        status: str | None = None,
+        limit: int = 100,
+        offset: int = 0,
+    ) -> Result[list]:
+        """Paginated per-account order history (any status: ``NEW``,
+        ``REJECTED``, ``PARTIAL``, ``FILLED``, ``CANCELED``, ``EXPIRED``,
+        ``KILLED``).
+
+        Returns canonical order dicts in the same shape as
+        :meth:`get_open_orders` — rows pass through the shared
+        :meth:`_transform_order_from_api` helper so callers can mix the
+        two result sets without re-normalising.
+
+        Routes through the signed REST endpoint
+        ``/api/trading/signed/orders`` (distinct from ``get_open_orders``'
+        ``/privapi/signed/orders`` which only returns currently-open
+        rows).  The trade-kit's ``clob_get_orders_by_account`` tool calls
+        the same endpoint via ``signedGet("orders", ...)`` and provided
+        the empirical verification for the path + query shape used here.
+
+        Cached for 10 seconds (balance tier) per ``(address, opts)``
+        tuple.  The resolved address is either the explicit ``account``
+        argument or the connected wallet address; distinct addresses
+        and distinct filter combinations never share a cache slot.
+
+        When no wallet is configured AND no explicit ``account`` is
+        passed, returns ``Result.fail`` — the call has no addressee.
+        When a wallet IS configured, the ``x-signature`` header is
+        attached via the shared :meth:`_get_auth_headers` helper; when
+        only an explicit account is supplied (no signer), the auth
+        header is omitted and the backend may reject — this lets
+        read-only callers query by address without forcing a key,
+        mirroring the SDK's general read-only ergonomics.
+
+        Args:
+            account: Optional trader address; defaults to the connected
+                wallet's address.  At least one must be available.
+            pair: Optional pair filter, e.g. ``"AVAX/USDC"``.
+            status: Optional status filter (one of ``"NEW"``,
+                ``"REJECTED"``, ``"PARTIAL"``, ``"FILLED"``,
+                ``"CANCELED"``, ``"EXPIRED"``, ``"KILLED"``); any other
+                string is forwarded verbatim for forward-compat.
+            limit: Page size (default 100).
+            offset: Row offset (default 0).
+        """
+        if account is not None:
+            address = account
+        elif self.account:
+            try:
+                address = cast(str, cast(Any, self.account).address)
+            except Exception as e:
+                return Result.fail(self._sanitize_error(e, "resolving wallet address"))
+        else:
+            return Result.fail(
+                "get_order_history requires either an account argument or a configured wallet"
+            )
+
+        if pair is not None:
+            pair_result = validate_pair_format(pair, "pair")
+            if not pair_result.success:
+                return cast(Result[list[Any]], pair_result)
+            pair = self._normalize_user_pair(pair)
+
+        return cast(
+            Result[list],
+            await self._get_order_history_cached(address, pair, status, limit, offset),
+        )
+
+    @async_ttl_cached(_BALANCE_CACHE)
+    async def _get_order_history_cached(
+        self,
+        address: str,
+        pair: str | None,
+        status: str | None,
+        limit: int,
+        offset: int,
+    ) -> Result[list]:
+        """Internal cached implementation of :meth:`get_order_history`.
+
+        Cache key is namespaced by resolved address so signer swaps within
+        a single client never collide on the same slot, and by every opt
+        so different filter combinations are distinct.
+        """
+        headers: dict[str, str] = {}
+        if self.account:
+            try:
+                headers = self._get_auth_headers()
+            except Exception as e:
+                return Result.fail(self._sanitize_error(e, "fetching order history"))
+
+        params: dict[str, Any] = {
+            "traderaddress": address,
+            "limit": limit,
+            "offset": offset,
+        }
+        if pair is not None:
+            params["pair"] = pair
+        if status is not None:
+            params["status"] = status
+
+        try:
+            data = await self._api_call(
+                "get",
+                f"{self.api_base_url}{ENDPOINT_TRADING_SIGNED_ORDERS_HISTORY}",
+                headers=headers,
+                params=params,
+            )
+        except Exception as e:
+            return Result.fail(self._sanitize_error(e, "fetching order history"))
+
+        # Backend ships either a bare list or ``{count, rows}``; we
+        # tolerate both, and additionally wrap a single non-list dict
+        # response as a one-row result for forward-compat parity with
+        # ``get_open_orders``.
+        orders: list[Any]
+        if isinstance(data, list):
+            orders = data
+        elif isinstance(data, dict):
+            envelope_rows = data.get("rows")
+            if isinstance(envelope_rows, list):
+                orders = envelope_rows
+            else:
+                orders = [data]
+        else:
+            return Result.fail(
+                "Unexpected order history response shape: expected object or array, "
+                f"got {type(data).__name__}."
+            )
+
+        # If any row is missing pair info, hydrate the pairs cache so
+        # :meth:`_resolve_pair_from_order` / :meth:`_resolve_trade_pair_id_from_pair`
+        # can fill the canonical fields.  Mirrors ``get_open_orders``.
+        if orders and any(
+            (o.get("trade_pair_id") or o.get("tradePairId") or o.get("tradepairid")) is None
+            for o in orders
+        ):
+            pairs_result = await self.get_clob_pairs()
+            if not pairs_result.success:
+                return Result.fail(pairs_result.error or "failed to hydrate pairs")
+
+        transformed = [self._transform_order_from_api(order) for order in orders]
+        return Result.ok(transformed)
 
     @track_method("clob")
     async def get_order(self, order_id: str | bytes) -> Result[dict]:
