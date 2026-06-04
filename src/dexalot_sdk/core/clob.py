@@ -1,5 +1,7 @@
 import asyncio
+import logging
 from collections.abc import Callable
+from decimal import ROUND_DOWN, ROUND_HALF_EVEN, Decimal
 from typing import Any, SupportsInt, cast
 
 from ..constants import (
@@ -24,6 +26,8 @@ from ..utils.result import Result
 from ..utils.retry import async_retry
 from ..utils.websocket_manager import WebSocketManager
 from .base import _BALANCE_CACHE, _ORDERBOOK_CACHE, _SEMI_STATIC_CACHE, DexalotBaseClient
+
+_logger = logging.getLogger("dexalot_sdk")
 
 _CANDLE_INTERVALS: dict[str, tuple[int, str]] = {
     "1m": (1, "minute"),
@@ -166,23 +170,43 @@ class CLOBClient(DexalotBaseClient):
             return Result.fail(error_msg)
 
     def _store_clob_pairs(self, transformed_data: list[dict[str, Any]]) -> list[dict[str, Any]]:
-        """Normalize pair metadata into both list and keyed lookup forms."""
+        """Normalize pair metadata into both list and keyed lookup forms.
+
+        Pairs whose API record omits ``base_display_decimals`` or
+        ``quote_display_decimals`` are dropped with a warning. Display
+        decimals are contractual — silently defaulting them would mask
+        contract rejections (T-TMDQ-01) downstream.
+        """
         pair_map: dict[str, dict[str, Any]] = {}
         for item in transformed_data:
             if item.get("env") not in [ENV_PROD_MULTI_SUBNET, ENV_FUJI_MULTI_SUBNET]:
                 continue
 
             pair_name = item["pair"]
+            base_disp = item.get("base_display_decimals")
+            quote_disp = item.get("quote_display_decimals")
+            if base_disp is None or quote_disp is None:
+                _logger.warning(
+                    "Dropping pair %s: missing display decimals "
+                    "(base_display_decimals=%r, quote_display_decimals=%r). "
+                    "Pair will not be available for order placement.",
+                    pair_name,
+                    base_disp,
+                    quote_disp,
+                )
+                continue
+            # min/max trade amounts are quote-token notional bounds; store as
+            # Decimal so we can compare against Decimal price*amount exactly.
             pair_map[pair_name] = {
                 "pair": pair_name,
                 "base": item["base"],
                 "quote": item["quote"],
                 "base_decimals": item.get("base_decimals"),
                 "quote_decimals": item.get("quote_decimals"),
-                "base_display_decimals": item.get("base_display_decimals", 18),
-                "quote_display_decimals": item.get("quote_display_decimals", 18),
-                "min_trade_amount": float(item.get("min_trade_amount", 0)),
-                "max_trade_amount": float(item.get("max_trade_amount", 0)),
+                "base_display_decimals": base_disp,
+                "quote_display_decimals": quote_disp,
+                "min_trade_amount": Decimal(str(item.get("min_trade_amount", 0))),
+                "max_trade_amount": Decimal(str(item.get("max_trade_amount", 0))),
                 "tradePairId": Utils.to_bytes32(pair_name),
             }
 
@@ -481,11 +505,13 @@ class CLOBClient(DexalotBaseClient):
             if validation_error is not None:
                 return cast(Result[dict[Any, Any]], validation_error)
 
-            # Rounding to display decimals
-            if "quote_display_decimals" in pair_data and price:
-                price = round(price, pair_data["quote_display_decimals"])
-            if "base_display_decimals" in pair_data:
-                amount = round(amount, pair_data["base_display_decimals"])
+            # Validate precision against the pair's display decimals.
+            # Inputs with extra precision are rejected (no silent slippage).
+            norm_res = self._normalize_order_amounts(price, amount, pair_data)
+            if not norm_res.success:
+                return cast(Result[dict[Any, Any]], norm_res)
+            assert norm_res.data is not None
+            price, amount = norm_res.data  # type: ignore[assignment]
 
             # Portfolio Balance Check
             required_token = pair_data["quote"] if side_enum == 0 else pair_data["base"]
@@ -495,9 +521,9 @@ class CLOBClient(DexalotBaseClient):
             if balance_error is not None:
                 return cast(Result[dict[Any, Any]], balance_error)
 
-            # Decimals
-            price_wei = int(price * (10 ** pair_data["quote_decimals"])) if price else 0
-            qty_wei = int(amount * (10 ** pair_data["base_decimals"]))
+            # Decimals (Decimal-backed; never multiply floats by 10**N here)
+            price_wei = self._to_wei(price, pair_data["quote_decimals"]) if price else 0
+            qty_wei = self._to_wei(amount, pair_data["base_decimals"])
 
             # Use caller-provided client_order_id or generate a random one
             import secrets
@@ -1475,24 +1501,161 @@ class CLOBClient(DexalotBaseClient):
             )
         return None
 
-    def _normalize_order_amounts(self, price, amount, pair_data):
-        """Normalize price and amount based on display decimals."""
+    @staticmethod
+    def _to_decimal(value: Any) -> Decimal:
+        """Coerce a numeric value (int, float, str, Decimal) to Decimal exactly.
+
+        Floats route through ``str(value)`` so the user's intended decimal
+        representation is preserved (``str(0.1) == "0.1"``).
+        """
+        if isinstance(value, Decimal):
+            return value
+        return Decimal(str(value))
+
+    @staticmethod
+    def _quantize_to_display(value: Any, display_decimals: int) -> Decimal:
+        """Truncate ``value`` to ``display_decimals`` fractional digits (ROUND_DOWN).
+
+        Truncation (never rounding up) ensures the SDK never submits an order
+        that exceeds the user's typed amount or notional. Used by callers that
+        have already validated precision; see :meth:`_check_display_precision`
+        for the precision gate used by the public order-placement paths.
+        """
+        d = CLOBClient._to_decimal(value)
+        quantum = Decimal(10) ** -display_decimals
+        return d.quantize(quantum, rounding=ROUND_DOWN)
+
+    # Tolerance for float-noise residuals when checking display-decimal
+    # precision. Genuine binary-float noise from operations like 0.1 + 0.2
+    # produces residuals on the order of 1e-17; human-typed extra precision
+    # produces residuals >= 1e-6. 1e-10 sits in the gap with margin.
+    _DISPLAY_PRECISION_TOLERANCE = Decimal("1e-10")
+
+    @staticmethod
+    def _check_display_precision(
+        value: Any, display_decimals: int, param_name: str
+    ) -> "Result[Decimal]":
+        """Validate that ``value`` fits in ``display_decimals`` fractional digits.
+
+        Returns ``Result.ok(quantized)`` if the input is at display precision
+        (or differs from it only by float-representation noise — see
+        :attr:`_DISPLAY_PRECISION_TOLERANCE`). Returns ``Result.fail(msg)``
+        when the input has genuinely more decimals than the pair allows;
+        callers must round explicitly rather than have the SDK silently
+        truncate and slip the order.
+        """
+        d = CLOBClient._to_decimal(value)
+        if d == 0:
+            return Result.ok(d)
+        quantum = Decimal(10) ** -display_decimals
+        nearest = d.quantize(quantum, rounding=ROUND_HALF_EVEN)
+        if abs(d - nearest) > CLOBClient._DISPLAY_PRECISION_TOLERANCE:
+            return Result.fail(
+                f"Invalid {param_name}: {value} has more than {display_decimals} "
+                f"decimals; pair allows {display_decimals}. Round before passing "
+                f"(e.g. Decimal('{nearest}'))."
+            )
+        return Result.ok(nearest)
+
+    @staticmethod
+    def _check_trade_amount_bounds(
+        price: Decimal | None, amount: Decimal, pair_data: dict
+    ) -> "Result[None]":
+        """Enforce the pair's min/max trade-amount bounds (quote-token notional).
+
+        Computes ``notional = price * amount`` and rejects orders outside
+        ``[min_trade_amount, max_trade_amount]``. A bound of ``0`` is treated
+        as "no bound" (some pairs omit the cap).
+
+        Skipped entirely when ``price`` is ``None`` (market orders without
+        a price; the contract enforces its own protections for those).
+        """
+        if price is None:
+            return Result.ok(None)
+        notional = price * amount
+        min_amt = pair_data.get("min_trade_amount", Decimal(0))
+        max_amt = pair_data.get("max_trade_amount", Decimal(0))
+        if min_amt > 0 and notional < min_amt:
+            return Result.fail(
+                f"Trade notional {notional} below min_trade_amount {min_amt} "
+                f"(quote-token) for pair {pair_data.get('pair')}."
+            )
+        if max_amt > 0 and notional > max_amt:
+            return Result.fail(
+                f"Trade notional {notional} above max_trade_amount {max_amt} "
+                f"(quote-token) for pair {pair_data.get('pair')}."
+            )
+        return Result.ok(None)
+
+    def _normalize_order_amounts(
+        self, price: Any, amount: Any, pair_data: dict
+    ) -> "Result[tuple[Decimal | None, Decimal]]":
+        """Validate and quantize price/amount against the pair's display decimals
+        and min/max trade-amount bounds.
+
+        Inputs whose precision exceeds the pair's display decimals are
+        rejected — the SDK does not silently round, because that would
+        silently slip orders (e.g. a stop at 99.99 quietly becoming 99.9).
+        Float-representation noise (residual <= 1e-10) is tolerated and
+        snapped to the nearest displayable value.
+
+        After display-decimal validation, the resulting notional
+        (``price * amount``) is checked against the pair's
+        ``min_trade_amount`` / ``max_trade_amount`` bounds (quote-token
+        denominated) so the SDK fails fast instead of waiting for the
+        contract to reject.
+
+        Returns ``Result.ok((price, amount))`` as Decimals, or
+        ``Result.fail(...)`` describing which check failed.
+        """
         if "quote_display_decimals" in pair_data and price:
-            price = round(price, pair_data["quote_display_decimals"])
+            price_res = self._check_display_precision(
+                price, pair_data["quote_display_decimals"], "price"
+            )
+            if not price_res.success:
+                return cast("Result[tuple[Decimal | None, Decimal]]", price_res)
+            price = price_res.data
         if "base_display_decimals" in pair_data:
-            amount = round(amount, pair_data["base_display_decimals"])
-        return price, amount
+            amount_res = self._check_display_precision(
+                amount, pair_data["base_display_decimals"], "amount"
+            )
+            if not amount_res.success:
+                return cast("Result[tuple[Decimal | None, Decimal]]", amount_res)
+            amount = amount_res.data
+        bounds_res = self._check_trade_amount_bounds(price, amount, pair_data)
+        if not bounds_res.success:
+            return cast("Result[tuple[Decimal | None, Decimal]]", bounds_res)
+        return Result.ok((price, amount))
+
+    @staticmethod
+    def _to_wei(value: Any, decimals: int) -> int:
+        """Precision-safe conversion of a human-readable amount to integer wei.
+
+        Routes through :meth:`Utils.unit_conversion`, which performs
+        ``int(Decimal(str(value)) * Decimal(10)**decimals)``. Never multiply
+        floats by ``10**N`` in write paths.
+        """
+        return cast(int, Utils.unit_conversion(value, decimals, to_base=True))
 
     def _build_order_tuple(
         self, order, pair_data, side_enum, w3, client_order_id_bytes: bytes | None = None
-    ):
-        """Build order tuple for contract call."""
+    ) -> Result[tuple]:
+        """Build order tuple for contract call.
+
+        Returns ``Result.ok((order_tuple, client_order_id_hex))`` or
+        ``Result.fail(msg)`` when price/amount precision exceeds the pair's
+        display decimals.
+        """
         import secrets
 
-        price, amount = self._normalize_order_amounts(order["price"], order["amount"], pair_data)
+        norm_res = self._normalize_order_amounts(order["price"], order["amount"], pair_data)
+        if not norm_res.success:
+            return cast(Result[tuple], norm_res)
+        assert norm_res.data is not None
+        price, amount = norm_res.data
 
-        price_wei = int(price * (10 ** pair_data["quote_decimals"]))
-        qty_wei = int(amount * (10 ** pair_data["base_decimals"]))
+        price_wei = self._to_wei(price, pair_data["quote_decimals"])
+        qty_wei = self._to_wei(amount, pair_data["base_decimals"])
         if client_order_id_bytes is None:
             client_order_id_bytes = secrets.token_bytes(32)
         client_order_id_hex = "0x" + client_order_id_bytes.hex()
@@ -1512,7 +1675,7 @@ class CLOBClient(DexalotBaseClient):
             0,  # STP
         )
 
-        return order_tuple, client_order_id_hex
+        return Result.ok((order_tuple, client_order_id_hex))
 
     async def _check_balance_for_token(self, token, req_amt):
         """Check if sufficient balance exists for a token.
@@ -1578,9 +1741,13 @@ class CLOBClient(DexalotBaseClient):
                     return None, None, None, cid_result.error or "Invalid client_order_id"
                 cid_bytes = self._get_order_id_bytes(raw_cid)
 
-            order_tuple, client_order_id_hex = self._build_order_tuple(
+            build_res = self._build_order_tuple(
                 order, pair_data, side_enum, w3, client_order_id_bytes=cid_bytes
             )
+            if not build_res.success:
+                return None, None, None, build_res.error or "Order build failed"
+            assert build_res.data is not None
+            order_tuple, client_order_id_hex = build_res.data
             order_tuples.append(order_tuple)
             client_order_ids.append(client_order_id_hex)
 
@@ -1762,8 +1929,16 @@ class CLOBClient(DexalotBaseClient):
 
             pair_data = self.pairs[pair_name]
 
-            price_wei = int(new_price * (10 ** pair_data["quote_decimals"]))
-            qty_wei = int(new_amount * (10 ** pair_data["base_decimals"]))
+            # Validate precision against the pair's display decimals before
+            # encoding. The other write paths do the same — replace_order
+            # previously skipped this and let the contract reject the order.
+            norm_res = self._normalize_order_amounts(new_price, new_amount, pair_data)
+            if not norm_res.success:
+                return cast(Result[dict], norm_res)
+            assert norm_res.data is not None
+            new_price, new_amount = norm_res.data  # type: ignore[assignment]
+            price_wei = self._to_wei(new_price, pair_data["quote_decimals"])
+            qty_wei = self._to_wei(new_amount, pair_data["base_decimals"])
 
             import secrets
 
@@ -1957,11 +2132,11 @@ class CLOBClient(DexalotBaseClient):
 
         required_balances[req_token] = required_balances.get(req_token, 0) + req_amt
 
-        price, amount = rep["price"], rep["amount"]
-        if "quote_display_decimals" in pair_data and price:
-            price = round(price, pair_data["quote_display_decimals"])
-        if "base_display_decimals" in pair_data:
-            amount = round(amount, pair_data["base_display_decimals"])
+        norm_res = self._normalize_order_amounts(rep["price"], rep["amount"], pair_data)
+        if not norm_res.success:
+            return cast(Result[dict], norm_res)
+        assert norm_res.data is not None
+        price, amount = norm_res.data
 
         if raw_cid := rep.get("client_order_id"):
             cid_result = validate_order_id_format(raw_cid, "client_order_id")
@@ -1974,8 +2149,8 @@ class CLOBClient(DexalotBaseClient):
         new_order_tuple = (
             client_order_id,
             pair_data["tradePairId"],
-            int(price * (10 ** pair_data["quote_decimals"])),
-            int(amount * (10 ** pair_data["base_decimals"])),
+            self._to_wei(price, pair_data["quote_decimals"]),
+            self._to_wei(amount, pair_data["base_decimals"]),
             from_addr,
             side_enum,
             1,  # LIMIT
