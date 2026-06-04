@@ -1948,9 +1948,7 @@ class TransferClient(DexalotBaseClient):
 
         No authentication required (public endpoint).
         """
-        return await self._fetch_price_history(
-            ENDPOINT_INFO_PRICE_HISTORY, token, from_ts, to_ts
-        )
+        return await self._fetch_price_history(ENDPOINT_INFO_PRICE_HISTORY, token, from_ts, to_ts)
 
     @track_method("transfer")
     async def get_token_hourly_price_history(

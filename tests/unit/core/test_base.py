@@ -2783,7 +2783,9 @@ class TestDexalotBaseClient:
         """When reasonCode is set but reason is missing, fall back to a generic tail."""
         cm = self._http_error_response(500, {"reasonCode": "P-OK01"})
         with patch.object(client, "_make_http_request", AsyncMock(return_value=cm)):
-            with pytest.raises(RuntimeError, match=r"^P-OK01: Request failed with status code 500$"):
+            with pytest.raises(
+                RuntimeError, match=r"^P-OK01: Request failed with status code 500$"
+            ):
                 await client._api_call("get", "https://api/x")
 
     async def test_api_call_reason_alone_without_reason_code(self, client):

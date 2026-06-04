@@ -1209,9 +1209,7 @@ class TestCLOBClient:
 
     async def test_get_order_history_envelope_returns_canonical_orders(self, client):
         """``{count, rows}`` envelope parsed; each row normalized to canonical Order."""
-        api_spy = AsyncMock(
-            return_value={"count": 1, "rows": [self._make_api_order_row()]}
-        )
+        api_spy = AsyncMock(return_value={"count": 1, "rows": [self._make_api_order_row()]})
         with patch.object(client, "_api_call", api_spy):
             result = await client.get_order_history()
         assert result.success
@@ -1302,9 +1300,7 @@ class TestCLOBClient:
         """pair / status / limit / offset all forwarded as query params."""
         api_spy = AsyncMock(return_value={"count": 0, "rows": []})
         with patch.object(client, "_api_call", api_spy):
-            await client.get_order_history(
-                pair="AVAX/USDC", status="FILLED", limit=25, offset=50
-            )
+            await client.get_order_history(pair="AVAX/USDC", status="FILLED", limit=25, offset=50)
         _, kwargs = api_spy.call_args
         params = kwargs["params"]
         assert params["traderaddress"] == VALID_ADDRESS
@@ -1335,9 +1331,7 @@ class TestCLOBClient:
         """x-signature header attached via _get_auth_headers when a signer exists."""
         api_spy = AsyncMock(return_value={"count": 0, "rows": []})
         with patch.object(client, "_api_call", api_spy):
-            with patch.object(
-                client, "_get_auth_headers", return_value={"x-signature": "sig"}
-            ):
+            with patch.object(client, "_get_auth_headers", return_value={"x-signature": "sig"}):
                 await client.get_order_history()
         _, kwargs = api_spy.call_args
         assert kwargs["headers"] == {"x-signature": "sig"}

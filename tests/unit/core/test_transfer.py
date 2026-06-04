@@ -2595,9 +2595,7 @@ class TestTransferClient:
         assert result.success
         assert isinstance(result.data[0], PricePoint)
         # Ascending by timestamp
-        assert [p.timestamp for p in result.data] == sorted(
-            p.timestamp for p in result.data
-        )
+        assert [p.timestamp for p in result.data] == sorted(p.timestamp for p in result.data)
         assert result.data[0].price == 8.25
         assert result.data[-1].price == 10.5
 
@@ -2624,9 +2622,7 @@ class TestTransferClient:
         """``from_ts``/``to_ts`` forwarded as ``from``/``to`` query params."""
         api_spy = AsyncMock(return_value=[])
         with patch.object(client, "_api_call", api_spy):
-            await client.get_token_price_history(
-                "ALOT", from_ts=1700000000, to_ts=1700864000
-            )
+            await client.get_token_price_history("ALOT", from_ts=1700000000, to_ts=1700864000)
         _, kwargs = api_spy.call_args
         assert kwargs["params"] == {
             "token": "ALOT",
@@ -3014,9 +3010,7 @@ class TestTransferClient:
         """kind → symbol; from_ts → periodfrom; to_ts → periodto."""
         api_spy = AsyncMock(return_value={"count": 0, "rows": []})
         with patch.object(client, "_api_call", api_spy):
-            await client.get_combined_transfers(
-                kind="ALOT", from_ts=1700000000, to_ts=1700864000
-            )
+            await client.get_combined_transfers(kind="ALOT", from_ts=1700000000, to_ts=1700864000)
         _, kwargs = api_spy.call_args
         assert kwargs["params"]["symbol"] == "ALOT"
         assert kwargs["params"]["periodfrom"] == 1700000000
@@ -3026,9 +3020,7 @@ class TestTransferClient:
         """``x-signature`` header attached via _get_auth_headers."""
         api_spy = AsyncMock(return_value={"count": 0, "rows": []})
         with patch.object(client, "_api_call", api_spy):
-            with patch.object(
-                client, "_get_auth_headers", return_value={"x-signature": "sig"}
-            ):
+            with patch.object(client, "_get_auth_headers", return_value={"x-signature": "sig"}):
                 await client.get_combined_transfers()
         _, kwargs = api_spy.call_args
         assert kwargs["headers"] == {"x-signature": "sig"}
@@ -3089,9 +3081,7 @@ class TestTransferClient:
     async def test_get_combined_transfers_normalizes_user_symbol(self, client):
         """``kind`` is run through _normalize_user_token before being forwarded."""
         api_spy = AsyncMock(return_value={"count": 0, "rows": []})
-        with patch.object(
-            client, "_normalize_user_token", return_value="USDC"
-        ) as norm_spy:
+        with patch.object(client, "_normalize_user_token", return_value="USDC") as norm_spy:
             with patch.object(client, "_api_call", api_spy):
                 await client.get_combined_transfers(kind="usdc")
         norm_spy.assert_called_once_with("usdc")
