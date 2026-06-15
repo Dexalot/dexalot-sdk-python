@@ -3048,14 +3048,17 @@ class TestTransferClient:
         assert kwargs["params"]["pageno"] == 3
 
     async def test_get_combined_transfers_forwards_symbol_and_period(self, client):
-        """symbol → symbol; from_ts → periodfrom; to_ts → periodto."""
+        """symbol → symbol; from_ts → periodfrom; to_ts → periodto (ISO-8601)."""
         api_spy = AsyncMock(return_value={"count": 0, "rows": []})
         with patch.object(client, "_api_call", api_spy):
             await client.get_combined_transfers(symbol="ALOT", from_ts=1700000000, to_ts=1700864000)
         _, kwargs = api_spy.call_args
         assert kwargs["params"]["symbol"] == "ALOT"
-        assert kwargs["params"]["periodfrom"] == 1700000000
-        assert kwargs["params"]["periodto"] == 1700864000
+        # from_ts/to_ts (unix seconds) are converted to ISO-8601 strings — the
+        # backend's periodfrom/periodto reject raw unix integers with
+        # "ISO Date format problem".
+        assert kwargs["params"]["periodfrom"] == "2023-11-14T22:13:20.000Z"
+        assert kwargs["params"]["periodto"] == "2023-11-24T22:13:20.000Z"
 
     async def test_get_combined_transfers_attaches_signature_header(self, client):
         """``x-signature`` header attached via _get_auth_headers."""

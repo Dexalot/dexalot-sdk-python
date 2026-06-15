@@ -1,7 +1,7 @@
 import asyncio
 import math
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import Any, Literal, cast
 
 from ..constants import (
@@ -2232,6 +2232,21 @@ class TransferClient(DexalotBaseClient):
             ),
         )
 
+    @staticmethod
+    def _unix_seconds_to_iso(ts: int) -> str:
+        """Convert unix seconds to an ISO-8601 string (e.g. ``2026-05-01T00:00:00.000Z``).
+
+        The combined-transfers backend rejects raw unix integers for
+        ``periodfrom``/``periodto`` with "Malformed Request! ISO Date format
+        problem"; they must be ISO-8601. Matches the TypeScript SDK's
+        ``new Date(ts * 1000).toISOString()`` output byte-for-byte.
+        """
+        return (
+            datetime.fromtimestamp(ts, tz=UTC)
+            .isoformat(timespec="milliseconds")
+            .replace("+00:00", "Z")
+        )
+
     @async_ttl_cached(_BALANCE_CACHE)
     async def _get_combined_transfers_cached(
         self,
@@ -2259,10 +2274,14 @@ class TransferClient(DexalotBaseClient):
         }
         if symbol is not None:
             params["symbol"] = symbol
+        # The backend's periodfrom/periodto expect ISO-8601 date strings, not
+        # unix seconds — forwarding the raw integers makes the endpoint reject
+        # the request ("Malformed Request! ISO Date format problem"). Convert
+        # the ergonomic unix-seconds inputs to ISO-8601 here.
         if period_from is not None:
-            params["periodfrom"] = period_from
+            params["periodfrom"] = self._unix_seconds_to_iso(period_from)
         if period_to is not None:
-            params["periodto"] = period_to
+            params["periodto"] = self._unix_seconds_to_iso(period_to)
 
         try:
             data = await self._api_call(
