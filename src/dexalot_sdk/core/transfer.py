@@ -95,10 +95,11 @@ class Transfer:
     source_chain_id: int
     source_tx: str
     source_ts: int
-    target_env: str
-    target_chain_id: int
-    target_tx: str
-    target_ts: int
+    # ``target_*`` is ``None`` for non-crossing transfers (no target leg).
+    target_env: str | None
+    target_chain_id: int | None
+    target_tx: str | None
+    target_ts: int | None
 
 
 # Numeric enum → human-readable label lookup tables for the
@@ -2122,19 +2123,19 @@ class TransferClient(DexalotBaseClient):
         source_ts = self._coerce_timestamp_seconds(raw.get("source_ts")) or 0
 
         target_env_raw = raw.get("target_env")
-        target_env = target_env_raw if isinstance(target_env_raw, str) else ""
+        target_env = target_env_raw if isinstance(target_env_raw, str) else None
 
         target_chain_id_raw = raw.get("target_chain_id")
         target_chain_id = (
             target_chain_id_raw
             if isinstance(target_chain_id_raw, int) and not isinstance(target_chain_id_raw, bool)
-            else 0
+            else None
         )
 
         target_tx_raw = raw.get("target_tx")
-        target_tx = target_tx_raw if isinstance(target_tx_raw, str) else ""
+        target_tx = target_tx_raw if isinstance(target_tx_raw, str) else None
 
-        target_ts = self._coerce_timestamp_seconds(raw.get("target_ts")) or 0
+        target_ts = self._coerce_timestamp_seconds(raw.get("target_ts"))
 
         return Transfer(
             action_type=action_type,
@@ -2160,7 +2161,7 @@ class TransferClient(DexalotBaseClient):
     async def get_combined_transfers(
         self,
         *,
-        kind: str | None = None,
+        symbol: str | None = None,
         from_ts: int | None = None,
         to_ts: int | None = None,
         limit: int = 100,
@@ -2183,14 +2184,14 @@ class TransferClient(DexalotBaseClient):
         (``pageno = (offset // limit) + 1``).
 
         Cached for 10 seconds (balance tier) per
-        ``(address, kind, from_ts, to_ts, limit, offset)`` tuple —
+        ``(address, symbol, from_ts, to_ts, limit, offset)`` tuple —
         distinct signers and distinct filter combinations never share a
         cache slot.  Returned ``quantity`` / ``fee`` are already display-
         decimal — no wei→human conversion is applied because the backend
         has already done it.
 
         Args:
-            kind: Optional token symbol filter (forwarded to backend as
+            symbol: Optional token symbol filter (forwarded to backend as
                 ``symbol``).  Normalised through :meth:`_normalize_user_token`.
             from_ts: Optional unix-seconds lower bound (forwarded as
                 ``periodfrom``).
@@ -2209,8 +2210,8 @@ class TransferClient(DexalotBaseClient):
             return Result.fail(self._sanitize_error(e, "resolving wallet address"))
 
         normalized_symbol: str | None = None
-        if kind is not None:
-            normalized_symbol = self._normalize_user_token(kind)
+        if symbol is not None:
+            normalized_symbol = self._normalize_user_token(symbol)
 
         # Translate (limit, offset) → (itemsperpage, pageno).  The backend
         # uses 1-indexed pages; offset 0 → page 1.  Defensive ``max(1, ...)``

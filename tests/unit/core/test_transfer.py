@@ -2816,6 +2816,47 @@ class TestTransferClient:
         assert t.source_chain_id == 43113
         assert t.target_chain_id == 12345
 
+    async def test_get_combined_transfers_null_target_legs(self, client):
+        """A non-crossing row (omitted/null target_* fields) yields None legs."""
+        api_spy = AsyncMock(
+            return_value={
+                "count": 1,
+                "rows": [
+                    {
+                        "action_type": 1,
+                        "status": 0,
+                        "symbol": "USDC",
+                        "quantity": "100.5",
+                        "fee": "0.25",
+                        "traderaddress": VALID_ADDRESS,
+                        "bridge": 2,
+                        "bridge_url": "https://bridge.example/x",
+                        "nonce": 7,
+                        "source_env": "fuji-multi-avax",
+                        "source_chain_id": 43113,
+                        "source_tx": "0xabc",
+                        "source_ts": 1700000000,
+                        # target_* intentionally omitted / null
+                        "target_env": None,
+                        "target_chain_id": None,
+                        "target_tx": None,
+                        "target_ts": None,
+                    }
+                ],
+            }
+        )
+        with patch.object(client, "_api_call", api_spy):
+            result = await client.get_combined_transfers()
+        assert result.success
+        assert len(result.data) == 1
+        t = result.data[0]
+        assert t.target_env is None
+        assert t.target_chain_id is None
+        assert t.target_tx is None
+        assert t.target_ts is None
+        # source leg is still non-null
+        assert t.source_ts == 1700000000
+
     async def test_get_combined_transfers_bare_array_fallback(self, client):
         """Bare list response also accepted as forward-compat."""
         api_spy = AsyncMock(
@@ -3006,11 +3047,11 @@ class TestTransferClient:
         assert kwargs["params"]["itemsperpage"] == 50
         assert kwargs["params"]["pageno"] == 3
 
-    async def test_get_combined_transfers_forwards_kind_and_period(self, client):
-        """kind → symbol; from_ts → periodfrom; to_ts → periodto."""
+    async def test_get_combined_transfers_forwards_symbol_and_period(self, client):
+        """symbol → symbol; from_ts → periodfrom; to_ts → periodto."""
         api_spy = AsyncMock(return_value={"count": 0, "rows": []})
         with patch.object(client, "_api_call", api_spy):
-            await client.get_combined_transfers(kind="ALOT", from_ts=1700000000, to_ts=1700864000)
+            await client.get_combined_transfers(symbol="ALOT", from_ts=1700000000, to_ts=1700864000)
         _, kwargs = api_spy.call_args
         assert kwargs["params"]["symbol"] == "ALOT"
         assert kwargs["params"]["periodfrom"] == 1700000000
@@ -3060,7 +3101,7 @@ class TestTransferClient:
         with patch.object(client, "_api_call", api_spy):
             await client.get_combined_transfers()
             await client.get_combined_transfers()  # cache hit (same addr + opts)
-            await client.get_combined_transfers(kind="ALOT")  # distinct slot
+            await client.get_combined_transfers(symbol="ALOT")  # distinct slot
             await client.get_combined_transfers(limit=50)  # distinct slot
             # Change address → distinct slot
             other_addr = "0x" + "b" * 40
@@ -3079,11 +3120,11 @@ class TestTransferClient:
         assert api_spy.await_count == 2
 
     async def test_get_combined_transfers_normalizes_user_symbol(self, client):
-        """``kind`` is run through _normalize_user_token before being forwarded."""
+        """``symbol`` is run through _normalize_user_token before being forwarded."""
         api_spy = AsyncMock(return_value={"count": 0, "rows": []})
         with patch.object(client, "_normalize_user_token", return_value="USDC") as norm_spy:
             with patch.object(client, "_api_call", api_spy):
-                await client.get_combined_transfers(kind="usdc")
+                await client.get_combined_transfers(symbol="usdc")
         norm_spy.assert_called_once_with("usdc")
         _, kwargs = api_spy.call_args
         assert kwargs["params"]["symbol"] == "USDC"

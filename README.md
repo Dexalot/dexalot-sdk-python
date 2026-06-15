@@ -332,7 +332,7 @@ client.invalidate_cache(level="balance")  # Options: static, semi_static, balanc
 - `get_chain_token_balances(chain, address=None, tokens=...)`
 - `get_all_chain_wallet_balances(address=None)`
 - `get_order_history(account=None, *, pair=None, status=None, limit=100, offset=0)`
-- `get_combined_transfers(*, kind=None, from_ts=None, to_ts=None, limit=100, offset=0)`
+- `get_combined_transfers(*, symbol=None, from_ts=None, to_ts=None, limit=100, offset=0)`
 
 **Orderbook Data (1 second):**
 - `get_orderbook(pair)`
@@ -1025,7 +1025,7 @@ Orders are normalized into one canonical SDK shape regardless of whether the sou
 - Rows are returned sorted ascending by `timestamp`.
 
 **Combined Transfers API (`get_combined_transfers`):**
-- Returns `list[Transfer]` — a frozen dataclass with snake_case fields normalized from the backend's `DBTransfer` shape: `action_type`, `status`, `symbol`, `quantity`, `fee`, `trader_address`, `bridge`, `bridge_url`, `nonce`, `source_env`, `source_chain_id`, `source_tx`, `source_ts`, `target_env`, `target_chain_id`, `target_tx`, `target_ts`.
+- Returns `list[Transfer]` — a frozen dataclass with snake_case fields normalized from the backend's `DBTransfer` shape: `action_type`, `status`, `symbol`, `quantity`, `fee`, `trader_address`, `bridge`, `bridge_url`, `nonce`, `source_env`, `source_chain_id`, `source_tx`, `source_ts`, `target_env`, `target_chain_id`, `target_tx`, `target_ts`. The `target_*` fields are `None` for non-crossing transfers (no target leg).
 - Numeric enums are mapped to string `Literal` labels: `status` (`COMPLETED`/`INFLIGHT`/`DELAYED`), `action_type` (10 labels including `WITHDRAWN`/`DEPOSITED`/`SENT`/`RECEIVED`/`RECOVERED`/`ADD_GAS`/`REMOVE_GAS`/`AUTO_FILL`/`WITHDRAW_PENDING`/`DEPOSIT_PENDING`), `bridge` (`NATIVE`/`LAYER0`/`CELER`/`ICM`).
 - `quantity` and `fee` arrive as display-decimal strings — no wei→human conversion is needed (parsed via `float()`).
 
