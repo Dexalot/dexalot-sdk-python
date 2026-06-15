@@ -3146,3 +3146,16 @@ class TestTransferClient:
             result = await client.get_combined_transfers()
         assert not result.success
         api_spy.assert_not_called()
+
+
+def test_coerce_transfer_ts_parses_iso_numeric_and_rejects_junk():
+    """source_ts/target_ts arrive as ISO-8601 strings from the backend; the
+    coercer must parse those (tz-aware and naive) plus numerics, and reject junk."""
+    f = TransferClient._coerce_transfer_ts
+    assert f("2023-11-14T22:13:20.000Z") == 1700000000  # ISO, tz-aware (Z)
+    assert f("2023-11-14T22:13:20") == 1700000000  # ISO, naive -> assume UTC
+    assert f("1700000000") == 1700000000  # numeric string -> fallback coercer
+    assert f(1700000000) == 1700000000  # int -> fallback coercer
+    assert f(None) is None  # non-str -> fallback
+    assert f("") is None  # empty string -> fallback
+    assert f("not a date") is None  # unparseable -> None

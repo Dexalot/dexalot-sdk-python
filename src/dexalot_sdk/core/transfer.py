@@ -1899,6 +1899,26 @@ class TransferClient(DexalotBaseClient):
         return int(math.floor(n))
 
     @staticmethod
+    def _coerce_transfer_ts(raw: Any) -> int | None:
+        """ISO-8601 string OR numeric/numeric-string -> unix seconds (UTC), or None.
+
+        The combined-transfers backend returns source_ts/target_ts as ISO-8601
+        strings; _coerce_timestamp_seconds only handles numerics, so parse ISO
+        here first (mirrors the TS SDK's _coerceTransferTs). Falls back to the
+        numeric coercer for numeric / numeric-string inputs.
+        """
+        if isinstance(raw, str) and raw.strip():
+            try:
+                dt = datetime.fromisoformat(raw.strip().replace("Z", "+00:00"))
+            except ValueError:
+                dt = None
+            if dt is not None:
+                if dt.tzinfo is None:
+                    dt = dt.replace(tzinfo=UTC)
+                return int(dt.timestamp())
+        return TransferClient._coerce_timestamp_seconds(raw)
+
+    @staticmethod
     def _extract_history_timestamp(row: dict[str, Any]) -> int | None:
         """Pull a timestamp out of one raw price-history row.
 
@@ -2120,7 +2140,7 @@ class TransferClient(DexalotBaseClient):
         source_tx_raw = raw.get("source_tx")
         source_tx = source_tx_raw if isinstance(source_tx_raw, str) else ""
 
-        source_ts = self._coerce_timestamp_seconds(raw.get("source_ts")) or 0
+        source_ts = self._coerce_transfer_ts(raw.get("source_ts")) or 0
 
         target_env_raw = raw.get("target_env")
         target_env = target_env_raw if isinstance(target_env_raw, str) else None
@@ -2135,7 +2155,7 @@ class TransferClient(DexalotBaseClient):
         target_tx_raw = raw.get("target_tx")
         target_tx = target_tx_raw if isinstance(target_tx_raw, str) else None
 
-        target_ts = self._coerce_timestamp_seconds(raw.get("target_ts"))
+        target_ts = self._coerce_transfer_ts(raw.get("target_ts"))
 
         return Transfer(
             action_type=action_type,
