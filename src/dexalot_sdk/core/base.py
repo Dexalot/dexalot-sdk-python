@@ -1,10 +1,10 @@
 import asyncio
-import copy
 import json
 import logging
 import os
 import re
 import sys
+import time
 from dataclasses import dataclass
 from functools import lru_cache
 from typing import Any, cast
@@ -290,24 +290,29 @@ class DexalotBaseClient:
         self.portfolio_sub_contract = None
 
     def _configure_caches(self):
-        """Configure module-level caches with custom TTL if provided."""
+        """Configure module-level caches with custom TTL if provided.
+
+        Mutates the existing ``MemoryCache`` instances in place rather
+        than rebinding the globals.  Subscriber modules (``transfer.py``,
+        ``swap.py``, ``clob.py``) import these by name at module-load
+        time, so the decorators they apply capture stale references if
+        the globals are reassigned later — leaving the cache the
+        decorator writes to disconnected from the cache test fixtures
+        clear.  In-place mutation preserves identity across all
+        importers.
+        """
         self._cache_enabled = self.config.enable_cache
         if not self._cache_enabled:
             return
 
-        global _STATIC_CACHE, _SEMI_STATIC_CACHE, _BALANCE_CACHE, _ORDERBOOK_CACHE
         if self.config.cache_ttl_static != 3600:
-            _STATIC_CACHE = MemoryCache(ttl_seconds=self.config.cache_ttl_static, max_size=128)
+            _STATIC_CACHE.ttl = self.config.cache_ttl_static
         if self.config.cache_ttl_semi_static != 900:
-            _SEMI_STATIC_CACHE = MemoryCache(
-                ttl_seconds=self.config.cache_ttl_semi_static, max_size=256
-            )
+            _SEMI_STATIC_CACHE.ttl = self.config.cache_ttl_semi_static
         if self.config.cache_ttl_balance != 10:
-            _BALANCE_CACHE = MemoryCache(ttl_seconds=self.config.cache_ttl_balance, max_size=512)
+            _BALANCE_CACHE.ttl = self.config.cache_ttl_balance
         if self.config.cache_ttl_orderbook != 1:
-            _ORDERBOOK_CACHE = MemoryCache(
-                ttl_seconds=self.config.cache_ttl_orderbook, max_size=256
-            )
+            _ORDERBOOK_CACHE.ttl = self.config.cache_ttl_orderbook
 
     def _setup_rate_limiters(self):
         """Set up rate limiters if enabled."""
@@ -679,6 +684,40 @@ class DexalotBaseClient:
 
         return normalize_trading_pair_for_sdk(pair)
 
+    def _get_auth_headers(self) -> dict[str, str]:
+        """Generate authentication headers for signed endpoints.
+
+        Lifted from ``CLOBClient`` so non-CLOB surfaces (transfer history,
+        future signed endpoints) can use the same helper without depending
+        on the CLOB mixin.
+
+        When ``config.timestamped_auth`` is True, the signed message is
+        ``f"dexalot{ts}"`` (millisecond timestamp) and an ``x-timestamp``
+        header is included alongside ``x-signature``.  This prevents
+        replay attacks but requires backend support — default is
+        ``False`` until the backend confirms timestamp window validation.
+        See ``docs/python-sdk-remediation-plan.md`` C-2.
+        """
+        if not self.account:
+            raise Exception("Private key not configured.")
+
+        from eth_account.messages import encode_defunct
+
+        addr = cast(str, cast(Any, self.account).address)
+
+        if self.config.timestamped_auth:
+            ts = int(time.time() * 1000)
+            message = encode_defunct(text=f"dexalot{ts}")
+            signature = self.account.sign_message(message).signature.hex()
+            return {
+                "x-signature": f"{addr}:0x{signature}",
+                "x-timestamp": str(ts),
+            }
+
+        message = encode_defunct(text="dexalot")
+        signature = self.account.sign_message(message).signature.hex()
+        return {"x-signature": f"{addr}:0x{signature}"}
+
     def resolve_chain_reference(
         self, chain_reference: str | int, include_dexalot_l1: bool = False
     ) -> Result[ResolvedChain]:
@@ -827,6 +866,46 @@ class DexalotBaseClient:
             return cast(aiohttp.ClientResponse, await retry_func())
         else:
             return cast(aiohttp.ClientResponse, await _do_request())
+
+    async def _api_call(self, method: str, url: str, **kwargs: Any) -> Any:
+        """Make a REST API call and return its parsed JSON body.
+
+        On failure, lifts backend ``reasonCode`` + ``reason`` from the
+        response body (when present) into the raised exception's message.
+        The Dexalot REST API encodes failures as
+        ``{"reasonCode": "FQ-015", "reason": "..."}`` (also tolerates the
+        snake_case ``reason_code`` and the ``message`` alias that some
+        endpoints emit). Without this lift the raw aiohttp message
+        collapses everything to ``"Request failed with status code N"``,
+        which swallows the backend-level reason and makes user-visible
+        ``Result.fail`` strings useless for diagnosis.
+
+        Network-level failures (no response) and non-HTTP exceptions are
+        propagated unchanged.
+        """
+        async with await self._make_http_request(method, url, **kwargs) as response:
+            if response.status >= 400:
+                body: Any = None
+                try:
+                    body = await response.json(content_type=None)
+                except Exception:
+                    body = None
+                if isinstance(body, dict):
+                    reason_code = body.get("reasonCode") or body.get("reason_code")
+                    reason = body.get("reason") or body.get("message")
+                    if isinstance(reason_code, str):
+                        tail = (
+                            reason
+                            if isinstance(reason, str)
+                            else f"Request failed with status code {response.status}"
+                        )
+                        raise RuntimeError(f"{reason_code}: {tail}")
+                    if isinstance(reason, str):
+                        raise RuntimeError(reason)
+                # Empty body, non-dict body, or parse failure — fall through
+                # to the generic aiohttp error.
+                response.raise_for_status()
+            return await response.json(content_type=None)
 
     def _find_chain_for_provider(self, w3: AsyncWeb3) -> str | None:
         """
@@ -1675,94 +1754,73 @@ class DexalotBaseClient:
             return Result.fail(error_msg)
 
     @async_ttl_cached(_STATIC_CACHE)
-    async def get_deployment(self) -> Result[dict]:
-        """Fetch contract deployment configuration (addresses and ABIs) from the API.
+    async def get_deployment(
+        self,
+        *,
+        env: str | None = None,
+        contract_type: str = "All",
+        return_abi: bool = True,
+    ) -> Result[list[Any]]:
+        """Fetch deployment configuration from the REST API.
 
-        Populates and returns ``self.deployments`` with entries for
-        ``TradePairs``, ``PortfolioMain``, ``PortfolioSub``, and ``MainnetRFQ``.
-        Also wires up on-chain contract instances (``trade_pairs_contract``,
-        ``portfolio_sub_contract``, ``portfolio_main_avax_contract``).
+        Backward-compatible: no-args call still resolves successfully and
+        uses defaults (``env=config.parent_env``, ``contract_type='All'``,
+        ``return_abi=True``).  The backend expects lowercase query param
+        names (``contracttype``, ``returnabi``).
+
+        Cached for 1 hour (static cache tier).  The cache key includes
+        all three resolved params so filter variants do not collide on
+        the same cache slot.
 
         Note:
-            Cached for 1 hour (static cache tier).
+            This method no longer mutates ``self.deployments`` or the
+            contract handles.  Those are populated by
+            ``initialize_client`` / ``reinitialize`` via the internal
+            ``_fetch_deployments`` helper.  Mirrors TypeScript SDK
+            commit 14265ad.
+
+        Args:
+            env: Parent environment (e.g. ``'fuji-multi'``).  Defaults to
+                ``self.parent_env``.
+            contract_type: One of ``'All'``, ``'Portfolio'``,
+                ``'TradePairs'``, ``'MainnetRFQ'``, ``'PortfolioMain'``,
+                ``'PortfolioSub'``, ``'OrderBooks'``.  Defaults to ``'All'``.
+            return_abi: Whether the backend should include ABI payloads.
+                Defaults to ``True``.
 
         Returns:
-            Result containing the ``deployments`` dictionary on success, or an
-            error message on failure.
+            ``Result.ok(list)`` of raw deployment entries on success,
+            ``Result.fail(msg)`` on REST or network failure.
         """
+        resolved_env = env if env is not None else self.parent_env
+
         if not self._cache_enabled:
-            # Bypass cache by clearing it for this call
-            key: tuple[Any, ...] = ("get_deployment", (self,), frozenset())
-            _STATIC_CACHE._store.pop(key, None)
+            # Bypass cache by clearing this call's slot
+            cache_key: tuple[Any, ...] = (
+                "get_deployment",
+                self.api_base_url,
+                (),
+                frozenset(
+                    {
+                        "env": resolved_env,
+                        "contract_type": contract_type,
+                        "return_abi": return_abi,
+                    }.items()
+                ),
+            )
+            _STATIC_CACHE._store.pop(cache_key, None)
 
         try:
-            # Ensure environments are fetched first (needed for w3_l1, w3_connected_chain)
-            if not self.chain_config:
-                envs_result = await self.get_environments()
-                if not envs_result.success:
-                    return Result.fail(f"Failed to fetch environments: {envs_result.error}")
-
-            # Always fetch fresh from API (cache decorator handles TTL)
-            # Rebuild deployments dict from API
-            deploy_url = f"{self.api_base_url}{ENDPOINT_TRADING_DEPLOYMENT}"
-
-            # Initialize deployments structure if not already initialized
-            if not self.deployments:
-                self.deployments = {
-                    "TradePairs": {},
-                    "PortfolioMain": {},
-                    "PortfolioSub": {},
-                    "MainnetRFQ": {},
-                }
-            else:
-                # Clear existing deployments to rebuild fresh
-                self.deployments = {
-                    "TradePairs": {},
-                    "PortfolioMain": {},
-                    "PortfolioSub": {},
-                    "MainnetRFQ": {},
-                }
-
-            # Fetch all contract types in parallel
-            await asyncio.gather(
-                self._fetch_contract_deployment(deploy_url, "TradePairs"),
-                self._fetch_contract_deployment(deploy_url, "Portfolio"),
-                self._fetch_contract_deployment(deploy_url, "MainnetRFQ"),
+            data = await self._api_call(
+                "get",
+                f"{self.api_base_url}{ENDPOINT_TRADING_DEPLOYMENT}",
+                params={
+                    "env": resolved_env,
+                    "contracttype": contract_type,
+                    "returnabi": "true" if return_abi else "false",
+                },
             )
-
-            return Result.ok(self.deployments)
+            return Result.ok(data)
         except Exception as e:
             error_msg = self._sanitize_error(e, "getting deployment")
             return Result.fail(error_msg)
-
-    def _apply_deployment_state(self, deployments: dict[str, Any]) -> None:
-        """Restore deployment mappings and contract handles from cached data."""
-        self.deployments = copy.deepcopy(deployments)
-        if self.w3_l1 and self.deployments.get("TradePairs"):
-            trade_pairs = self.deployments["TradePairs"]
-            if trade_pairs.get("address") and trade_pairs.get("abi") is not None:
-                self.trade_pairs_contract = self.w3_l1.eth.contract(
-                    address=trade_pairs["address"], abi=trade_pairs["abi"]
-                )
-        if self.w3_l1 and self.deployments.get("PortfolioSub"):
-            portfolio_sub = self.deployments["PortfolioSub"]
-            if portfolio_sub.get("address") and portfolio_sub.get("abi") is not None:
-                self.portfolio_sub_contract = self.w3_l1.eth.contract(
-                    address=portfolio_sub["address"], abi=portfolio_sub["abi"]
-                )
-        if self.w3_connected_chain and self.deployments.get("PortfolioMain", {}).get("Avalanche"):
-            portfolio_main = self.deployments["PortfolioMain"]["Avalanche"]
-            if portfolio_main.get("address") and portfolio_main.get("abi") is not None:
-                self.portfolio_main_avax_contract = self.w3_connected_chain.eth.contract(
-                    address=portfolio_main["address"], abi=portfolio_main["abi"]
-                )
-
-    async def _rehydrate_cached_get_deployment(self, cached: Result[dict]) -> None:
-        """Restore deployment state when ``get_deployment`` is served from cache."""
-        if not cached.success or cached.data is None:
-            return
-        if not self.chain_config or not self.w3_l1:
-            envs_result = await self.get_environments()
-            if not envs_result.success:
-                return
-        self._apply_deployment_state(cached.data)

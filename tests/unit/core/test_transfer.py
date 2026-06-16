@@ -2393,3 +2393,769 @@ class TestTransferClient:
         w3 = self.create_w3()
         with pytest.raises(ValueError, match="Account is required"):
             await client._ensure_allowance(w3, "0xToken", "0xSpender", 1000)
+
+    # ----------------------------------------------------------------------
+    # get_token_usd_prices — public REST endpoint /api/info/usd-prices
+    # ----------------------------------------------------------------------
+    # Mirrors TypeScript SDK commit ea9f4a4. Backend returns a flat
+    # ``dict[str, str]`` map (prices are numeric strings, scientific notation
+    # supported). SDK coerces to floats and silently drops malformed rows.
+    # An array-of-objects shape is also tolerated as forward-compat.
+
+    async def test_get_token_usd_prices_flat_map_success(self, client):
+        """get_token_usd_prices parses flat ``dict[str, str]`` map into floats."""
+        api_spy = AsyncMock(
+            return_value={
+                "ETH": "1976.908750955006",
+                "ALOT": "0.041165219801",
+                "COQ": "1.04662e-7",
+            }
+        )
+        with patch.object(client, "_api_call", api_spy):
+            result = await client.get_token_usd_prices()
+
+        assert result.success
+        assert result.data == {
+            "ETH": 1976.908750955006,
+            "ALOT": 0.041165219801,
+            "COQ": 1.04662e-7,
+        }
+
+    async def test_get_token_usd_prices_forwards_env_query(self, client):
+        """``env`` arg overrides default and is forwarded as a query param."""
+        api_spy = AsyncMock(return_value={"ETH": "1.0"})
+        with patch.object(client, "_api_call", api_spy):
+            await client.get_token_usd_prices(env="production-multi")
+
+        args, kwargs = api_spy.call_args
+        assert kwargs["params"] == {"env": "production-multi"}
+        # Endpoint path must be the hyphenated /api/info/usd-prices
+        assert "/api/info/usd-prices" in args[1]
+
+    async def test_get_token_usd_prices_defaults_env_to_parent_env(self, client):
+        """When ``env`` is None, fall back to ``self.parent_env``."""
+        api_spy = AsyncMock(return_value={})
+        with patch.object(client, "_api_call", api_spy):
+            await client.get_token_usd_prices()
+
+        _, kwargs = api_spy.call_args
+        assert kwargs["params"] == {"env": client.parent_env}
+
+    async def test_get_token_usd_prices_array_of_objects_fallback(self, client):
+        """Array-of-objects shape ``[{symbol, price}, ...]`` is also accepted."""
+        api_spy = AsyncMock(
+            return_value=[
+                {"symbol": "ETH", "price": "1976.91"},
+                {"symbol": "ALOT", "price": 0.04},
+            ]
+        )
+        with patch.object(client, "_api_call", api_spy):
+            result = await client.get_token_usd_prices()
+
+        assert result.success
+        assert result.data == {"ETH": 1976.91, "ALOT": 0.04}
+
+    async def test_get_token_usd_prices_drops_malformed_rows(self, client):
+        """Empty symbol, missing symbol, NaN, negative, non-numeric — silently dropped."""
+        api_spy = AsyncMock(
+            return_value={
+                "ETH": "1.0",
+                "": "5.0",  # empty symbol
+                "  ": "9.0",  # whitespace symbol
+                "BAD": "not-a-number",
+                "NEG": "-1.5",
+                "NAN": "NaN",
+                "INF": "Infinity",
+                "NONE_VAL": None,
+                "EMPTY": "",
+                "WHITESPACE": "   ",
+                "GOOD": "2.5",
+            }
+        )
+        with patch.object(client, "_api_call", api_spy):
+            result = await client.get_token_usd_prices()
+
+        assert result.success
+        assert result.data == {"ETH": 1.0, "GOOD": 2.5}
+
+    async def test_get_token_usd_prices_array_drops_malformed_rows(self, client):
+        """Array shape: missing/empty symbol or bad price silently dropped."""
+        api_spy = AsyncMock(
+            return_value=[
+                {"symbol": "ETH", "price": "1.0"},
+                {"symbol": "", "price": "5.0"},  # empty symbol
+                {"price": "9.0"},  # missing symbol
+                {"symbol": "BAD"},  # missing price
+                {"symbol": "BAD2", "price": "abc"},
+                None,
+                "not-a-dict",
+                {"symbol": "GOOD", "price": 2.5},
+            ]
+        )
+        with patch.object(client, "_api_call", api_spy):
+            result = await client.get_token_usd_prices()
+
+        assert result.success
+        assert result.data == {"ETH": 1.0, "GOOD": 2.5}
+
+    async def test_get_token_usd_prices_accepts_numeric_price(self, client):
+        """Pure numeric prices (already coerced) are accepted."""
+        api_spy = AsyncMock(return_value={"ETH": 1.5, "ALOT": 0.04})
+        with patch.object(client, "_api_call", api_spy):
+            result = await client.get_token_usd_prices()
+        assert result.success
+        assert result.data == {"ETH": 1.5, "ALOT": 0.04}
+
+    async def test_get_token_usd_prices_numeric_nan_dropped(self, client):
+        """Numeric NaN/Infinity/negative values are silently dropped."""
+        api_spy = AsyncMock(
+            return_value={
+                "GOOD": 1.5,
+                "NAN": float("nan"),
+                "INF": float("inf"),
+                "NEG_INF": float("-inf"),
+                "NEG": -1.0,
+            }
+        )
+        with patch.object(client, "_api_call", api_spy):
+            result = await client.get_token_usd_prices()
+        assert result.success
+        assert result.data == {"GOOD": 1.5}
+
+    async def test_get_token_usd_prices_unexpected_shape_fails(self, client):
+        """Non-dict, non-array response returns ``Result.fail``."""
+        api_spy = AsyncMock(return_value="unexpected-string-body")
+        with patch.object(client, "_api_call", api_spy):
+            result = await client.get_token_usd_prices()
+        assert not result.success
+        assert "USD prices response shape" in result.error
+
+    async def test_get_token_usd_prices_api_error(self, client):
+        """REST failure is caught and surfaced as Result.fail."""
+        api_spy = AsyncMock(side_effect=RuntimeError("network down"))
+        with patch.object(client, "_api_call", api_spy):
+            result = await client.get_token_usd_prices()
+        assert not result.success
+
+    async def test_get_token_usd_prices_cached_per_env(self, client):
+        """Cache key namespaced by env so testnet/mainnet do not collide."""
+        client._cache_enabled = True
+        api_spy = AsyncMock(return_value={"ETH": "1.0"})
+        with patch.object(client, "_api_call", api_spy):
+            await client.get_token_usd_prices(env="fuji-multi")
+            await client.get_token_usd_prices(env="fuji-multi")  # cache hit
+            await client.get_token_usd_prices(env="production-multi")  # distinct slot
+
+        assert api_spy.await_count == 2
+
+    async def test_get_token_usd_prices_cache_bypass_when_disabled(self, client):
+        """When _cache_enabled is False, every call hits REST."""
+        client._cache_enabled = False
+        api_spy = AsyncMock(return_value={"ETH": "1.0"})
+        with patch.object(client, "_api_call", api_spy):
+            await client.get_token_usd_prices(env="fuji-multi")
+            await client.get_token_usd_prices(env="fuji-multi")
+        assert api_spy.await_count == 2
+
+    def test_coerce_usd_price_rejects_bool(self):
+        """``True``/``False`` must not be coerced to 1/0 prices."""
+        from dexalot_sdk.core.transfer import TransferClient
+
+        assert TransferClient._coerce_usd_price(True) is None
+        assert TransferClient._coerce_usd_price(False) is None
+
+    async def test_get_token_usd_prices_drops_non_string_keys(self, client):
+        """Flat-map keys that are not strings are skipped."""
+        # Backend never emits these but be defensive against pathological proxies.
+        api_spy = AsyncMock(return_value={123: "1.0", "GOOD": "2.0"})
+        with patch.object(client, "_api_call", api_spy):
+            result = await client.get_token_usd_prices()
+        assert result.success
+        assert result.data == {"GOOD": 2.0}
+
+    # ----------------------------------------------------------------------
+    # get_token_price_history / get_token_hourly_price_history
+    # ----------------------------------------------------------------------
+    # Mirrors TypeScript SDK commit 63b2e61.
+
+    async def test_get_token_price_history_normalizes_and_sorts(self, client):
+        """ISO dates → unix seconds, prices → float, sorted ascending."""
+        from dexalot_sdk.core.transfer import PricePoint
+
+        api_spy = AsyncMock(
+            return_value=[
+                {"date": "2026-06-02T00:00:00Z", "price": "10.5"},
+                {"date": "2026-06-01T00:00:00Z", "price": "9.0"},
+                {"date": "2026-05-31T00:00:00Z", "price": "8.25"},
+            ]
+        )
+        with patch.object(client, "_api_call", api_spy):
+            result = await client.get_token_price_history("ALOT")
+
+        assert result.success
+        assert isinstance(result.data[0], PricePoint)
+        # Ascending by timestamp
+        assert [p.timestamp for p in result.data] == sorted(p.timestamp for p in result.data)
+        assert result.data[0].price == 8.25
+        assert result.data[-1].price == 10.5
+
+    async def test_get_token_price_history_endpoint_path(self, client):
+        """Daily method hits the daily endpoint with ``token`` param."""
+        api_spy = AsyncMock(return_value=[])
+        with patch.object(client, "_api_call", api_spy):
+            await client.get_token_price_history("ALOT")
+        args, kwargs = api_spy.call_args
+        assert "/api/info/token-usd-price-history" in args[1]
+        assert "hourly" not in args[1]
+        assert kwargs["params"]["token"] == "ALOT"
+
+    async def test_get_token_hourly_price_history_endpoint_path(self, client):
+        """Hourly method hits the hourly endpoint with ``token`` param."""
+        api_spy = AsyncMock(return_value=[])
+        with patch.object(client, "_api_call", api_spy):
+            await client.get_token_hourly_price_history("ALOT")
+        args, kwargs = api_spy.call_args
+        assert args[1].endswith("/api/info/token-usd-price-history-hourly")
+        assert kwargs["params"]["token"] == "ALOT"
+
+    async def test_get_token_price_history_forwards_from_and_to(self, client):
+        """``from_ts``/``to_ts`` forwarded as ``from``/``to`` query params."""
+        api_spy = AsyncMock(return_value=[])
+        with patch.object(client, "_api_call", api_spy):
+            await client.get_token_price_history("ALOT", from_ts=1700000000, to_ts=1700864000)
+        _, kwargs = api_spy.call_args
+        assert kwargs["params"] == {
+            "token": "ALOT",
+            "from": 1700000000,
+            "to": 1700864000,
+        }
+
+    async def test_get_token_price_history_client_side_filter(self, client):
+        """Backend ignores ``from``/``to``; SDK filters client-side."""
+        # 2026-06-01 00:00 UTC = 1780272000
+        # 2026-06-02 00:00 UTC = 1780358400
+        # 2026-06-03 00:00 UTC = 1780444800
+        api_spy = AsyncMock(
+            return_value=[
+                {"date": "2026-06-01T00:00:00Z", "price": "9.0"},
+                {"date": "2026-06-02T00:00:00Z", "price": "10.0"},
+                {"date": "2026-06-03T00:00:00Z", "price": "11.0"},
+            ]
+        )
+        with patch.object(client, "_api_call", api_spy):
+            result = await client.get_token_price_history(
+                "ALOT", from_ts=1780358400, to_ts=1780358400
+            )
+        assert result.success
+        # Only the middle row falls inside [from, to] inclusively
+        assert len(result.data) == 1
+        assert result.data[0].price == 10.0
+
+    async def test_get_token_price_history_drops_malformed_rows(self, client):
+        """Invalid date / NaN price / non-dict rows silently dropped."""
+        api_spy = AsyncMock(
+            return_value=[
+                {"date": "2026-06-01T00:00:00Z", "price": "9.0"},
+                {"date": "not-a-date", "price": "10.0"},
+                {"date": "2026-06-02T00:00:00Z", "price": "abc"},
+                {"date": "2026-06-03T00:00:00Z", "price": "-1.0"},
+                {"price": "5.0"},  # missing date
+                {"date": "2026-06-04T00:00:00Z"},  # missing price
+                None,
+                "not-a-dict",
+            ]
+        )
+        with patch.object(client, "_api_call", api_spy):
+            result = await client.get_token_price_history("ALOT")
+        assert result.success
+        assert len(result.data) == 1
+        assert result.data[0].price == 9.0
+
+    async def test_get_token_price_history_rejects_non_array_response(self, client):
+        """A non-list response surfaces as Result.fail with a shape hint."""
+        api_spy = AsyncMock(return_value={"unexpected": "object"})
+        with patch.object(client, "_api_call", api_spy):
+            result = await client.get_token_price_history("ALOT")
+        assert not result.success
+        assert "price history response shape" in result.error
+
+    async def test_get_token_price_history_invalid_token_returns_fail(self, client):
+        """Invalid token symbol fails validation before any REST call."""
+        api_spy = AsyncMock(return_value=[])
+        with patch.object(client, "_api_call", api_spy):
+            result = await client.get_token_price_history("")
+        assert not result.success
+        api_spy.assert_not_called()
+
+    async def test_get_token_price_history_api_error(self, client):
+        """REST failure is caught and surfaced as Result.fail."""
+        api_spy = AsyncMock(side_effect=RuntimeError("network boom"))
+        with patch.object(client, "_api_call", api_spy):
+            result = await client.get_token_price_history("ALOT")
+        assert not result.success
+
+    async def test_price_history_cache_key_distinguishes_daily_vs_hourly(self, client):
+        """Daily and hourly methods do not share the same cache slot."""
+        client._cache_enabled = True
+        api_spy = AsyncMock(return_value=[])
+        with patch.object(client, "_api_call", api_spy):
+            await client.get_token_price_history("ALOT")
+            await client.get_token_price_history("ALOT")  # cache hit
+            await client.get_token_hourly_price_history("ALOT")  # distinct slot
+        assert api_spy.await_count == 2
+
+    async def test_price_history_cache_key_distinguishes_opts(self, client):
+        """Different (token, from_ts, to_ts) tuples use distinct cache slots."""
+        client._cache_enabled = True
+        api_spy = AsyncMock(return_value=[])
+        with patch.object(client, "_api_call", api_spy):
+            await client.get_token_price_history("ALOT")
+            await client.get_token_price_history("ALOT", from_ts=100)
+            await client.get_token_price_history("ALOT", from_ts=100, to_ts=200)
+            await client.get_token_price_history("ETH")
+        assert api_spy.await_count == 4
+
+    async def test_get_token_price_history_accepts_ts_numeric_alias(self, client):
+        """A row with no ``date`` but a numeric ``ts`` is accepted."""
+        api_spy = AsyncMock(
+            return_value=[
+                {"ts": 1700000000, "price": "5.0"},
+                {"timestamp": "1700000100", "price": "6.0"},
+                {"time": 1700000200000, "price": "7.0"},  # milliseconds
+            ]
+        )
+        with patch.object(client, "_api_call", api_spy):
+            result = await client.get_token_price_history("ALOT")
+        assert result.success
+        assert len(result.data) == 3
+        assert result.data[0].timestamp == 1700000000
+        assert result.data[1].timestamp == 1700000100
+        assert result.data[2].timestamp == 1700000200  # 1.7e12 / 1000
+
+    def test_coerce_timestamp_seconds_edge_cases(self):
+        """Direct coverage for the timestamp coercer's branches."""
+        from dexalot_sdk.core.transfer import TransferClient
+
+        # bool → None
+        assert TransferClient._coerce_timestamp_seconds(True) is None
+        # whitespace-only string → None
+        assert TransferClient._coerce_timestamp_seconds("   ") is None
+        # non-numeric string → None
+        assert TransferClient._coerce_timestamp_seconds("not-a-number") is None
+        # non-string/non-number → None
+        assert TransferClient._coerce_timestamp_seconds([1, 2]) is None
+        # negative → None
+        assert TransferClient._coerce_timestamp_seconds(-1) is None
+        # NaN → None
+        assert TransferClient._coerce_timestamp_seconds(float("nan")) is None
+        # milliseconds boundary
+        assert TransferClient._coerce_timestamp_seconds(1700000000000) == 1700000000
+        # numeric string is accepted
+        assert TransferClient._coerce_timestamp_seconds("1700000000") == 1700000000
+        # plain number passthrough
+        assert TransferClient._coerce_timestamp_seconds(1700000000) == 1700000000
+
+    # ----------------------------------------------------------------------
+    # get_combined_transfers — signed REST /api/trading/signed/transferscombined
+    # ----------------------------------------------------------------------
+    # Mirrors TypeScript SDK commit f7a9945.
+
+    async def test_get_combined_transfers_no_wallet_returns_fail(self, client):
+        """No configured account → Result.fail without any REST call."""
+        client.account = None
+        api_spy = AsyncMock(return_value={"count": 0, "rows": []})
+        with patch.object(client, "_api_call", api_spy):
+            result = await client.get_combined_transfers()
+        assert not result.success
+        assert "wallet" in result.error.lower()
+        api_spy.assert_not_called()
+
+    async def test_get_combined_transfers_basic_envelope(self, client):
+        """Envelope ``{count, rows}`` parsed, each row normalized to Transfer."""
+        from dexalot_sdk.core.transfer import Transfer
+
+        api_spy = AsyncMock(
+            return_value={
+                "count": 1,
+                "rows": [
+                    {
+                        "action_type": 1,
+                        "status": 0,
+                        "symbol": "USDC",
+                        "quantity": "100.5",
+                        "fee": "0.25",
+                        "traderaddress": VALID_ADDRESS,
+                        "bridge": 2,
+                        "bridge_url": "https://bridge.example/x",
+                        "nonce": 7,
+                        "source_env": "fuji-multi-avax",
+                        "source_chain_id": 43113,
+                        "source_tx": "0xabc",
+                        "source_ts": 1700000000,
+                        "target_env": "fuji-multi-subnet",
+                        "target_chain_id": 12345,
+                        "target_tx": "0xdef",
+                        "target_ts": 1700000010,
+                    }
+                ],
+            }
+        )
+        with patch.object(client, "_api_call", api_spy):
+            result = await client.get_combined_transfers()
+        assert result.success
+        assert len(result.data) == 1
+        t = result.data[0]
+        assert isinstance(t, Transfer)
+        assert t.action_type == "DEPOSITED"
+        assert t.status == "COMPLETED"
+        assert t.bridge == "ICM"
+        assert t.symbol == "USDC"
+        assert t.quantity == 100.5
+        assert t.fee == 0.25
+        assert t.nonce == 7
+        assert t.source_chain_id == 43113
+        assert t.target_chain_id == 12345
+
+    async def test_get_combined_transfers_null_target_legs(self, client):
+        """A non-crossing row (omitted/null target_* fields) yields None legs."""
+        api_spy = AsyncMock(
+            return_value={
+                "count": 1,
+                "rows": [
+                    {
+                        "action_type": 1,
+                        "status": 0,
+                        "symbol": "USDC",
+                        "quantity": "100.5",
+                        "fee": "0.25",
+                        "traderaddress": VALID_ADDRESS,
+                        "bridge": 2,
+                        "bridge_url": "https://bridge.example/x",
+                        "nonce": 7,
+                        "source_env": "fuji-multi-avax",
+                        "source_chain_id": 43113,
+                        "source_tx": "0xabc",
+                        "source_ts": 1700000000,
+                        # target_* intentionally omitted / null
+                        "target_env": None,
+                        "target_chain_id": None,
+                        "target_tx": None,
+                        "target_ts": None,
+                    }
+                ],
+            }
+        )
+        with patch.object(client, "_api_call", api_spy):
+            result = await client.get_combined_transfers()
+        assert result.success
+        assert len(result.data) == 1
+        t = result.data[0]
+        assert t.target_env is None
+        assert t.target_chain_id is None
+        assert t.target_tx is None
+        assert t.target_ts is None
+        # source leg is still non-null
+        assert t.source_ts == 1700000000
+
+    async def test_get_combined_transfers_bare_array_fallback(self, client):
+        """Bare list response also accepted as forward-compat."""
+        api_spy = AsyncMock(
+            return_value=[
+                {
+                    "action_type": 0,
+                    "status": 1,
+                    "symbol": "ALOT",
+                    "quantity": "1.0",
+                    "fee": "0",
+                    "traderaddress": VALID_ADDRESS,
+                    "bridge": -1,
+                    "source_chain_id": 12345,
+                }
+            ]
+        )
+        with patch.object(client, "_api_call", api_spy):
+            result = await client.get_combined_transfers()
+        assert result.success
+        assert len(result.data) == 1
+        assert result.data[0].action_type == "WITHDRAWN"
+        assert result.data[0].status == "INFLIGHT"
+        assert result.data[0].bridge == "NATIVE"
+
+    async def test_get_combined_transfers_unexpected_shape_fails(self, client):
+        """Non-object, non-array response surfaces Result.fail."""
+        api_spy = AsyncMock(return_value="bad")
+        with patch.object(client, "_api_call", api_spy):
+            result = await client.get_combined_transfers()
+        assert not result.success
+        assert "transfers response shape" in result.error
+
+    async def test_get_combined_transfers_empty_rows(self, client):
+        """Empty rows list returns Result.ok([])."""
+        api_spy = AsyncMock(return_value={"count": 0, "rows": []})
+        with patch.object(client, "_api_call", api_spy):
+            result = await client.get_combined_transfers()
+        assert result.success
+        assert result.data == []
+
+    async def test_get_combined_transfers_envelope_missing_rows(self, client):
+        """``{count}`` without ``rows`` is tolerated as empty list."""
+        api_spy = AsyncMock(return_value={"count": 0})
+        with patch.object(client, "_api_call", api_spy):
+            result = await client.get_combined_transfers()
+        assert result.success
+        assert result.data == []
+
+    async def test_get_combined_transfers_drops_unknown_enums(self, client):
+        """Rows with unknown numeric action_type / status are silently dropped."""
+        api_spy = AsyncMock(
+            return_value={
+                "count": 4,
+                "rows": [
+                    {
+                        "action_type": 99,
+                        "status": 0,
+                        "symbol": "X",
+                        "quantity": "1",
+                        "traderaddress": VALID_ADDRESS,
+                    },
+                    {
+                        "action_type": 1,
+                        "status": 99,
+                        "symbol": "X",
+                        "quantity": "1",
+                        "traderaddress": VALID_ADDRESS,
+                    },
+                    {
+                        "action_type": 1,
+                        "status": 0,
+                        "symbol": "GOOD",
+                        "quantity": "5",
+                        "traderaddress": VALID_ADDRESS,
+                        "bridge": 999,  # Unknown bridge → falls back to NATIVE
+                    },
+                    None,
+                ],
+            }
+        )
+        with patch.object(client, "_api_call", api_spy):
+            result = await client.get_combined_transfers()
+        assert result.success
+        assert len(result.data) == 1
+        assert result.data[0].symbol == "GOOD"
+        assert result.data[0].bridge == "NATIVE"
+
+    async def test_get_combined_transfers_drops_missing_required_fields(self, client):
+        """Rows missing action_type / status / symbol / quantity dropped."""
+        api_spy = AsyncMock(
+            return_value=[
+                {"status": 0, "symbol": "X", "quantity": "1"},  # missing action_type
+                {"action_type": 1, "symbol": "X", "quantity": "1"},  # missing status
+                {"action_type": 1, "status": 0, "quantity": "1"},  # missing symbol
+                {"action_type": 1, "status": 0, "symbol": "X"},  # missing quantity
+                {
+                    "action_type": 1,
+                    "status": 0,
+                    "symbol": "X",
+                    "quantity": "abc",  # non-numeric quantity
+                },
+                {
+                    "action_type": "1",  # action_type as string (not numeric)
+                    "status": 0,
+                    "symbol": "X",
+                    "quantity": "1",
+                },
+                {
+                    "action_type": 1,
+                    "status": "0",  # status as string (not numeric)
+                    "symbol": "X",
+                    "quantity": "1",
+                },
+                {
+                    "action_type": 1,
+                    "status": 0,
+                    "symbol": 42,  # symbol not a string
+                    "quantity": "1",
+                },
+                {
+                    "action_type": 1,
+                    "status": 0,
+                    "symbol": "GOOD",
+                    "quantity": "1",
+                },
+            ]
+        )
+        with patch.object(client, "_api_call", api_spy):
+            result = await client.get_combined_transfers()
+        assert result.success
+        assert len(result.data) == 1
+        assert result.data[0].symbol == "GOOD"
+
+    async def test_get_combined_transfers_quantity_and_fee_numeric_or_string(self, client):
+        """quantity/fee accepted as either numeric string or numeric."""
+        api_spy = AsyncMock(
+            return_value=[
+                {
+                    "action_type": 1,
+                    "status": 0,
+                    "symbol": "X",
+                    "quantity": 12.5,
+                    "fee": 0.01,
+                    "traderaddress": VALID_ADDRESS,
+                }
+            ]
+        )
+        with patch.object(client, "_api_call", api_spy):
+            result = await client.get_combined_transfers()
+        assert result.success
+        assert result.data[0].quantity == 12.5
+        assert result.data[0].fee == 0.01
+
+    async def test_get_combined_transfers_fee_missing_defaults_zero(self, client):
+        """fee absent → defaults to 0.0."""
+        api_spy = AsyncMock(
+            return_value=[
+                {
+                    "action_type": 1,
+                    "status": 0,
+                    "symbol": "X",
+                    "quantity": "10",
+                    "traderaddress": VALID_ADDRESS,
+                }
+            ]
+        )
+        with patch.object(client, "_api_call", api_spy):
+            result = await client.get_combined_transfers()
+        assert result.success
+        assert result.data[0].fee == 0.0
+
+    async def test_get_combined_transfers_default_pagination(self, client):
+        """Defaults: limit=100 → itemsperpage=100, offset=0 → pageno=1."""
+        api_spy = AsyncMock(return_value={"count": 0, "rows": []})
+        with patch.object(client, "_api_call", api_spy):
+            await client.get_combined_transfers()
+        _, kwargs = api_spy.call_args
+        assert kwargs["params"]["itemsperpage"] == 100
+        assert kwargs["params"]["pageno"] == 1
+
+    async def test_get_combined_transfers_custom_pagination_translation(self, client):
+        """limit → itemsperpage, offset → pageno (offset/limit = page index, 1-indexed)."""
+        api_spy = AsyncMock(return_value={"count": 0, "rows": []})
+        with patch.object(client, "_api_call", api_spy):
+            await client.get_combined_transfers(limit=50, offset=100)
+        _, kwargs = api_spy.call_args
+        # offset 100 with limit 50 → page 3 (1-indexed)
+        assert kwargs["params"]["itemsperpage"] == 50
+        assert kwargs["params"]["pageno"] == 3
+
+    async def test_get_combined_transfers_forwards_symbol_and_period(self, client):
+        """symbol → symbol; from_ts → periodfrom; to_ts → periodto (ISO-8601)."""
+        api_spy = AsyncMock(return_value={"count": 0, "rows": []})
+        with patch.object(client, "_api_call", api_spy):
+            await client.get_combined_transfers(symbol="ALOT", from_ts=1700000000, to_ts=1700864000)
+        _, kwargs = api_spy.call_args
+        assert kwargs["params"]["symbol"] == "ALOT"
+        # from_ts/to_ts (unix seconds) are converted to ISO-8601 strings — the
+        # backend's periodfrom/periodto reject raw unix integers with
+        # "ISO Date format problem".
+        assert kwargs["params"]["periodfrom"] == "2023-11-14T22:13:20.000Z"
+        assert kwargs["params"]["periodto"] == "2023-11-24T22:13:20.000Z"
+
+    async def test_get_combined_transfers_attaches_signature_header(self, client):
+        """``x-signature`` header attached via _get_auth_headers."""
+        api_spy = AsyncMock(return_value={"count": 0, "rows": []})
+        with patch.object(client, "_api_call", api_spy):
+            with patch.object(client, "_get_auth_headers", return_value={"x-signature": "sig"}):
+                await client.get_combined_transfers()
+        _, kwargs = api_spy.call_args
+        assert kwargs["headers"] == {"x-signature": "sig"}
+
+    async def test_get_combined_transfers_endpoint_path(self, client):
+        """Path is /api/trading/signed/transferscombined (NOT under /privapi/)."""
+        api_spy = AsyncMock(return_value={"count": 0, "rows": []})
+        with patch.object(client, "_api_call", api_spy):
+            await client.get_combined_transfers()
+        args, _ = api_spy.call_args
+        assert "/api/trading/signed/transferscombined" in args[1]
+        assert "/privapi/" not in args[1]
+
+    async def test_get_combined_transfers_signer_rejection_returns_fail(self, client):
+        """Auth header generation failure surfaces as Result.fail."""
+        api_spy = AsyncMock(return_value={"count": 0, "rows": []})
+        with patch.object(client, "_api_call", api_spy):
+            with patch.object(
+                client,
+                "_get_auth_headers",
+                side_effect=Exception("Private key not configured."),
+            ):
+                result = await client.get_combined_transfers()
+        assert not result.success
+
+    async def test_get_combined_transfers_api_error(self, client):
+        """REST failure surfaced as Result.fail."""
+        api_spy = AsyncMock(side_effect=RuntimeError("network boom"))
+        with patch.object(client, "_api_call", api_spy):
+            result = await client.get_combined_transfers()
+        assert not result.success
+
+    async def test_get_combined_transfers_cache_distinct_per_address_and_opts(self, client):
+        """Cache key includes (address, all opts); distinct combos do not collide."""
+        client._cache_enabled = True
+        api_spy = AsyncMock(return_value={"count": 0, "rows": []})
+        with patch.object(client, "_api_call", api_spy):
+            await client.get_combined_transfers()
+            await client.get_combined_transfers()  # cache hit (same addr + opts)
+            await client.get_combined_transfers(symbol="ALOT")  # distinct slot
+            await client.get_combined_transfers(limit=50)  # distinct slot
+            # Change address → distinct slot
+            other_addr = "0x" + "b" * 40
+            client.account.address = other_addr
+            await client.get_combined_transfers()
+
+        assert api_spy.await_count == 4
+
+    async def test_get_combined_transfers_cache_bypass_when_disabled(self, client):
+        """When _cache_enabled is False every call hits REST."""
+        client._cache_enabled = False
+        api_spy = AsyncMock(return_value={"count": 0, "rows": []})
+        with patch.object(client, "_api_call", api_spy):
+            await client.get_combined_transfers()
+            await client.get_combined_transfers()
+        assert api_spy.await_count == 2
+
+    async def test_get_combined_transfers_normalizes_user_symbol(self, client):
+        """``symbol`` is run through _normalize_user_token before being forwarded."""
+        api_spy = AsyncMock(return_value={"count": 0, "rows": []})
+        with patch.object(client, "_normalize_user_token", return_value="USDC") as norm_spy:
+            with patch.object(client, "_api_call", api_spy):
+                await client.get_combined_transfers(symbol="usdc")
+        norm_spy.assert_called_once_with("usdc")
+        _, kwargs = api_spy.call_args
+        assert kwargs["params"]["symbol"] == "USDC"
+
+    async def test_get_combined_transfers_address_lookup_failure(self, client):
+        """A signer that raises when address is read surfaces Result.fail."""
+
+        class BrokenAccount:
+            @property
+            def address(self) -> str:
+                raise RuntimeError("signer is broken")
+
+        client.account = BrokenAccount()
+        api_spy = AsyncMock(return_value={"count": 0, "rows": []})
+        with patch.object(client, "_api_call", api_spy):
+            result = await client.get_combined_transfers()
+        assert not result.success
+        api_spy.assert_not_called()
+
+
+def test_coerce_transfer_ts_parses_iso_numeric_and_rejects_junk():
+    """source_ts/target_ts arrive as ISO-8601 strings from the backend; the
+    coercer must parse those (tz-aware and naive) plus numerics, and reject junk."""
+    f = TransferClient._coerce_transfer_ts
+    assert f("2023-11-14T22:13:20.000Z") == 1700000000  # ISO, tz-aware (Z)
+    assert f("2023-11-14T22:13:20") == 1700000000  # ISO, naive -> assume UTC
+    assert f("1700000000") == 1700000000  # numeric string -> fallback coercer
+    assert f(1700000000) == 1700000000  # int -> fallback coercer
+    assert f(None) is None  # non-str -> fallback
+    assert f("") is None  # empty string -> fallback
+    assert f("not a date") is None  # unparseable -> None

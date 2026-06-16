@@ -1,9 +1,16 @@
 import asyncio
-from typing import Any, cast
+import math
+from dataclasses import dataclass
+from datetime import UTC, datetime
+from typing import Any, Literal, cast
 
 from ..constants import (
     BRIDGE_ID_ICM,
     BRIDGE_ID_LZ,
+    ENDPOINT_INFO_HOURLY_PRICE_HISTORY,
+    ENDPOINT_INFO_PRICE_HISTORY,
+    ENDPOINT_INFO_USD_PRICES,
+    ENDPOINT_TRADING_COMBINED_TRANSFERS,
     ENDPOINT_TRADING_TOKENS,
     GAS_BUFFER,
     ICM_CHAINS,
@@ -18,7 +25,113 @@ from ..utils.input_validators import (
 )
 from ..utils.observability import track_method
 from ..utils.result import Result
-from .base import _BALANCE_CACHE, _SEMI_STATIC_CACHE, DexalotBaseClient
+from .base import _BALANCE_CACHE, _SEMI_STATIC_CACHE, _STATIC_CACHE, DexalotBaseClient
+
+# ---------------------------------------------------------------------------
+# Shared types returned by transfer client methods
+# ---------------------------------------------------------------------------
+# Kept in this module (next to the methods that produce them) to follow the
+# existing SDK convention — e.g. ``ResolvedChain`` lives next to the chain
+# resolver in ``base.py``.
+
+TransferStatus = Literal["COMPLETED", "INFLIGHT", "DELAYED"]
+
+TransferActionType = Literal[
+    "WITHDRAWN",
+    "DEPOSITED",
+    "SENT",
+    "RECEIVED",
+    "RECOVERED",
+    "ADD_GAS",
+    "REMOVE_GAS",
+    "AUTO_FILL",
+    "WITHDRAW_PENDING",
+    "DEPOSIT_PENDING",
+]
+
+TransferBridge = Literal["NATIVE", "LAYER0", "CELER", "ICM"]
+
+
+@dataclass(frozen=True)
+class PricePoint:
+    """One USD price observation in a price-history series.
+
+    Returned by :meth:`TransferClient.get_token_price_history` (daily) and
+    :meth:`TransferClient.get_token_hourly_price_history` (hourly).  The
+    backend ships rows as ``{date: ISO-8601-string, price: stringified-decimal}``
+    sorted descending by date; the SDK normalizes to ascending unix-seconds
+    + numeric price so callers can chart, filter, or interpolate without
+    re-parsing.
+    """
+
+    timestamp: int  # unix seconds (UTC)
+    price: float
+
+
+@dataclass(frozen=True)
+class Transfer:
+    """One row of unified transfer history returned by ``get_combined_transfers``.
+
+    Each row aggregates a deposit / withdrawal / gas top-up / portfolio
+    P2P send-or-receive / bridge recovery involving the connected wallet.
+    The backend ships rows as ``DBTransfer`` (snake_case + numeric enums);
+    the SDK lifts the numeric ``status`` / ``action_type`` / ``bridge``
+    enums to human-readable strings and parses ``quantity`` / ``fee`` Big
+    decimal strings to ``float``.  ``quantity`` / ``fee`` are already
+    display-decimal at the backend — there is no wei → human conversion
+    to apply.
+    """
+
+    action_type: TransferActionType
+    status: TransferStatus
+    symbol: str
+    quantity: float
+    fee: float
+    trader_address: str
+    bridge: TransferBridge
+    bridge_url: str
+    nonce: int
+    source_env: str
+    source_chain_id: int
+    source_tx: str
+    source_ts: int
+    # ``target_*`` is ``None`` for non-crossing transfers (no target leg).
+    target_env: str | None
+    target_chain_id: int | None
+    target_tx: str | None
+    target_ts: int | None
+
+
+# Numeric enum → human-readable label lookup tables for the
+# ``transferscombined`` REST response. Mirror the
+# ``TRANSFER_ACTION_TYPE`` / ``TRANSFER_STATUS`` / ``BRIDGES`` enums
+# the official Dexalot frontend uses to render the same rows; keeping
+# them in lockstep avoids drift if the backend ever adds new variants.
+_TRANSFER_ACTION_TYPE_LABELS: dict[int, TransferActionType] = {
+    0: "WITHDRAWN",
+    1: "DEPOSITED",
+    5: "SENT",
+    6: "RECEIVED",
+    7: "RECOVERED",
+    8: "ADD_GAS",
+    9: "REMOVE_GAS",
+    10: "AUTO_FILL",
+    11: "WITHDRAW_PENDING",
+    12: "DEPOSIT_PENDING",
+}
+
+_TRANSFER_STATUS_LABELS: dict[int, TransferStatus] = {
+    0: "COMPLETED",
+    1: "INFLIGHT",
+    2: "DELAYED",
+}
+
+_TRANSFER_BRIDGE_LABELS: dict[int, TransferBridge] = {
+    -1: "NATIVE",
+    0: "LAYER0",
+    1: "CELER",
+    2: "ICM",
+}
 
 
 class TransferClient(DexalotBaseClient):
@@ -1636,3 +1749,585 @@ class TransferClient(DexalotBaseClient):
             return w3.to_hex(tx_hash)
 
         return w3.to_hex(tx_hash)
+
+    # ----------------------------------------------------------------------
+    # USD price endpoints (public /api/info/...)
+    # ----------------------------------------------------------------------
+
+    @staticmethod
+    def _coerce_usd_price(raw: Any) -> float | None:
+        """Coerce a single raw price value into a finite non-negative float.
+
+        Returns ``None`` for anything we cannot confidently interpret as a
+        price (non-string/non-number, empty string, NaN, ±Infinity,
+        negative).  The backend currently emits decimal strings (including
+        scientific notation e.g. ``"1.04662e-7"``), so :func:`float` is
+        the right primitive — but we tolerate plain numbers too in case
+        the shape ever flips.
+        """
+        if isinstance(raw, bool):
+            # bool is a subclass of int — disallow explicitly to avoid
+            # treating ``True``/``False`` as 1/0 prices.
+            return None
+        if isinstance(raw, int | float):
+            n = float(raw)
+            if not math.isfinite(n) or n < 0:
+                return None
+            return n
+        if not isinstance(raw, str):
+            return None
+        trimmed = raw.strip()
+        if trimmed == "":
+            return None
+        try:
+            n = float(trimmed)
+        except (ValueError, TypeError):
+            return None
+        if not math.isfinite(n) or n < 0:
+            return None
+        return n
+
+    @track_method("transfer")
+    async def get_token_usd_prices(self, env: str | None = None) -> Result[dict[str, float]]:
+        """Fetch current USD prices for every Dexalot-listed token.
+
+        Public endpoint, no signed auth required.  Cached for 15 minutes
+        (semi-static cache tier).
+
+        The backend currently emits the price map as a flat
+        ``dict[str, str]`` (string prices, including scientific notation
+        for very small values); the SDK coerces to ``float`` and silently
+        drops entries it cannot interpret.  An array-of-objects fallback
+        (``[{"symbol", "price"}, ...]``) is also accepted in case the
+        backend shape ever changes.
+
+        The ``env`` query parameter is forwarded for parity with the
+        TypeScript SDK and to namespace the cache key per network; the
+        backend itself currently determines the network from the API host
+        and does not consult the parameter.
+
+        Args:
+            env: Optional environment label override.  Defaults to
+                ``self.parent_env``.
+
+        Returns:
+            ``Result.ok({symbol: price})`` on success,
+            ``Result.fail(msg)`` on network failure or unexpected response
+            shape.
+        """
+        target_env = env if env is not None else self.parent_env
+        return cast(
+            Result[dict[str, float]],
+            await self._get_token_usd_prices_cached(target_env),
+        )
+
+    @async_ttl_cached(_SEMI_STATIC_CACHE)
+    async def _get_token_usd_prices_cached(self, env: str) -> Result[dict[str, float]]:
+        """Internal cached implementation of get_token_usd_prices."""
+        try:
+            data = await self._api_call(
+                "get",
+                f"{self.api_base_url}{ENDPOINT_INFO_USD_PRICES}",
+                params={"env": env},
+            )
+            out: dict[str, float] = {}
+            if isinstance(data, list):
+                # Forward-compat: array-of-objects shape.
+                for row in data:
+                    if not isinstance(row, dict):
+                        continue
+                    raw_symbol = row.get("symbol")
+                    if not isinstance(raw_symbol, str):
+                        continue
+                    symbol = raw_symbol.strip()
+                    if not symbol:
+                        continue
+                    price = self._coerce_usd_price(row.get("price"))
+                    if price is None:
+                        continue
+                    out[symbol] = price
+                return Result.ok(out)
+            if isinstance(data, dict):
+                # Current shape: flat ``Record<string, string>`` map.
+                for symbol, raw in data.items():
+                    if not isinstance(symbol, str):
+                        continue
+                    trimmed_sym = symbol.strip()
+                    if not trimmed_sym:
+                        continue
+                    price = self._coerce_usd_price(raw)
+                    if price is None:
+                        continue
+                    out[trimmed_sym] = price
+                return Result.ok(out)
+            return Result.fail(
+                f"Unexpected USD prices response shape: expected object or array, got {type(data).__name__}."
+            )
+        except Exception as e:
+            return Result.fail(self._sanitize_error(e, "fetching token USD prices"))
+
+    # ----------------------------------------------------------------------
+    # USD price history (daily + hourly, public /api/info/...)
+    # ----------------------------------------------------------------------
+
+    @staticmethod
+    def _coerce_timestamp_seconds(raw: Any) -> int | None:
+        """Coerce a raw numeric / numeric-string timestamp to unix seconds.
+
+        Values ``>= 1e12`` are treated as milliseconds and divided by 1000
+        (a 32-bit second-precision unix epoch maxes out at ``2^31 ≈ 2.1e9``,
+        so 1e12 is a safe boundary).
+        """
+        if isinstance(raw, bool):
+            return None
+        if isinstance(raw, int | float):
+            n = float(raw)
+        elif isinstance(raw, str):
+            trimmed = raw.strip()
+            if trimmed == "":
+                return None
+            try:
+                n = float(trimmed)
+            except ValueError:
+                return None
+        else:
+            return None
+        if not math.isfinite(n) or n < 0:
+            return None
+        if n >= 1e12:
+            n = math.floor(n / 1000)
+        return int(math.floor(n))
+
+    @staticmethod
+    def _coerce_transfer_ts(raw: Any) -> int | None:
+        """ISO-8601 string OR numeric/numeric-string -> unix seconds (UTC), or None.
+
+        The combined-transfers backend returns source_ts/target_ts as ISO-8601
+        strings; _coerce_timestamp_seconds only handles numerics, so parse ISO
+        here first (mirrors the TS SDK's _coerceTransferTs). Falls back to the
+        numeric coercer for numeric / numeric-string inputs.
+        """
+        if isinstance(raw, str) and raw.strip():
+            try:
+                dt = datetime.fromisoformat(raw.strip().replace("Z", "+00:00"))
+            except ValueError:
+                dt = None
+            if dt is not None:
+                if dt.tzinfo is None:
+                    dt = dt.replace(tzinfo=UTC)
+                return int(dt.timestamp())
+        return TransferClient._coerce_timestamp_seconds(raw)
+
+    @staticmethod
+    def _extract_history_timestamp(row: dict[str, Any]) -> int | None:
+        """Pull a timestamp out of one raw price-history row.
+
+        Backend ships ``date`` as ISO-8601; we additionally accept the
+        numeric aliases ``ts`` / ``timestamp`` / ``time`` (value treated
+        as milliseconds when ``>= 1e12``) so the contract is stable if
+        the shape ever flips.  Returns unix seconds (UTC) or ``None``.
+        """
+        raw_date = row.get("date")
+        if isinstance(raw_date, str) and raw_date.strip():
+            try:
+                # Accept ``...Z`` and timezone-naive ISO strings.  Python
+                # 3.11+ ``fromisoformat`` handles ``Z`` directly via the
+                # explicit ``+00:00`` replacement.
+                dt = datetime.fromisoformat(raw_date.replace("Z", "+00:00"))
+            except ValueError:
+                dt = None
+            if dt is not None:
+                return int(dt.timestamp())
+        for key in ("ts", "timestamp", "time"):
+            if key in row:
+                coerced = TransferClient._coerce_timestamp_seconds(row[key])
+                if coerced is not None:
+                    return coerced
+        return None
+
+    @track_method("transfer")
+    async def get_token_price_history(
+        self,
+        token: str,
+        *,
+        from_ts: int | None = None,
+        to_ts: int | None = None,
+    ) -> Result[list[PricePoint]]:
+        """Daily USD price history for one token.
+
+        Returns an ascending-time ordered ``list[PricePoint]`` from the
+        public ``/api/info/token-usd-price-history`` endpoint.  Past
+        prices do not change, so results are cached in the static tier
+        (1 hour TTL); the cache key is path-namespaced so daily and
+        hourly never collide.
+
+        The optional ``from_ts`` / ``to_ts`` window is in unix seconds.
+        The backend currently ignores it (the host fixes the network and
+        the lookback) but the SDK forwards both for forward-compat and
+        additionally filters the returned series client-side so the
+        caller's range contract holds regardless of backend behavior.
+
+        No authentication required (public endpoint).
+        """
+        return await self._fetch_price_history(ENDPOINT_INFO_PRICE_HISTORY, token, from_ts, to_ts)
+
+    @track_method("transfer")
+    async def get_token_hourly_price_history(
+        self,
+        token: str,
+        *,
+        from_ts: int | None = None,
+        to_ts: int | None = None,
+    ) -> Result[list[PricePoint]]:
+        """Hourly USD price history for one token.
+
+        Same contract as :meth:`get_token_price_history` (ascending-time
+        ``list[PricePoint]``, static-tier 1 h cache, optional
+        ``from_ts``/``to_ts`` window applied client-side) but routes
+        through the hourly endpoint.  Useful when more granular series
+        is needed than the daily variant — backend currently returns the
+        trailing ~24 h at 3-hour granularity.
+
+        No authentication required (public endpoint).
+        """
+        return await self._fetch_price_history(
+            ENDPOINT_INFO_HOURLY_PRICE_HISTORY, token, from_ts, to_ts
+        )
+
+    async def _fetch_price_history(
+        self,
+        path: str,
+        token: str,
+        from_ts: int | None,
+        to_ts: int | None,
+    ) -> Result[list[PricePoint]]:
+        """Shared validation + cache delegation for daily / hourly history.
+
+        Validates the token symbol up-front (avoids polluting the cache
+        with validation failures) then delegates to the cached helper.
+        """
+        token_result = validate_token_symbol(token, "token")
+        if not token_result.success:
+            return cast(Result[list[PricePoint]], token_result)
+        sym = self._normalize_user_token(token)
+        return cast(
+            Result[list[PricePoint]],
+            await self._fetch_price_history_cached(path, sym, from_ts, to_ts),
+        )
+
+    @async_ttl_cached(_STATIC_CACHE)
+    async def _fetch_price_history_cached(
+        self,
+        path: str,
+        token: str,
+        from_ts: int | None,
+        to_ts: int | None,
+    ) -> Result[list[PricePoint]]:
+        """Internal cached implementation of price-history fetch.
+
+        Cache key includes ``(path, token, from_ts, to_ts)`` so daily
+        and hourly never collide on the same slot even with identical
+        ``(token, from_ts, to_ts)`` tuples.
+        """
+        try:
+            params: dict[str, Any] = {"token": token}
+            if from_ts is not None:
+                params["from"] = from_ts
+            if to_ts is not None:
+                params["to"] = to_ts
+            data = await self._api_call(
+                "get",
+                f"{self.api_base_url}{path}",
+                params=params,
+            )
+            if not isinstance(data, list):
+                return Result.fail(
+                    f"Unexpected price history response shape: expected array, got {type(data).__name__}."
+                )
+            points: list[PricePoint] = []
+            for row in data:
+                if not isinstance(row, dict):
+                    continue
+                ts = self._extract_history_timestamp(row)
+                if ts is None:
+                    continue
+                price = self._coerce_usd_price(row.get("price"))
+                if price is None:
+                    continue
+                if from_ts is not None and ts < from_ts:
+                    continue
+                if to_ts is not None and ts > to_ts:
+                    continue
+                points.append(PricePoint(timestamp=ts, price=price))
+            points.sort(key=lambda p: p.timestamp)
+            return Result.ok(points)
+        except Exception as e:
+            return Result.fail(self._sanitize_error(e, "fetching token price history"))
+
+    # ----------------------------------------------------------------------
+    # Combined transfer history (signed /api/trading/signed/transferscombined)
+    # ----------------------------------------------------------------------
+
+    def _normalize_transfer(self, raw: Any) -> Transfer | None:
+        """Normalize one raw ``DBTransfer``-shaped row into a ``Transfer``.
+
+        Returns ``None`` for any row that is missing required fields or
+        carries an unknown ``action_type`` / ``status`` enum — the
+        public method silently drops these so a single bad row does not
+        poison the page.
+
+        ``bridge`` falls back to ``"NATIVE"`` for unknown enum values
+        because the frontend treats unrecognised bridges the same way
+        (display-only label, no behavior depends on the precise id),
+        and the row is otherwise valid.
+        """
+        if not isinstance(raw, dict):
+            return None
+
+        action_raw = raw.get("action_type")
+        if not isinstance(action_raw, int) or isinstance(action_raw, bool):
+            return None
+        action_type = _TRANSFER_ACTION_TYPE_LABELS.get(action_raw)
+        if action_type is None:
+            return None
+
+        status_raw = raw.get("status")
+        if not isinstance(status_raw, int) or isinstance(status_raw, bool):
+            return None
+        status = _TRANSFER_STATUS_LABELS.get(status_raw)
+        if status is None:
+            return None
+
+        symbol_raw = raw.get("symbol")
+        if not isinstance(symbol_raw, str) or not symbol_raw:
+            return None
+
+        quantity = self._coerce_usd_price(raw.get("quantity"))
+        if quantity is None:
+            return None
+
+        # Fee defaults to 0 if missing or unparseable — many native /
+        # portfolio-internal legs report ``"0"`` and some omit the field.
+        fee = self._coerce_usd_price(raw.get("fee"))
+        if fee is None:
+            fee = 0.0
+
+        trader_address_raw = raw.get("traderaddress")
+        trader_address = trader_address_raw if isinstance(trader_address_raw, str) else ""
+
+        bridge_raw = raw.get("bridge")
+        if isinstance(bridge_raw, int) and not isinstance(bridge_raw, bool):
+            bridge = _TRANSFER_BRIDGE_LABELS.get(bridge_raw, "NATIVE")
+        else:
+            bridge = "NATIVE"
+
+        bridge_url_raw = raw.get("bridge_url")
+        bridge_url = bridge_url_raw if isinstance(bridge_url_raw, str) else ""
+
+        nonce_raw = raw.get("nonce")
+        nonce = nonce_raw if isinstance(nonce_raw, int) and not isinstance(nonce_raw, bool) else -1
+
+        source_env_raw = raw.get("source_env")
+        source_env = source_env_raw if isinstance(source_env_raw, str) else ""
+
+        source_chain_id_raw = raw.get("source_chain_id")
+        source_chain_id = (
+            source_chain_id_raw
+            if isinstance(source_chain_id_raw, int) and not isinstance(source_chain_id_raw, bool)
+            else 0
+        )
+
+        source_tx_raw = raw.get("source_tx")
+        source_tx = source_tx_raw if isinstance(source_tx_raw, str) else ""
+
+        source_ts = self._coerce_transfer_ts(raw.get("source_ts")) or 0
+
+        target_env_raw = raw.get("target_env")
+        target_env = target_env_raw if isinstance(target_env_raw, str) else None
+
+        target_chain_id_raw = raw.get("target_chain_id")
+        target_chain_id = (
+            target_chain_id_raw
+            if isinstance(target_chain_id_raw, int) and not isinstance(target_chain_id_raw, bool)
+            else None
+        )
+
+        target_tx_raw = raw.get("target_tx")
+        target_tx = target_tx_raw if isinstance(target_tx_raw, str) else None
+
+        target_ts = self._coerce_transfer_ts(raw.get("target_ts"))
+
+        return Transfer(
+            action_type=action_type,
+            status=status,
+            symbol=symbol_raw,
+            quantity=quantity,
+            fee=fee,
+            trader_address=trader_address,
+            bridge=bridge,
+            bridge_url=bridge_url,
+            nonce=nonce,
+            source_env=source_env,
+            source_chain_id=source_chain_id,
+            source_tx=source_tx,
+            source_ts=source_ts,
+            target_env=target_env,
+            target_chain_id=target_chain_id,
+            target_tx=target_tx,
+            target_ts=target_ts,
+        )
+
+    @track_method("transfer")
+    async def get_combined_transfers(
+        self,
+        *,
+        symbol: str | None = None,
+        from_ts: int | None = None,
+        to_ts: int | None = None,
+        limit: int = 100,
+        offset: int = 0,
+    ) -> Result[list[Transfer]]:
+        """Paginated history of every deposit, withdrawal, gas top-up,
+        portfolio P2P send/receive, and bridge recovery involving the
+        connected wallet.
+
+        Routes through the signed REST endpoint
+        ``/api/trading/signed/transferscombined``; ``x-signature`` is
+        attached via :meth:`_get_auth_headers`.  Returns canonical
+        :class:`Transfer` rows with snake_case fields and human-readable
+        ``action_type`` / ``status`` / ``bridge`` labels lifted from the
+        backend's numeric enums.
+
+        Backend pagination uses ``itemsperpage`` / ``pageno`` (NOT
+        ``limit`` / ``offset``); the SDK accepts the more conventional
+        ``limit`` / ``offset`` signature and translates internally
+        (``pageno = (offset // limit) + 1``).
+
+        Cached for 10 seconds (balance tier) per
+        ``(address, symbol, from_ts, to_ts, limit, offset)`` tuple —
+        distinct signers and distinct filter combinations never share a
+        cache slot.  Returned ``quantity`` / ``fee`` are already display-
+        decimal — no wei→human conversion is applied because the backend
+        has already done it.
+
+        Args:
+            symbol: Optional token symbol filter (forwarded to backend as
+                ``symbol``).  Normalised through :meth:`_normalize_user_token`.
+            from_ts: Optional unix-seconds lower bound (forwarded as
+                ``periodfrom``).
+            to_ts: Optional unix-seconds upper bound (forwarded as
+                ``periodto``).
+            limit: Page size (forwarded as ``itemsperpage``, default 100).
+            offset: Row offset (translated to ``pageno`` = ``offset // limit + 1``,
+                default 0 → ``pageno=1``).
+        """
+        if not self.account:
+            return Result.fail("get_combined_transfers requires a configured wallet")
+
+        try:
+            address = cast(str, cast(Any, self.account).address)
+        except Exception as e:
+            return Result.fail(self._sanitize_error(e, "resolving wallet address"))
+
+        normalized_symbol: str | None = None
+        if symbol is not None:
+            normalized_symbol = self._normalize_user_token(symbol)
+
+        # Translate (limit, offset) → (itemsperpage, pageno).  The backend
+        # uses 1-indexed pages; offset 0 → page 1.  Defensive ``max(1, ...)``
+        # on items-per-page avoids a ZeroDivisionError on a caller-supplied
+        # ``limit=0`` while still surfacing it as a likely-empty page.
+        items_per_page = max(1, int(limit))
+        page_no = (int(offset) // items_per_page) + 1
+
+        return cast(
+            Result[list[Transfer]],
+            await self._get_combined_transfers_cached(
+                address,
+                normalized_symbol,
+                from_ts,
+                to_ts,
+                items_per_page,
+                page_no,
+            ),
+        )
+
+    @staticmethod
+    def _unix_seconds_to_iso(ts: int) -> str:
+        """Convert unix seconds to an ISO-8601 string (e.g. ``2026-05-01T00:00:00.000Z``).
+
+        The combined-transfers backend rejects raw unix integers for
+        ``periodfrom``/``periodto`` with "Malformed Request! ISO Date format
+        problem"; they must be ISO-8601. Matches the TypeScript SDK's
+        ``new Date(ts * 1000).toISOString()`` output byte-for-byte.
+        """
+        return (
+            datetime.fromtimestamp(ts, tz=UTC)
+            .isoformat(timespec="milliseconds")
+            .replace("+00:00", "Z")
+        )
+
+    @async_ttl_cached(_BALANCE_CACHE)
+    async def _get_combined_transfers_cached(
+        self,
+        address: str,
+        symbol: str | None,
+        period_from: int | None,
+        period_to: int | None,
+        items_per_page: int,
+        page_no: int,
+    ) -> Result[list[Transfer]]:
+        """Internal cached implementation of get_combined_transfers.
+
+        Cache key is namespaced by resolved address so signer swaps within
+        a single client never collide on the same slot, and by every
+        translated opt so different filter combinations are distinct.
+        """
+        try:
+            headers = self._get_auth_headers()
+        except Exception as e:
+            return Result.fail(self._sanitize_error(e, "fetching combined transfers"))
+
+        params: dict[str, Any] = {
+            "itemsperpage": items_per_page,
+            "pageno": page_no,
+        }
+        if symbol is not None:
+            params["symbol"] = symbol
+        # The backend's periodfrom/periodto expect ISO-8601 date strings, not
+        # unix seconds — forwarding the raw integers makes the endpoint reject
+        # the request ("Malformed Request! ISO Date format problem"). Convert
+        # the ergonomic unix-seconds inputs to ISO-8601 here.
+        if period_from is not None:
+            params["periodfrom"] = self._unix_seconds_to_iso(period_from)
+        if period_to is not None:
+            params["periodto"] = self._unix_seconds_to_iso(period_to)
+
+        try:
+            data = await self._api_call(
+                "get",
+                f"{self.api_base_url}{ENDPOINT_TRADING_COMBINED_TRANSFERS}",
+                headers=headers,
+                params=params,
+            )
+        except Exception as e:
+            return Result.fail(self._sanitize_error(e, "fetching combined transfers"))
+
+        # Backend ships ``{count, rows}``; we tolerate a bare array as a
+        # forward-compat fallback.
+        if isinstance(data, list):
+            rows: list[Any] = data
+        elif isinstance(data, dict):
+            envelope_rows = data.get("rows")
+            rows = envelope_rows if isinstance(envelope_rows, list) else []
+        else:
+            return Result.fail(
+                f"Unexpected transfers response shape: expected object or array, got {type(data).__name__}."
+            )
+
+        transfers: list[Transfer] = []
+        for row in rows:
+            normalized = self._normalize_transfer(row)
+            if normalized is not None:
+                transfers.append(normalized)
+        return Result.ok(transfers)

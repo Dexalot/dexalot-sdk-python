@@ -638,71 +638,47 @@ class TestDexalotBaseClient:
         assert "getting chains" in result.error.lower() or "test error" in result.error.lower()
 
     async def test_get_deployment(self, client):
-        """Test get_deployment."""
-        # Mock environments call (needed for get_deployment)
-        mock_env_resp = [
-            {
-                "env": "fuji-multi-subnet",
-                "chainid": 432204,
-                "rpc": "https://subnet.example.com",
-            }
+        """No-args ``get_deployment`` returns the raw REST list and uses defaults."""
+        mock_deploy_resp = [
+            {"env": "fuji-multi-subnet", "contracttype": "TradePairs", "address": "0xTP"},
+            {"env": "fuji-multi-subnet", "contracttype": "PortfolioSub", "address": "0xPS"},
+            {"env": "fuji-multi-avax", "contracttype": "MainnetRFQ", "address": "0xRFQ"},
         ]
-        mock_deploy_resp_tp = [{"env": "fuji-multi-subnet", "address": "0xTP", "abi": {"abi": []}}]
-        mock_deploy_resp_port = [
-            {"env": "fuji-multi-subnet", "address": "0xPS", "abi": {"abi": []}}
-        ]
-        mock_deploy_resp_rfq = [{"env": "fuji-multi-avax", "address": "0xRFQ", "abi": {"abi": []}}]
 
         def side_effect(url, params=None, **kwargs):
             mock_resp = AsyncMock()
+            mock_resp.status = 200
             mock_resp.raise_for_status = MagicMock()
-            if "environments" in url:
-                mock_resp.json.return_value = mock_env_resp
-            elif "deployment" in url:
-                ctype = params.get("contracttype")
-                if ctype == "TradePairs":
-                    mock_resp.json.return_value = mock_deploy_resp_tp
-                elif ctype == "Portfolio":
-                    mock_resp.json.return_value = mock_deploy_resp_port
-                elif ctype == "MainnetRFQ":
-                    mock_resp.json.return_value = mock_deploy_resp_rfq
-
+            mock_resp.json.return_value = mock_deploy_resp
             mock_cm = AsyncMock()
             mock_cm.__aenter__.return_value = mock_resp
             return mock_cm
 
         client._mock_session.get.side_effect = side_effect
-        client.w3_l1 = MagicMock()
-        client.w3_l1.eth.contract = MagicMock(return_value=MagicMock())
 
         res = await client.get_deployment()
         assert res.success
-        assert "TradePairs" in res.data
-        assert "PortfolioSub" in res.data
-        assert "MainnetRFQ" in res.data
+        assert res.data == mock_deploy_resp
+        # Default filters propagated to query string
+        call_kwargs = client._mock_session.get.call_args.kwargs
+        assert call_kwargs["params"] == {
+            "env": client.parent_env,
+            "contracttype": "All",
+            "returnabi": "true",
+        }
 
     async def test_get_deployment_error(self, client):
-        """Test get_deployment error handling."""
-        # Mock environments call to succeed
-        mock_env_resp = [
-            {
-                "env": "fuji-multi-subnet",
-                "chainid": 432204,
-                "rpc": "https://subnet.example.com",
-            }
-        ]
+        """REST failures bubble through as ``Result.fail``."""
 
         def side_effect(url, params=None, **kwargs):
             mock_resp = AsyncMock()
-            if "environments" in url:
-                mock_resp.json.return_value = mock_env_resp
-                mock_resp.raise_for_status = MagicMock()
-            elif "deployment" in url:
-                # Make deployment fetch raise an exception
-                def raise_error():
-                    raise Exception("Test error fetching deployments")
+            mock_resp.status = 500
+            mock_resp.json.return_value = {}  # empty body — falls through
 
-                mock_resp.raise_for_status = raise_error
+            def raise_error():
+                raise Exception("Test error fetching deployments")
+
+            mock_resp.raise_for_status = raise_error
             mock_cm = AsyncMock()
             mock_cm.__aenter__.return_value = mock_resp
             return mock_cm
@@ -2611,46 +2587,37 @@ class TestDexalotBaseClient:
         assert "failed to fetch environments" in result.error.lower()
 
     async def test_get_deployment_cache_disabled(self, client):
-        """Test get_deployment with cache disabled."""
+        """``get_deployment`` clears its own cache slot when caching is disabled."""
         from dexalot_sdk.core.base import _STATIC_CACHE
 
         # Disable cache
         client._cache_enabled = False
 
-        # Add something to cache
-        key = ("get_deployment", (client,), frozenset())
+        # Pre-seed the cache slot for the no-args call so we can verify it gets cleared.
+        # Cache-key shape mirrors the one built inside ``get_deployment``.
+        key = (
+            "get_deployment",
+            client.api_base_url,
+            (),
+            frozenset(
+                {
+                    "env": client.parent_env,
+                    "contract_type": "All",
+                    "return_abi": True,
+                }.items()
+            ),
+        )
         _STATIC_CACHE._store[key] = "cached_data"
 
-        # Mock API responses
-        mock_env_resp = [
-            {
-                "env": "fuji-multi-subnet",
-                "chainid": 432204,
-                "rpc": "https://subnet.example.com",
-            }
-        ]
-        mock_deploy_resp_tp = [{"env": "fuji-multi-subnet", "address": "0xTP", "abi": {"abi": []}}]
-        mock_deploy_resp_port = [
-            {"env": "fuji-multi-subnet", "address": "0xPS", "abi": {"abi": []}}
-        ]
-        mock_deploy_resp_rfq = [{"env": "fuji-multi-avax", "address": "0xRFQ", "abi": {"abi": []}}]
-
+        # NB: with _cache_enabled=False, the decorator bypasses the cache
+        # entirely (no read, no write). The body of ``get_deployment``
+        # still pops the resolved key for defence-in-depth, so the
+        # sentinel must disappear.
         def side_effect(url, params=None, **kwargs):
             mock_resp = AsyncMock()
+            mock_resp.status = 200
             mock_resp.raise_for_status = MagicMock()
-            if "environments" in url:
-                mock_resp.json.return_value = mock_env_resp
-            elif "deployment" in url:
-                if params and params.get("contracttype") == "TradePairs":
-                    mock_resp.json.return_value = mock_deploy_resp_tp
-                elif params and params.get("contracttype") == "PortfolioMain":
-                    mock_resp.json.return_value = mock_deploy_resp_port
-                elif params and params.get("contracttype") == "MainnetRFQ":
-                    mock_resp.json.return_value = mock_deploy_resp_rfq
-                else:
-                    mock_resp.json.return_value = []
-            else:
-                mock_resp.json.return_value = []
+            mock_resp.json.return_value = []
             mock_cm = AsyncMock()
             mock_cm.__aenter__.return_value = mock_resp
             return mock_cm
@@ -2659,56 +2626,8 @@ class TestDexalotBaseClient:
 
         result = await client.get_deployment()
 
-        # Verify cache was cleared
+        # Verify the sentinel cache entry was cleared
         assert key not in _STATIC_CACHE._store
-        assert result.success
-
-    async def test_get_deployment_empty_deployments_init(self, client):
-        """Test get_deployment when self.deployments is empty/None to verify initialization."""
-        # Set deployments to empty
-        client.deployments = None
-
-        # Mock API responses
-        mock_env_resp = [
-            {
-                "env": "fuji-multi-subnet",
-                "chainid": 432204,
-                "rpc": "https://subnet.example.com",
-            }
-        ]
-        mock_deploy_resp_tp = [{"env": "fuji-multi-subnet", "address": "0xTP", "abi": {"abi": []}}]
-        mock_deploy_resp_port = [
-            {"env": "fuji-multi-subnet", "address": "0xPS", "abi": {"abi": []}}
-        ]
-        mock_deploy_resp_rfq = [{"env": "fuji-multi-avax", "address": "0xRFQ", "abi": {"abi": []}}]
-
-        def side_effect(url, params=None, **kwargs):
-            mock_resp = AsyncMock()
-            mock_resp.raise_for_status = MagicMock()
-            if "environments" in url:
-                mock_resp.json.return_value = mock_env_resp
-            elif "deployment" in url:
-                if params and params.get("contracttype") == "TradePairs":
-                    mock_resp.json.return_value = mock_deploy_resp_tp
-                elif params and params.get("contracttype") == "PortfolioMain":
-                    mock_resp.json.return_value = mock_deploy_resp_port
-                elif params and params.get("contracttype") == "MainnetRFQ":
-                    mock_resp.json.return_value = mock_deploy_resp_rfq
-                else:
-                    mock_resp.json.return_value = []
-            else:
-                mock_resp.json.return_value = []
-            mock_cm = AsyncMock()
-            mock_cm.__aenter__.return_value = mock_resp
-            return mock_cm
-
-        client._mock_session.get.side_effect = side_effect
-
-        result = await client.get_deployment()
-
-        # Verify deployments was initialized
-        assert client.deployments is not None
-        assert "TradePairs" in client.deployments
         assert result.success
 
     async def test_rehydrate_cached_get_environments_ignores_failed_or_empty_results(self, client):
@@ -2723,69 +2642,8 @@ class TestDexalotBaseClient:
         await client._rehydrate_cached_get_environments(Result.ok(None))
         assert client.chain_config == {"keep": {"chain_id": 1}}
 
-    def test_apply_deployment_state_restores_contract_handles(self, client):
-        """Deployment rehydration should rebuild all contract handles when providers exist."""
-        client.w3_l1 = MagicMock()
-        client.w3_connected_chain = MagicMock()
-        trade_pairs_contract = MagicMock()
-        portfolio_sub_contract = MagicMock()
-        portfolio_main_contract = MagicMock()
-        client.w3_l1.eth.contract.side_effect = [trade_pairs_contract, portfolio_sub_contract]
-        client.w3_connected_chain.eth.contract.return_value = portfolio_main_contract
-
-        deployments = {
-            "TradePairs": {"address": "0xTP", "abi": []},
-            "PortfolioSub": {"address": "0xPS", "abi": []},
-            "PortfolioMain": {"Avalanche": {"address": "0xPM", "abi": []}},
-        }
-
-        client._apply_deployment_state(deployments)
-
-        assert client.deployments == deployments
-        assert client.trade_pairs_contract is trade_pairs_contract
-        assert client.portfolio_sub_contract is portfolio_sub_contract
-        assert client.portfolio_main_avax_contract is portfolio_main_contract
-
-    async def test_rehydrate_cached_get_deployment_fetches_environments_first(self, client):
-        """Deployment rehydration should bootstrap env state before rebuilding contracts."""
-        from dexalot_sdk.utils.result import Result
-
-        client.chain_config = {}
-        client.w3_l1 = None
-
-        with (
-            patch.object(
-                client, "get_environments", new=AsyncMock(return_value=Result.ok([]))
-            ) as envs,
-            patch.object(client, "_apply_deployment_state") as apply_state,
-        ):
-            await client._rehydrate_cached_get_deployment(Result.ok({"TradePairs": {}}))
-
-        envs.assert_awaited_once()
-        apply_state.assert_called_once_with({"TradePairs": {}})
-
-    async def test_rehydrate_cached_get_deployment_skips_apply_when_env_bootstrap_fails(
-        self, client
-    ):
-        """Deployment rehydration should bail out if env restoration fails."""
-        from dexalot_sdk.utils.result import Result
-
-        client.chain_config = {}
-        client.w3_l1 = None
-
-        with (
-            patch.object(
-                client, "get_environments", new=AsyncMock(return_value=Result.fail("env down"))
-            ) as envs,
-            patch.object(client, "_apply_deployment_state") as apply_state,
-        ):
-            await client._rehydrate_cached_get_deployment(Result.ok({"TradePairs": {}}))
-
-        envs.assert_awaited_once()
-        apply_state.assert_not_called()
-
     # ------------------------------------------------------------------
-    # camelCase transform fallbacks + get_chains / get_deployments env-fail
+    # camelCase transform fallbacks + get_chains env-fail
     # ------------------------------------------------------------------
 
     def test_transform_environment_camelcase_chain_id_and_env_type(self, client):
@@ -2840,18 +2698,6 @@ class TestDexalotBaseClient:
         assert not result.success
         assert "env error" in result.error
 
-    async def test_get_deployments_env_fail_propagates(self, client):
-        """get_deployment returns Result.fail when get_environments fails (chain_config empty)."""
-        client.chain_config = {}  # ensure get_environments is called
-        with patch.object(
-            client,
-            "get_environments",
-            new=AsyncMock(return_value=MagicMock(success=False, error="env down")),
-        ):
-            result = await client.get_deployment()
-        assert not result.success
-        assert "env down" in result.error
-
     async def test_connect_python314_connector_has_no_enable_cleanup_closed(self, client, mock_env):
         """On Python >= 3.14 the TCPConnector is created without enable_cleanup_closed."""
         client._session = None  # force a new session to be created
@@ -2871,3 +2717,234 @@ class TestDexalotBaseClient:
         client._provider_manager = None
         with pytest.raises(RuntimeError, match="Provider manager is required"):
             await client._rpc_call_with_failover("Avalanche", "eth.get_block", "latest")
+
+    # -------------------------------------------------------------------- #
+    # _api_call — REST error body preservation                             #
+    # -------------------------------------------------------------------- #
+    # The Dexalot REST API encodes failures as
+    # ``{"reasonCode": "...", "reason": "..."}`` (also tolerates the
+    # snake_case ``reason_code`` and the ``message`` alias that some
+    # endpoints emit). ``_api_call`` must lift these into the raised
+    # exception so callers' ``Result.fail`` strings surface the backend
+    # reason instead of collapsing to ``"... HTTP status N"``.
+
+    @staticmethod
+    def _http_error_response(status: int, body):
+        """Build a context-manager mock that yields a response with the given body."""
+
+        async def _json(content_type=None):
+            if isinstance(body, Exception):
+                raise body
+            return body
+
+        mock_resp = AsyncMock()
+        mock_resp.status = status
+        mock_resp.json = _json
+
+        if status >= 400:
+            import aiohttp
+
+            def _raise():
+                raise aiohttp.ClientResponseError(
+                    request_info=MagicMock(),
+                    history=(),
+                    status=status,
+                    message=f"Request failed with status code {status}",
+                )
+
+            mock_resp.raise_for_status = MagicMock(side_effect=_raise)
+        else:
+            mock_resp.raise_for_status = MagicMock()
+
+        mock_cm = AsyncMock()
+        mock_cm.__aenter__.return_value = mock_resp
+        mock_cm.__aexit__.return_value = None
+        return mock_cm
+
+    async def test_api_call_lifts_reason_code_and_reason(self, client):
+        """_api_call surfaces backend reasonCode + reason from response body."""
+        cm = self._http_error_response(
+            400, {"reasonCode": "FQ-015", "reason": "insufficient liquidity"}
+        )
+        with patch.object(client, "_make_http_request", AsyncMock(return_value=cm)):
+            with pytest.raises(RuntimeError, match=r"^FQ-015: insufficient liquidity$"):
+                await client._api_call("get", "https://api/x")
+
+    async def test_api_call_lifts_snake_case_aliases(self, client):
+        """``reason_code`` + ``message`` aliases are also lifted."""
+        cm = self._http_error_response(
+            400, {"reason_code": "T-TMDQ-01", "message": "amount too small"}
+        )
+        with patch.object(client, "_make_http_request", AsyncMock(return_value=cm)):
+            with pytest.raises(RuntimeError, match=r"^T-TMDQ-01: amount too small$"):
+                await client._api_call("get", "https://api/x")
+
+    async def test_api_call_reason_code_without_reason_uses_generic_tail(self, client):
+        """When reasonCode is set but reason is missing, fall back to a generic tail."""
+        cm = self._http_error_response(500, {"reasonCode": "P-OK01"})
+        with patch.object(client, "_make_http_request", AsyncMock(return_value=cm)):
+            with pytest.raises(
+                RuntimeError, match=r"^P-OK01: Request failed with status code 500$"
+            ):
+                await client._api_call("get", "https://api/x")
+
+    async def test_api_call_reason_alone_without_reason_code(self, client):
+        """Reason alone (no reasonCode) is used as the full message."""
+        cm = self._http_error_response(400, {"reason": "something else"})
+        with patch.object(client, "_make_http_request", AsyncMock(return_value=cm)):
+            with pytest.raises(RuntimeError, match=r"^something else$"):
+                await client._api_call("get", "https://api/x")
+
+    async def test_api_call_message_alias_alone(self, client):
+        """``message`` alias alone (no reasonCode) is used as the full message."""
+        cm = self._http_error_response(400, {"message": "plain reason from message field"})
+        with patch.object(client, "_make_http_request", AsyncMock(return_value=cm)):
+            with pytest.raises(RuntimeError, match=r"^plain reason from message field$"):
+                await client._api_call("get", "https://api/x")
+
+    async def test_api_call_empty_body_falls_through_to_aiohttp_error(self, client):
+        """Empty ``{}`` body falls through to the generic aiohttp error."""
+        import aiohttp
+
+        cm = self._http_error_response(500, {})
+        with patch.object(client, "_make_http_request", AsyncMock(return_value=cm)):
+            with pytest.raises(aiohttp.ClientResponseError):
+                await client._api_call("get", "https://api/x")
+
+    async def test_api_call_non_dict_body_falls_through(self, client):
+        """HTML / non-JSON-object body falls through to the generic aiohttp error."""
+        import aiohttp
+
+        cm = self._http_error_response(502, "<html>502 Bad Gateway</html>")
+        with patch.object(client, "_make_http_request", AsyncMock(return_value=cm)):
+            with pytest.raises(aiohttp.ClientResponseError):
+                await client._api_call("get", "https://api/x")
+
+    async def test_api_call_body_parse_failure_falls_through(self, client):
+        """When body parsing raises, fall through to the generic aiohttp error."""
+        import aiohttp
+
+        cm = self._http_error_response(502, ValueError("not json"))
+        with patch.object(client, "_make_http_request", AsyncMock(return_value=cm)):
+            with pytest.raises(aiohttp.ClientResponseError):
+                await client._api_call("get", "https://api/x")
+
+    async def test_api_call_network_error_propagates(self, client):
+        """Network-level failure (no response) propagates unchanged."""
+        import aiohttp
+
+        with patch.object(
+            client,
+            "_make_http_request",
+            AsyncMock(side_effect=aiohttp.ClientConnectionError("Network Error")),
+        ):
+            with pytest.raises(aiohttp.ClientConnectionError, match="Network Error"):
+                await client._api_call("get", "https://api/x")
+
+    async def test_api_call_non_http_error_propagates(self, client):
+        """Non-HTTP exceptions raised inside the request propagate unchanged."""
+        with patch.object(
+            client,
+            "_make_http_request",
+            AsyncMock(side_effect=RuntimeError("generic non-http failure")),
+        ):
+            with pytest.raises(RuntimeError, match="generic non-http failure"):
+                await client._api_call("get", "https://api/x")
+
+    async def test_api_call_success_returns_json(self, client):
+        """Happy path: returns parsed JSON body."""
+        cm = self._http_error_response(200, [{"id": 1}])
+        with patch.object(client, "_make_http_request", AsyncMock(return_value=cm)):
+            data = await client._api_call("get", "https://api/x")
+        assert data == [{"id": 1}]
+
+    # -------------------------------------------------------------------- #
+    # get_deployment — env / contract_type / return_abi filters            #
+    # -------------------------------------------------------------------- #
+    # The Dexalot REST deployment endpoint takes optional
+    # env / contracttype / returnabi filters. The SDK accepts them via
+    # keyword-only args and resolves defaults (env=parent_env,
+    # contract_type='All', return_abi=True). The cache key includes all
+    # three so filter variants do not collide on the same static-cache
+    # slot.
+
+    async def test_get_deployment_defaults_call_rest_endpoint(self, client):
+        """No-args ``get_deployment`` calls REST with default filters."""
+        api_spy = AsyncMock(return_value=[{"env": "fuji-multi", "contracttype": "All"}])
+        with patch.object(client, "_api_call", api_spy):
+            result = await client.get_deployment()
+
+        assert result.success
+        assert result.data == [{"env": "fuji-multi", "contracttype": "All"}]
+        api_spy.assert_awaited_once()
+        _, kwargs = api_spy.call_args
+        assert kwargs["params"] == {
+            "env": client.parent_env,
+            "contracttype": "All",
+            "returnabi": "true",
+        }
+
+    async def test_get_deployment_partial_opts_default_remaining(self, client):
+        """Partial opts (only ``env``) fall back to defaults for the rest."""
+        api_spy = AsyncMock(return_value=[])
+        with patch.object(client, "_api_call", api_spy):
+            await client.get_deployment(env="fuji-multi-subnet")
+
+        _, kwargs = api_spy.call_args
+        assert kwargs["params"] == {
+            "env": "fuji-multi-subnet",
+            "contracttype": "All",
+            "returnabi": "true",
+        }
+
+    async def test_get_deployment_full_opts_propagate(self, client):
+        """All three opts are forwarded to the REST query string."""
+        api_spy = AsyncMock(return_value=[])
+        with patch.object(client, "_api_call", api_spy):
+            result = await client.get_deployment(
+                env="fuji-multi-avax",
+                contract_type="Portfolio",
+                return_abi=False,
+            )
+
+        assert result.success
+        assert result.data == []
+        _, kwargs = api_spy.call_args
+        assert kwargs["params"] == {
+            "env": "fuji-multi-avax",
+            "contracttype": "Portfolio",
+            "returnabi": "false",
+        }
+
+    async def test_get_deployment_distinct_cache_slots_per_filter_combo(self, client):
+        """Distinct (env, contract_type, return_abi) combos use distinct cache slots."""
+        api_spy = AsyncMock(return_value=[])
+        with patch.object(client, "_api_call", api_spy):
+            await client.get_deployment(env="fuji-multi-avax")
+            await client.get_deployment(env="production-multi-avax")
+            await client.get_deployment(env="fuji-multi-avax", contract_type="Portfolio")
+            await client.get_deployment(env="fuji-multi-avax", return_abi=False)
+
+        # Four distinct calls — no cache collision
+        assert api_spy.await_count == 4
+
+    async def test_get_deployment_repeated_identical_call_is_cached(self, client):
+        """Repeated identical calls hit the static cache and skip REST."""
+        api_spy = AsyncMock(return_value=[])
+        with patch.object(client, "_api_call", api_spy):
+            await client.get_deployment(env="fuji-multi-avax")
+            await client.get_deployment(env="fuji-multi-avax")
+
+        assert api_spy.await_count == 1
+
+    async def test_get_deployment_rest_failure_returns_sanitized_fail(self, client):
+        """REST failures are caught and returned as Result.fail."""
+        with patch.object(
+            client,
+            "_api_call",
+            AsyncMock(side_effect=RuntimeError("FQ-015: insufficient liquidity")),
+        ):
+            result = await client.get_deployment(env="fuji-multi-avax")
+
+        assert not result.success
+        assert "FQ-015" in result.error or "insufficient liquidity" in result.error.lower()

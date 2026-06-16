@@ -158,6 +158,20 @@ else:
 ```
 
 See `examples/error_handling.py` for comprehensive error handling patterns.
+
+### Order History
+
+```python
+result = await client.get_order_history(
+    pair="ALOT/USDC",
+    status="FILLED",
+    limit=50,
+)
+if result.success:
+    for order in result.data:
+        print(f"{order['pair']} {order['side']} {order['quantity']} @ {order['price']}")
+```
+
 ## Dependencies
 
 - `web3>=6.0.0`: Multi-chain blockchain interactions (AsyncWeb3 for async operations)
@@ -300,12 +314,15 @@ client.invalidate_cache(level="balance")  # Options: static, semi_static, balanc
 **Static Data (1 hour):**
 - `get_environments()`
 - `get_chains()`
-- `get_deployment()`
+- `get_deployment()` (also caches per `(env, contract_type, return_abi)` filter combination)
+- `get_token_price_history(token, *, from_ts=None, to_ts=None)`
+- `get_token_hourly_price_history(token, *, from_ts=None, to_ts=None)`
 
 **Semi-Static Data (15 minutes):**
 - `get_tokens()`
 - `get_clob_pairs()`
 - `get_swap_pairs(chain_identifier)`
+- `get_token_usd_prices(env=None)`
 
 **Balance Data (10 seconds):**
 - `get_portfolio_balance(token, address=None)`
@@ -314,6 +331,8 @@ client.invalidate_cache(level="balance")  # Options: static, semi_static, balanc
 - `get_chain_wallet_balances(chain, address=None)`
 - `get_chain_token_balances(chain, address=None, tokens=...)`
 - `get_all_chain_wallet_balances(address=None)`
+- `get_order_history(account=None, *, pair=None, status=None, limit=100, offset=0)`
+- `get_combined_transfers(*, symbol=None, from_ts=None, to_ts=None, limit=100, offset=0)`
 
 **Orderbook Data (1 second):**
 - `get_orderbook(pair)`
@@ -787,6 +806,17 @@ Error messages are automatically sanitized to prevent information leakage:
 - Stack traces are removed
 - User-friendly messages are provided
 
+### Backend reason codes
+
+Errors from the Dexalot REST API include structured `reasonCode` (e.g. `FQ-015`, `P-AFNE-02`, `T-TMDQ-01`, `RF-IMV-01`) and human `reason` fields. These are preserved verbatim in `Result.fail()` messages — you'll see `"FQ-015: insufficient liquidity"` rather than the generic `"Request failed with status code 400"`. Pattern-match on the code prefix to react programmatically:
+
+```python
+result = await client.get_swap_firm_quote("USDC", "AVAX", 100)
+if not result.success and result.error.startswith("FQ-"):
+    # RFQ backend rejected the quote — see the reason code prefix for why
+    ...
+```
+
 ### Best Practices
 
 1. **Always check `result.success`** before accessing `result.data`
@@ -987,6 +1017,20 @@ Orders are normalized into one canonical SDK shape regardless of whether the sou
 
 **Deployment API:**
 - `env`, `address`, `abi` (handles variations like `Env`, `Address`, `Abi`)
+
+**Price History API (`get_token_price_history`, `get_token_hourly_price_history`):**
+- Returns `list[PricePoint]` with `timestamp` (unix seconds, UTC) and `price` (`float`).
+- `timestamp` is normalized from `date` ISO-8601, `ts`, `timestamp`, or `time` aliases — millisecond magnitudes are auto-detected and divided down to seconds.
+- `price` is coerced from a string decimal to `float`; scientific notation is supported.
+- Rows are returned sorted ascending by `timestamp`.
+
+**Combined Transfers API (`get_combined_transfers`):**
+- Returns `list[Transfer]` — a frozen dataclass with snake_case fields normalized from the backend's `DBTransfer` shape: `action_type`, `status`, `symbol`, `quantity`, `fee`, `trader_address`, `bridge`, `bridge_url`, `nonce`, `source_env`, `source_chain_id`, `source_tx`, `source_ts`, `target_env`, `target_chain_id`, `target_tx`, `target_ts`. The `target_*` fields are `None` for non-crossing transfers (no target leg).
+- Numeric enums are mapped to string `Literal` labels: `status` (`COMPLETED`/`INFLIGHT`/`DELAYED`), `action_type` (10 labels including `WITHDRAWN`/`DEPOSITED`/`SENT`/`RECEIVED`/`RECOVERED`/`ADD_GAS`/`REMOVE_GAS`/`AUTO_FILL`/`WITHDRAW_PENDING`/`DEPOSIT_PENDING`), `bridge` (`NATIVE`/`LAYER0`/`CELER`/`ICM`).
+- `quantity` and `fee` arrive as display-decimal strings — no wei→human conversion is needed (parsed via `float()`).
+
+**Order History API (`get_order_history`):**
+- Same canonical order dict and field aliases as `get_open_orders` — see the "Orders API" entry above.
 
 ### Benefits
 
