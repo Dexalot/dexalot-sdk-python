@@ -31,7 +31,12 @@ from .order_types import (
     ORDER_TYPE_NAMES,
     SIDE_NAMES,
     TIME_IN_FORCE_NAMES,
+    OrderType,
+    Side,
     enum_int_to_name,
+    parse_stp,
+    parse_time_in_force,
+    validate_order_combo,
 )
 
 _logger = logging.getLogger("dexalot_sdk")
@@ -460,6 +465,8 @@ class CLOBClient(DexalotBaseClient):
         order_type: str = "LIMIT",
         wait_for_receipt: bool = True,
         client_order_id: str | None = None,
+        time_in_force: str = "GTC",
+        stp: str = "CANCEL_TAKER",
     ) -> Result[dict]:
         """Place a single limit or market order on the CLOB.
 
@@ -471,17 +478,28 @@ class CLOBClient(DexalotBaseClient):
             side: ``"BUY"`` or ``"SELL"`` (case-insensitive).
             amount: Order quantity in base-token units (human-readable).
             price: Limit price in quote-token units.  Required for ``"LIMIT"``
-                orders; ignored for ``"MARKET"`` orders.
+                orders; must be ``None`` / ``0`` for ``"MARKET"`` orders.
             order_type: ``"LIMIT"`` (default) or ``"MARKET"``.
             wait_for_receipt: If ``True``, block until the transaction is
                 confirmed on-chain and return the receipt status.
             client_order_id: Optional 32-byte hex string (``"0x"`` + 64 hex
                 chars) to use as the client order identifier.  When omitted,
                 a random ID is generated.
+            time_in_force: Time-in-force / execution modifier — ``"GTC"``
+                (default), ``"FOK"``, ``"IOC"``, or ``"PO"`` (Post-Only).
+                Aliases such as ``"POST_ONLY"`` are accepted.  MARKET orders
+                must use ``"IOC"`` or ``"FOK"``.
+            stp: Self-trade-prevention mode — ``"CANCEL_TAKER"`` (default),
+                ``"CANCEL_MAKER"``, ``"CANCEL_BOTH"``, or ``"CANCEL_NONE"``.
 
         Returns:
             Result containing ``{"status": str, "tx_hash": str, "client_order_id": str}``
             on success, or an error message on failure.
+
+        Note:
+            For a MARKET BUY the notional is unknown without a price, so the
+            pre-flight balance check is skipped and the contract enforces its
+            own protection.  All other paths keep the pre-flight check.
         """
         if not self.account:
             return Result.fail("Private key not configured.")
@@ -512,6 +530,16 @@ class CLOBClient(DexalotBaseClient):
             if validation_error is not None:
                 return cast(Result[dict[Any, Any]], validation_error)
 
+            # Resolve time-in-force and self-trade-prevention, then check the
+            # (type1, type2, price) combination client-side before sending.
+            mods_res = self._resolve_order_modifiers(
+                type_enum, time_in_force, stp, has_price=bool(price)
+            )
+            if not mods_res.success:
+                return cast(Result[dict[Any, Any]], mods_res)
+            assert mods_res.data is not None
+            type2_enum, stp_enum = mods_res.data
+
             # Validate precision against the pair's display decimals.
             # Inputs with extra precision are rejected (no silent slippage).
             norm_res = self._normalize_order_amounts(price, amount, pair_data)
@@ -520,13 +548,15 @@ class CLOBClient(DexalotBaseClient):
             assert norm_res.data is not None
             price, amount = norm_res.data  # type: ignore[assignment]
 
-            # Portfolio Balance Check
-            required_token = pair_data["quote"] if side_enum == 0 else pair_data["base"]
-            required_amount = (price * amount) if side_enum == 0 else amount
-
-            balance_error = await self._check_order_balance(required_token, required_amount)
-            if balance_error is not None:
-                return cast(Result[dict[Any, Any]], balance_error)
+            # Portfolio balance check. Skipped for a MARKET BUY: without a
+            # price the quote-token notional is unknown, so the contract
+            # enforces the balance protection instead.
+            if not (type_enum == OrderType.MARKET and side_enum == Side.BUY):
+                required_token = pair_data["quote"] if side_enum == 0 else pair_data["base"]
+                required_amount = (price * amount) if side_enum == 0 else amount
+                balance_error = await self._check_order_balance(required_token, required_amount)
+                if balance_error is not None:
+                    return cast(Result[dict[Any, Any]], balance_error)
 
             # Decimals (Decimal-backed; never multiply floats by 10**N here)
             price_wei = self._to_wei(price, pair_data["quote_decimals"]) if price else 0
@@ -553,8 +583,8 @@ class CLOBClient(DexalotBaseClient):
                 "traderaddress": from_addr,
                 "side": side_enum,
                 "type1": type_enum,
-                "type2": 0,  # GTC
-                "stp": 0,  # Cancel Newest
+                "type2": type2_enum,
+                "stp": stp_enum,
             }
 
             # Estimate gas, build, sign, send, wait for receipt
@@ -1468,6 +1498,28 @@ class CLOBClient(DexalotBaseClient):
             return None, None, Result.fail("Price is required for LIMIT orders.")
 
         return side_enum, type_enum, None
+
+    def _resolve_order_modifiers(
+        self, type1_enum: int, time_in_force: object, stp: object, has_price: bool
+    ) -> "Result[tuple[int, int]]":
+        """Resolve and validate (time_in_force, stp) for an order.
+
+        Returns ``Result.ok((type2_enum, stp_enum))`` or a failure describing
+        the invalid modifier / combination.  Shared by every write path so the
+        order-type matrix is enforced uniformly.
+        """
+        tif_res = parse_time_in_force(time_in_force)
+        if not tif_res.success:
+            return cast("Result[tuple[int, int]]", tif_res)
+        type2_enum = cast(int, tif_res.data)
+        stp_res = parse_stp(stp)
+        if not stp_res.success:
+            return cast("Result[tuple[int, int]]", stp_res)
+        stp_enum = cast(int, stp_res.data)
+        combo_res = validate_order_combo(type1_enum, type2_enum, has_price=has_price)
+        if not combo_res.success:
+            return cast("Result[tuple[int, int]]", combo_res)
+        return Result.ok((type2_enum, stp_enum))
 
     async def _check_order_balance(self, required_token, required_amount):
         """Check if sufficient balance exists for an order."""

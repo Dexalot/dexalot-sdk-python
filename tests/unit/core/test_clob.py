@@ -562,6 +562,99 @@ class TestCLOBClient:
         )
         assert not bad_res.success
 
+    @pytest.fixture
+    def order_client(self, client):
+        """A client wired with a standard pair and mocked tx/balance for order tests."""
+        from dexalot_sdk.utils.result import Result
+
+        client.pairs = {
+            "AVAX/USDC": {
+                "pair": "AVAX/USDC",
+                "base": "AVAX",
+                "quote": "USDC",
+                "base_decimals": 18,
+                "quote_decimals": 6,
+                "tradePairId": b"TPID",
+            }
+        }
+        mock_receipt = MagicMock()
+        mock_receipt.status = 1
+        client._send_trade_tx = AsyncMock(return_value=("0xTxHash", mock_receipt))
+        client.get_portfolio_balance = AsyncMock(return_value=Result.ok({"available": 1_000_000.0}))
+        return client
+
+    async def test_add_order_default_tif_and_stp(self, order_client):
+        """Default call still encodes GTC (type2=0) and CANCEL_TAKER (stp=0)."""
+        res = await order_client.add_order("AVAX/USDC", "BUY", 1.0, 10.0)
+        assert res.success
+        struct = order_client.trade_pairs_contract.functions.addNewOrder.call_args[0][0]
+        assert struct["type1"] == 1  # LIMIT
+        assert struct["type2"] == 0  # GTC
+        assert struct["stp"] == 0  # CANCEL_TAKER
+
+    @pytest.mark.parametrize(
+        "tif,expected_type2",
+        [("GTC", 0), ("FOK", 1), ("IOC", 2), ("PO", 3), ("post_only", 3)],
+    )
+    async def test_add_order_time_in_force(self, order_client, tif, expected_type2):
+        """Each time-in-force (and alias) reaches the struct as the right int."""
+        res = await order_client.add_order(
+            "AVAX/USDC", "SELL", 1.0, 10.0, time_in_force=tif
+        )
+        assert res.success
+        struct = order_client.trade_pairs_contract.functions.addNewOrder.call_args[0][0]
+        assert struct["type2"] == expected_type2
+
+    @pytest.mark.parametrize(
+        "stp,expected", [("CANCEL_TAKER", 0), ("CANCEL_MAKER", 1), ("CANCEL_BOTH", 2), ("NONE", 3)]
+    )
+    async def test_add_order_stp(self, order_client, stp, expected):
+        """Self-trade-prevention mode reaches the struct as the right int."""
+        res = await order_client.add_order("AVAX/USDC", "SELL", 1.0, 10.0, stp=stp)
+        assert res.success
+        struct = order_client.trade_pairs_contract.functions.addNewOrder.call_args[0][0]
+        assert struct["stp"] == expected
+
+    async def test_add_order_market_ioc_skips_buy_balance_check(self, order_client):
+        """MARKET BUY: type1=0, price=0, and the pre-flight balance check is skipped."""
+        res = await order_client.add_order(
+            "AVAX/USDC", "BUY", 1.0, None, order_type="MARKET", time_in_force="IOC"
+        )
+        assert res.success
+        struct = order_client.trade_pairs_contract.functions.addNewOrder.call_args[0][0]
+        assert struct["type1"] == 0  # MARKET
+        assert struct["type2"] == 2  # IOC
+        assert struct["price"] == 0
+        order_client.get_portfolio_balance.assert_not_called()
+
+    async def test_add_order_market_sell_still_checks_balance(self, order_client):
+        """MARKET SELL keeps the pre-flight balance check (base amount is known)."""
+        res = await order_client.add_order(
+            "AVAX/USDC", "SELL", 1.0, None, order_type="MARKET", time_in_force="FOK"
+        )
+        assert res.success
+        order_client.get_portfolio_balance.assert_called()
+
+    async def test_add_order_rejects_invalid_combos(self, order_client):
+        """Invalid type1 x type2 / price combos are rejected before any tx is sent."""
+        # MARKET with GTC is invalid
+        r1 = await order_client.add_order(
+            "AVAX/USDC", "BUY", 1.0, None, order_type="MARKET", time_in_force="GTC"
+        )
+        assert not r1.success and "MARKET" in r1.error
+
+        # MARKET with a price is invalid
+        r2 = await order_client.add_order(
+            "AVAX/USDC", "BUY", 1.0, 10.0, order_type="MARKET", time_in_force="IOC"
+        )
+        assert not r2.success and "price" in r2.error.lower()
+
+        # Unknown time-in-force is rejected
+        r3 = await order_client.add_order("AVAX/USDC", "BUY", 1.0, 10.0, time_in_force="FAST")
+        assert not r3.success and "time_in_force" in r3.error
+
+        order_client.trade_pairs_contract.functions.addNewOrder.assert_not_called()
+
     async def test_add_limit_order_list_caller_provided_client_order_id(self, client):
         """Per-order caller-provided client_order_id is used; invalid hex is rejected."""
         client.pairs = {
@@ -2900,7 +2993,10 @@ class TestCLOBClient:
         client._send_trade_tx = AsyncMock(return_value=("tx", MagicMock(status=1)))
         client._ensure_pair_exists = AsyncMock(return_value=True)
 
-        await client.add_order(VALID_PAIR, "BUY", 1, 1, order_type="MARKET")
+        # MARKET orders carry no price and must be IOC/FOK.
+        await client.add_order(
+            VALID_PAIR, "BUY", 1, None, order_type="MARKET", time_in_force="IOC"
+        )
         call_args = client.trade_pairs_contract.functions.addNewOrder.call_args[0][0]
         assert call_args["type1"] == 0
 
