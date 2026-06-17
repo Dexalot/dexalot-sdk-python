@@ -26,6 +26,13 @@ from ..utils.result import Result
 from ..utils.retry import async_retry
 from ..utils.websocket_manager import WebSocketManager
 from .base import _BALANCE_CACHE, _ORDERBOOK_CACHE, _SEMI_STATIC_CACHE, DexalotBaseClient
+from .order_types import (
+    ORDER_STATUS_NAMES,
+    ORDER_TYPE_NAMES,
+    SIDE_NAMES,
+    TIME_IN_FORCE_NAMES,
+    enum_int_to_name,
+)
 
 _logger = logging.getLogger("dexalot_sdk")
 
@@ -905,10 +912,13 @@ class CLOBClient(DexalotBaseClient):
         return self._coerce_order_block(value, field_name)
 
     def _enum_to_name(self, value: object, mapping: dict[int, str]) -> object:
-        """Normalize enum integers from contract/API reads into string labels."""
-        if isinstance(value, int):
-            return mapping.get(value, value)
-        return value
+        """Normalize enum integers from contract/API reads into string labels.
+
+        Delegates to :func:`order_types.enum_int_to_name` so the read paths and
+        write paths share one mapping.  Unknown integers become an explicit
+        ``"UNKNOWN(<n>)"`` sentinel rather than a fabricated label.
+        """
+        return enum_int_to_name(value, mapping)
 
     def _to_hex_identifier(self, value: object) -> object:
         """Convert bytes-like identifiers to hex strings while preserving strings."""
@@ -1047,24 +1057,13 @@ class CLOBClient(DexalotBaseClient):
             quantity_filled=self._coerce_order_numeric(filled_qty),
             total_fee=self._coerce_order_numeric(total_fee),
             trader_address=trader_address,
-            side=self._enum_to_name(order.get("side"), {0: "BUY", 1: "SELL"}),
+            side=self._enum_to_name(order.get("side"), SIDE_NAMES),
             type1=self._enum_to_name(
                 order.get("type1") if order.get("type1") is not None else order.get("type"),
-                {0: "MARKET", 1: "LIMIT", 2: "STOP", 3: "STOPLIMIT"},
+                ORDER_TYPE_NAMES,
             ),
-            type2=self._enum_to_name(order.get("type2"), {0: "GTC", 1: "FOK", 2: "IOC", 3: "PO"}),
-            status=self._enum_to_name(
-                order.get("status"),
-                {
-                    0: "NEW",
-                    1: "REJECTED",
-                    2: "PARTIAL",
-                    3: "FILLED",
-                    4: "CANCELED",
-                    5: "EXPIRED",
-                    6: "KILLED",
-                },
-            ),
+            type2=self._enum_to_name(order.get("type2"), TIME_IN_FORCE_NAMES),
+            status=self._enum_to_name(order.get("status"), ORDER_STATUS_NAMES),
             update_block=update_block,
             create_block=create_block,
             create_ts=create_ts,
@@ -1424,23 +1423,10 @@ class CLOBClient(DexalotBaseClient):
             quantity_filled=quantity_filled,
             total_fee=total_fee,
             trader_address=w3_l1.to_checksum_address(order_data[8]),
-            side=self._enum_to_name(order_data[9], {0: "BUY", 1: "SELL"}),
-            type1=self._enum_to_name(
-                order_data[10], {0: "MARKET", 1: "LIMIT", 2: "STOP", 3: "STOPLIMIT"}
-            ),
-            type2=self._enum_to_name(order_data[11], {0: "GTC", 1: "FOK", 2: "IOC", 3: "PO"}),
-            status=self._enum_to_name(
-                order_data[12],
-                {
-                    0: "NEW",
-                    1: "REJECTED",
-                    2: "PARTIAL",
-                    3: "FILLED",
-                    4: "CANCELED",
-                    5: "EXPIRED",
-                    6: "KILLED",
-                },
-            ),
+            side=self._enum_to_name(order_data[9], SIDE_NAMES),
+            type1=self._enum_to_name(order_data[10], ORDER_TYPE_NAMES),
+            type2=self._enum_to_name(order_data[11], TIME_IN_FORCE_NAMES),
+            status=self._enum_to_name(order_data[12], ORDER_STATUS_NAMES),
             update_block=order_data[13],
             create_block=order_data[14],
         )
