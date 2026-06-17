@@ -51,4 +51,4 @@ site/
 !env.example
 
 # Temporary planning docs (not for commit)
-docs/clob-order-types-plan.md
+docs/*-plan.md
