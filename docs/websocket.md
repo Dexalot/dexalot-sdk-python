@@ -74,7 +74,7 @@ Example trader event subscribe message :
 {"type":"tradereventsubscribe", "signature":"0xXXXXXXXXXXXXXXXXXX:0xXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX"}
 ```
 To generate signature you can use the sample code provided in RestApi Signed Endpoints.
-* [Rest Api](/en/apiv2/RestApi.md)
+* [Rest Api](rest-api.md)
 
 Sample code unsubscribe:
 ```ts

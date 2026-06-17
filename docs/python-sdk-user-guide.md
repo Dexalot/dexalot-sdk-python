@@ -44,7 +44,7 @@ Prefer passing a pre-built `eth_account.Account` object to the constructor inste
 
 ## Core concepts
 
-### Result[T] — result-first operational API
+### Result\[T\] — result-first operational API
 
 Async operational methods return a `Result` object. Expected failures such as network errors, validation errors, and contract reverts are returned as `Result.fail(...)`. Some configuration or programmer errors can still raise immediately, so always check `.success` before accessing `.data` on Result-returning calls:
 
@@ -176,7 +176,7 @@ result = await client.add_order(
 )
 ```
 
-> **Precision note**: `amount` and `price` accept `int`, `float`, `Decimal`, and numeric `str`. The SDK converts to wei via `Decimal`-backed arithmetic — never float-multiplication — so exact values like `2933.0` round-trip cleanly. Precision exceeding the pair's `base_display_decimals` / `quote_display_decimals` is **rejected** rather than silently rounded; pass `Decimal('2.0')` or round explicitly. See the "Amount Precision and Display Decimals" section of [README.md](../README.md) for the full contract.
+> **Precision note**: `amount` and `price` accept `int`, `float`, `Decimal`, and numeric `str`. The SDK converts to wei via `Decimal`-backed arithmetic — never float-multiplication — so exact values like `2933.0` round-trip cleanly. Precision exceeding the pair's `base_display_decimals` / `quote_display_decimals` is **rejected** rather than silently rounded; pass `Decimal('2.0')` or round explicitly. See the "Amount Precision and Display Decimals" section of the [README](https://github.com/Dexalot/dexalot-sdk-python/blob/main/README.md) for the full contract.
 
 ### Cancel an order
 

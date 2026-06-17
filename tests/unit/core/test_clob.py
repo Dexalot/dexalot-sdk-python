@@ -562,6 +562,101 @@ class TestCLOBClient:
         )
         assert not bad_res.success
 
+    @pytest.fixture
+    def order_client(self, client):
+        """A client wired with a standard pair and mocked tx/balance for order tests."""
+        from dexalot_sdk.utils.result import Result
+
+        client.pairs = {
+            "AVAX/USDC": {
+                "pair": "AVAX/USDC",
+                "base": "AVAX",
+                "quote": "USDC",
+                "base_decimals": 18,
+                "quote_decimals": 6,
+                "tradePairId": b"TPID",
+            }
+        }
+        mock_receipt = MagicMock()
+        mock_receipt.status = 1
+        client._send_trade_tx = AsyncMock(return_value=("0xTxHash", mock_receipt))
+        client.get_portfolio_balance = AsyncMock(return_value=Result.ok({"available": 1_000_000.0}))
+        return client
+
+    async def test_add_order_default_tif_and_stp(self, order_client):
+        """Default call still encodes GTC (type2=0) and CANCEL_TAKER (stp=0)."""
+        res = await order_client.add_order("AVAX/USDC", "BUY", 1.0, 10.0)
+        assert res.success
+        struct = order_client.trade_pairs_contract.functions.addNewOrder.call_args[0][0]
+        assert struct["type1"] == 1  # LIMIT
+        assert struct["type2"] == 0  # GTC
+        assert struct["stp"] == 0  # CANCEL_TAKER
+
+    @pytest.mark.parametrize(
+        "tif,expected_type2",
+        [("GTC", 0), ("FOK", 1), ("IOC", 2), ("PO", 3), ("post_only", 3)],
+    )
+    async def test_add_order_time_in_force(self, order_client, tif, expected_type2):
+        """Each time-in-force (and alias) reaches the struct as the right int."""
+        res = await order_client.add_order("AVAX/USDC", "SELL", 1.0, 10.0, time_in_force=tif)
+        assert res.success
+        struct = order_client.trade_pairs_contract.functions.addNewOrder.call_args[0][0]
+        assert struct["type2"] == expected_type2
+
+    @pytest.mark.parametrize(
+        "stp,expected", [("CANCEL_TAKER", 0), ("CANCEL_MAKER", 1), ("CANCEL_BOTH", 2), ("NONE", 3)]
+    )
+    async def test_add_order_stp(self, order_client, stp, expected):
+        """Self-trade-prevention mode reaches the struct as the right int."""
+        res = await order_client.add_order("AVAX/USDC", "SELL", 1.0, 10.0, stp=stp)
+        assert res.success
+        struct = order_client.trade_pairs_contract.functions.addNewOrder.call_args[0][0]
+        assert struct["stp"] == expected
+
+    async def test_add_order_market_ioc_skips_buy_balance_check(self, order_client):
+        """MARKET BUY: type1=0, price=0, and the pre-flight balance check is skipped."""
+        res = await order_client.add_order(
+            "AVAX/USDC", "BUY", 1.0, None, order_type="MARKET", time_in_force="IOC"
+        )
+        assert res.success
+        struct = order_client.trade_pairs_contract.functions.addNewOrder.call_args[0][0]
+        assert struct["type1"] == 0  # MARKET
+        assert struct["type2"] == 2  # IOC
+        assert struct["price"] == 0
+        order_client.get_portfolio_balance.assert_not_called()
+
+    async def test_add_order_market_sell_still_checks_balance(self, order_client):
+        """MARKET SELL keeps the pre-flight balance check (base amount is known)."""
+        res = await order_client.add_order(
+            "AVAX/USDC", "SELL", 1.0, None, order_type="MARKET", time_in_force="FOK"
+        )
+        assert res.success
+        order_client.get_portfolio_balance.assert_called()
+
+    async def test_add_order_market_is_permissive(self, order_client):
+        """MARKET ignores type2/price on-chain, so the SDK no longer pre-rejects."""
+        # Default MARKET (GTC) is accepted and sent.
+        r1 = await order_client.add_order("AVAX/USDC", "BUY", 1.0, None, order_type="MARKET")
+        assert r1.success
+        struct = order_client.trade_pairs_contract.functions.addNewOrder.call_args[0][0]
+        assert struct["type1"] == 0  # MARKET
+
+        # A price on a MARKET order is accepted (contract ignores it).
+        r2 = await order_client.add_order(
+            "AVAX/USDC", "BUY", 1.0, 10.0, order_type="MARKET", time_in_force="IOC"
+        )
+        assert r2.success
+
+    async def test_add_order_rejects_unparseable_modifiers(self, order_client):
+        """Unknown time_in_force / stp are still rejected before any tx is sent."""
+        r1 = await order_client.add_order("AVAX/USDC", "BUY", 1.0, 10.0, time_in_force="FAST")
+        assert not r1.success and "time_in_force" in r1.error
+
+        r2 = await order_client.add_order("AVAX/USDC", "BUY", 1.0, 10.0, stp="BOGUS")
+        assert not r2.success and "stp" in r2.error
+
+        order_client.trade_pairs_contract.functions.addNewOrder.assert_not_called()
+
     async def test_add_limit_order_list_caller_provided_client_order_id(self, client):
         """Per-order caller-provided client_order_id is used; invalid hex is rejected."""
         client.pairs = {
@@ -676,6 +771,233 @@ class TestCLOBClient:
         ]
         bad_res = await client.cancel_add_list(bad_replacements)
         assert not bad_res.success
+
+    async def test_add_order_list_mixed_types_and_tif(self, client):
+        """Batch path honours per-order order_type/time_in_force/stp."""
+        client.pairs = {
+            "AVAX/USDC": {
+                "pair": "AVAX/USDC",
+                "base": "AVAX",
+                "quote": "USDC",
+                "base_decimals": 18,
+                "quote_decimals": 6,
+                "tradePairId": b"TPID",
+            }
+        }
+        client._send_trade_tx = AsyncMock(return_value=("0xTxHash", MagicMock(status=1)))
+        client.get_portfolio_balance = AsyncMock(return_value={"available": 1_000.0})
+
+        orders = [
+            {
+                "pair": "AVAX/USDC",
+                "side": "BUY",
+                "amount": 1.0,
+                "price": 10.0,
+                "time_in_force": "PO",
+            },
+            {
+                "pair": "AVAX/USDC",
+                "side": "SELL",
+                "amount": 1.0,
+                "order_type": "MARKET",
+                "time_in_force": "IOC",
+                "stp": "CANCEL_BOTH",
+            },
+        ]
+        # add_order_list is the alias for add_limit_order_list.
+        res = await client.add_order_list(orders)
+        assert res.success
+
+        tuples = client.trade_pairs_contract.functions.addOrderList.call_args[0][0]
+        # tuple layout: (..., side, type1, type2, stp)
+        limit_po, market_ioc = tuples
+        assert limit_po[6] == 1 and limit_po[7] == 3  # LIMIT, PO
+        assert market_ioc[6] == 0 and market_ioc[7] == 2 and market_ioc[8] == 2  # MARKET, IOC, BOTH
+        assert market_ioc[2] == 0  # market price encoded as 0
+
+    async def test_add_order_list_rejects_limit_without_price(self, client):
+        """A LIMIT entry missing a price fails the whole batch before sending."""
+        client.pairs = {
+            "AVAX/USDC": {
+                "pair": "AVAX/USDC",
+                "base": "AVAX",
+                "quote": "USDC",
+                "base_decimals": 18,
+                "quote_decimals": 6,
+                "tradePairId": b"TPID",
+            }
+        }
+        client._send_trade_tx = AsyncMock(return_value=("0xTxHash", MagicMock(status=1)))
+        client.get_portfolio_balance = AsyncMock(return_value={"available": 1_000.0})
+
+        orders = [
+            {"pair": "AVAX/USDC", "side": "BUY", "amount": 1.0, "price": 10.0},
+            # LIMIT without a price is invalid (the one rule still enforced)
+            {"pair": "AVAX/USDC", "side": "SELL", "amount": 1.0},
+        ]
+        res = await client.add_order_list(orders)
+        assert not res.success and "LIMIT" in res.error
+        client.trade_pairs_contract.functions.addOrderList.assert_not_called()
+
+    async def test_cancel_add_list_honours_tif_and_stp(self, client):
+        """cancel_add_list builds replacement tuples with the requested TIF/stp."""
+        client.pairs = {
+            "AVAX/USDC": {
+                "pair": "AVAX/USDC",
+                "base_decimals": 18,
+                "quote_decimals": 6,
+                "tradePairId": b"TPID",
+                "quote": "USDC",
+                "base": "AVAX",
+            }
+        }
+        self._stub_resolved_order(client, pair="AVAX/USDC", trade_pair_id=b"TPID")
+        client._ensure_pair_exists = AsyncMock(return_value=True)
+        client._send_trade_tx = AsyncMock(return_value=("0xTxHash", MagicMock(status=1)))
+
+        replacements = [
+            {
+                "order_id": "0x01",
+                "amount": 1.0,
+                "price": 11.0,
+                "pair": "AVAX/USDC",
+                "side": "BUY",
+                "time_in_force": "IOC",
+                "stp": "CANCEL_MAKER",
+            },
+        ]
+        res = await client.cancel_add_list(replacements)
+        assert res.success
+        _ids, new_orders = client.trade_pairs_contract.functions.cancelAddList.call_args[0]
+        tup = new_orders[0]
+        assert tup[6] == 1 and tup[7] == 2 and tup[8] == 1  # LIMIT, IOC, CANCEL_MAKER
+
+    async def test_add_order_rejects_invalid_stp(self, order_client):
+        """An invalid stp is rejected before any transaction is sent."""
+        res = await order_client.add_order("AVAX/USDC", "BUY", 1.0, 10.0, stp="BOGUS")
+        assert not res.success and "stp" in res.error
+        order_client.trade_pairs_contract.functions.addNewOrder.assert_not_called()
+
+    async def test_add_order_list_market_buy_skips_balance(self, client):
+        """A MARKET BUY in a batch encodes price 0 and skips the balance check."""
+        client.pairs = {
+            "AVAX/USDC": {
+                "pair": "AVAX/USDC",
+                "base": "AVAX",
+                "quote": "USDC",
+                "base_decimals": 18,
+                "quote_decimals": 6,
+                "tradePairId": b"TPID",
+            }
+        }
+        client._send_trade_tx = AsyncMock(return_value=("0xTxHash", MagicMock(status=1)))
+        client.get_portfolio_balance = AsyncMock(return_value={"available": 1_000.0})
+
+        orders = [
+            {
+                "pair": "AVAX/USDC",
+                "side": "BUY",
+                "amount": 1.0,
+                "order_type": "MARKET",
+                "time_in_force": "IOC",
+            },
+        ]
+        res = await client.add_order_list(orders)
+        assert res.success
+        tup = client.trade_pairs_contract.functions.addOrderList.call_args[0][0][0]
+        assert tup[6] == 0 and tup[2] == 0  # MARKET, price encoded as 0
+        client.get_portfolio_balance.assert_not_called()
+
+    async def test_add_order_list_rejects_invalid_order_type(self, client):
+        """An unknown per-order order_type fails the batch before sending."""
+        client.pairs = {
+            "AVAX/USDC": {
+                "pair": "AVAX/USDC",
+                "base": "AVAX",
+                "quote": "USDC",
+                "base_decimals": 18,
+                "quote_decimals": 6,
+                "tradePairId": b"TPID",
+            }
+        }
+        client._send_trade_tx = AsyncMock(return_value=("0xTxHash", MagicMock(status=1)))
+        client.get_portfolio_balance = AsyncMock(return_value={"available": 1_000.0})
+
+        orders = [
+            {
+                "pair": "AVAX/USDC",
+                "side": "BUY",
+                "amount": 1.0,
+                "price": 10.0,
+                "order_type": "STOP",
+            },
+        ]
+        res = await client.add_order_list(orders)
+        assert not res.success and "order type" in res.error
+        client.trade_pairs_contract.functions.addOrderList.assert_not_called()
+
+    async def test_cancel_add_list_market_buy_and_invalid_modifiers(self, client):
+        """cancel_add_list: MARKET BUY skips price; invalid type/TIF are rejected."""
+        client.pairs = {
+            "AVAX/USDC": {
+                "pair": "AVAX/USDC",
+                "base_decimals": 18,
+                "quote_decimals": 6,
+                "tradePairId": b"TPID",
+                "quote": "USDC",
+                "base": "AVAX",
+            }
+        }
+        self._stub_resolved_order(client, pair="AVAX/USDC", trade_pair_id=b"TPID")
+        client._ensure_pair_exists = AsyncMock(return_value=True)
+        client._send_trade_tx = AsyncMock(return_value=("0xTxHash", MagicMock(status=1)))
+
+        # MARKET BUY: no price, encoded as 0
+        ok = await client.cancel_add_list(
+            [
+                {
+                    "order_id": "0x01",
+                    "amount": 1.0,
+                    "pair": "AVAX/USDC",
+                    "side": "BUY",
+                    "order_type": "MARKET",
+                    "time_in_force": "IOC",
+                }
+            ]
+        )
+        assert ok.success
+        tup = client.trade_pairs_contract.functions.cancelAddList.call_args[0][1][0]
+        assert tup[6] == 0 and tup[2] == 0  # MARKET, price 0
+
+        # Invalid order_type
+        bad_type = await client.cancel_add_list(
+            [
+                {
+                    "order_id": "0x01",
+                    "amount": 1.0,
+                    "price": 11.0,
+                    "pair": "AVAX/USDC",
+                    "side": "BUY",
+                    "order_type": "STOP",
+                }
+            ]
+        )
+        assert not bad_type.success and "order type" in bad_type.error
+
+        # Invalid time_in_force
+        bad_tif = await client.cancel_add_list(
+            [
+                {
+                    "order_id": "0x01",
+                    "amount": 1.0,
+                    "price": 11.0,
+                    "pair": "AVAX/USDC",
+                    "side": "BUY",
+                    "time_in_force": "FAST",
+                }
+            ]
+        )
+        assert not bad_tif.success and "time_in_force" in bad_tif.error
 
     async def test_cancel_order(self, client):
         """Test cancel_order."""
@@ -2900,7 +3222,8 @@ class TestCLOBClient:
         client._send_trade_tx = AsyncMock(return_value=("tx", MagicMock(status=1)))
         client._ensure_pair_exists = AsyncMock(return_value=True)
 
-        await client.add_order(VALID_PAIR, "BUY", 1, 1, order_type="MARKET")
+        # MARKET orders carry no price and must be IOC/FOK.
+        await client.add_order(VALID_PAIR, "BUY", 1, None, order_type="MARKET", time_in_force="IOC")
         call_args = client.trade_pairs_contract.functions.addNewOrder.call_args[0][0]
         assert call_args["type1"] == 0
 

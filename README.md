@@ -839,6 +839,73 @@ async def place_order_safely(client, pair, side, amount, price):
 
 See `examples/error_handling.py` for comprehensive error handling patterns.
 
+## Order Types & Time-in-Force
+
+CLOB orders are described by three on-chain fields, all exposed through optional
+parameters that default to today's behavior:
+
+- **`order_type`** (`type1`) — `"LIMIT"` (default) or `"MARKET"`.
+- **`time_in_force`** (`type2`) — `"GTC"` (default), `"FOK"`, `"IOC"`, or `"PO"`
+  (Post-Only). Aliases such as `"POST_ONLY"`, `"FILL_OR_KILL"`,
+  `"IMMEDIATE_OR_CANCEL"` are accepted.
+- **`stp`** (self-trade prevention) — `"CANCEL_TAKER"` (default),
+  `"CANCEL_MAKER"`, `"CANCEL_BOTH"`, or `"CANCEL_NONE"`. The contract spellings
+  (`"CANCELTAKER"`, `"CANCELMAKER"`, `"CANCELBOTH"`, `"NONE"`) are also accepted.
+
+> Stop / stop-limit orders cannot be **placed**: although the contract `Type1`
+> enum reserves `STOP`/`STOPLIMIT`, they are unused on-chain (the order struct
+> has no trigger-price field and no pair enables them), so `order_type` accepts
+> only `MARKET`/`LIMIT`. Order *reads* still label `type1` 2/3 as
+> `STOP`/`STOPLIMIT` for fidelity with the contract enum.
+
+### Validation
+
+The SDK only pre-validates the one rule the contract itself relies on — **a
+`LIMIT` order requires a price** — and otherwise defers to the contract, which
+matches its real behavior:
+
+- **`MARKET`** ignores `time_in_force` and any supplied price on-chain (no
+  revert), so the SDK does not constrain them. A MARKET order is typically
+  filled immediately.
+- **`PO`** (Post-Only) is maker-only; a Post-Only order that would take reverts
+  `T-T2PO-01`, and a pair may require all orders be Post-Only (`T-POOA-01`).
+- A pair may **disable** specific order types (e.g. MARKET) — those reverts
+  surface as `T-IVOT-01`. Other relevant reverts: `T-FOKF-01` (unfillable FOK),
+  `T-STPR-01` (self-trade prevented).
+
+### Examples
+
+```python
+# Limit GTC (default) — unchanged from before
+await client.add_order("AVAX/USDC", "BUY", 1.0, 25.0)
+
+# Limit, Immediate-or-Cancel
+await client.add_order("AVAX/USDC", "BUY", 1.0, 25.0, time_in_force="IOC")
+
+# Post-Only (maker-only); reverts T-T2PO-01 if it would take
+await client.add_order("AVAX/USDC", "SELL", 1.0, 25.0, time_in_force="PO")
+
+# Market BUY (no price). The pre-flight balance check is skipped for a
+# MARKET BUY since the notional is unknown without a price.
+await client.add_order("AVAX/USDC", "BUY", 1.0, None, order_type="MARKET")
+
+# Self-trade prevention: cancel the resting (maker) order on a self-match
+await client.add_order("AVAX/USDC", "BUY", 1.0, 25.0, stp="CANCEL_MAKER")
+
+# Batch with mixed types (add_order_list is an alias for add_limit_order_list)
+await client.add_order_list([
+    {"pair": "AVAX/USDC", "side": "BUY", "amount": 1.0, "price": 24.0,
+     "time_in_force": "PO"},
+    {"pair": "AVAX/USDC", "side": "SELL", "amount": 1.0,
+     "order_type": "MARKET", "time_in_force": "IOC"},
+])
+```
+
+**Replacing orders:** `replace_order` uses the contract's `cancelReplaceOrder`,
+which carries only a new price and quantity — the replacement **inherits** the
+original order's `order_type`, `time_in_force`, and `stp`. To change those,
+cancel and place a new order (e.g. via `cancel_add_list`).
+
 ## Transaction Receipt Handling
 
 All state-changing operations (placing orders, deposits, withdrawals, etc.) now support a `wait_for_receipt` parameter that controls whether the SDK waits for blockchain transaction confirmation before returning.
@@ -889,8 +956,8 @@ Use `wait_for_receipt=False` when:
 All state-changing methods support `wait_for_receipt`:
 
 **CLOB Operations:**
-- `add_order(pair, side, amount, price, order_type="LIMIT", client_order_id=None, wait_for_receipt=True)`
-- `add_limit_order_list(orders, wait_for_receipt=True)`
+- `add_order(pair, side, amount, price, order_type="LIMIT", client_order_id=None, time_in_force="GTC", stp="CANCEL_TAKER", wait_for_receipt=True)`
+- `add_limit_order_list(orders, wait_for_receipt=True)` (alias: `add_order_list`)
 - `cancel_order(order_id, wait_for_receipt=True)`
 - `cancel_order_by_client_id(client_order_id, wait_for_receipt=True)`
 - `cancel_list_orders(order_ids, wait_for_receipt=True)`
