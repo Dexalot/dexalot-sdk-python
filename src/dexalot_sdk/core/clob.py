@@ -34,6 +34,7 @@ from .order_types import (
     OrderType,
     Side,
     enum_int_to_name,
+    parse_order_type,
     parse_stp,
     parse_time_in_force,
     validate_order_combo,
@@ -1678,21 +1679,43 @@ class CLOBClient(DexalotBaseClient):
     def _build_order_tuple(
         self, order, pair_data, side_enum, w3, client_order_id_bytes: bytes | None = None
     ) -> Result[tuple]:
-        """Build order tuple for contract call.
+        """Build a NewOrder tuple for a batch contract call.
 
-        Returns ``Result.ok((order_tuple, client_order_id_hex))`` or
-        ``Result.fail(msg)`` when price/amount precision exceeds the pair's
-        display decimals.
+        Honours the per-order ``order_type`` (default LIMIT), ``time_in_force``
+        (default GTC) and ``stp`` (default CANCEL_TAKER) keys, validating the
+        combination client-side.
+
+        Returns ``Result.ok((order_tuple, client_order_id_hex, req_token,
+        req_amt))`` where ``req_amt`` is the quote/base balance the order
+        requires, or ``None`` when the pre-flight balance check should be
+        skipped (a MARKET BUY, whose notional is unknown without a price).
+        Returns ``Result.fail(msg)`` on an invalid type/precision/combination.
         """
         import secrets
 
-        norm_res = self._normalize_order_amounts(order["price"], order["amount"], pair_data)
+        ot_res = parse_order_type(order.get("order_type", "LIMIT"))
+        if not ot_res.success:
+            return cast(Result[tuple], ot_res)
+        type1_enum = cast(int, ot_res.data)
+
+        norm_res = self._normalize_order_amounts(order.get("price"), order["amount"], pair_data)
         if not norm_res.success:
             return cast(Result[tuple], norm_res)
         assert norm_res.data is not None
         price, amount = norm_res.data
 
-        price_wei = self._to_wei(price, pair_data["quote_decimals"])
+        mods_res = self._resolve_order_modifiers(
+            type1_enum,
+            order.get("time_in_force", "GTC"),
+            order.get("stp", "CANCEL_TAKER"),
+            has_price=bool(price),
+        )
+        if not mods_res.success:
+            return cast(Result[tuple], mods_res)
+        assert mods_res.data is not None
+        type2_enum, stp_enum = mods_res.data
+
+        price_wei = self._to_wei(price, pair_data["quote_decimals"]) if price else 0
         qty_wei = self._to_wei(amount, pair_data["base_decimals"])
         if client_order_id_bytes is None:
             client_order_id_bytes = secrets.token_bytes(32)
@@ -1708,12 +1731,22 @@ class CLOBClient(DexalotBaseClient):
             qty_wei,
             trader,
             side_enum,
-            1,  # LIMIT
-            0,  # GTC
-            0,  # STP
+            type1_enum,
+            type2_enum,
+            stp_enum,
         )
 
-        return Result.ok((order_tuple, client_order_id_hex))
+        # Balance requirement. Skipped for a MARKET BUY: notional is unknown
+        # without a price, so the contract enforces the protection instead.
+        if type1_enum == OrderType.MARKET and side_enum == Side.BUY:
+            req_token, req_amt = None, None
+        elif side_enum == 0:  # BUY (non-market): notional = price * amount
+            assert price is not None
+            req_token, req_amt = pair_data["quote"], float(price * amount)
+        else:  # SELL: requirement is the base amount
+            req_token, req_amt = pair_data["base"], float(amount)
+
+        return Result.ok((order_tuple, client_order_id_hex, req_token, req_amt))
 
     async def _check_balance_for_token(self, token, req_amt):
         """Check if sufficient balance exists for a token.
@@ -1759,17 +1792,9 @@ class CLOBClient(DexalotBaseClient):
 
             pair_data = self.pairs[pair]
 
-            side_enum, req_token, error = self._parse_order_side(order["side"], pair_data)
+            side_enum, _req_token, error = self._parse_order_side(order["side"], pair_data)
             if error:
                 return None, None, None, error
-
-            # Calculate required amount
-            if side_enum == 0:  # BUY
-                req_amt = order["price"] * order["amount"]
-            else:  # SELL
-                req_amt = order["amount"]
-
-            required_balances[req_token] = required_balances.get(req_token, 0) + req_amt
 
             # Use caller-provided client_order_id or let _build_order_tuple generate one
             cid_bytes: bytes | None = None
@@ -1785,7 +1810,9 @@ class CLOBClient(DexalotBaseClient):
             if not build_res.success:
                 return None, None, None, build_res.error or "Order build failed"
             assert build_res.data is not None
-            order_tuple, client_order_id_hex = build_res.data
+            order_tuple, client_order_id_hex, req_token, req_amt = build_res.data
+            if req_amt is not None:
+                required_balances[req_token] = required_balances.get(req_token, 0) + req_amt
             order_tuples.append(order_tuple)
             client_order_ids.append(client_order_id_hex)
 
@@ -1795,16 +1822,27 @@ class CLOBClient(DexalotBaseClient):
     async def add_limit_order_list(
         self, orders: list[dict], wait_for_receipt: bool = True
     ) -> Result[dict]:
-        """Place multiple limit orders in a single on-chain transaction.
+        """Place multiple orders in a single on-chain transaction.
 
-        Checks aggregated portfolio balances across all orders before submitting.
+        Despite the name this is not limited to LIMIT orders — each order may
+        set its own type via the optional keys below.  Checks aggregated
+        portfolio balances across all orders before submitting (a MARKET BUY
+        is excluded from the pre-flight check; see :meth:`add_order`).
 
         Args:
             orders: List of order dicts, each with:
                 - ``pair`` (str): Trading pair, e.g. ``"AVAX/USDC"``.
                 - ``side`` (str): ``"BUY"`` or ``"SELL"``.
                 - ``amount`` (float): Quantity in base-token units.
-                - ``price`` (float): Limit price in quote-token units.
+                - ``price`` (float): Limit price in quote-token units
+                  (omit / ``None`` for MARKET orders).
+                - ``order_type`` (str, optional): ``"LIMIT"`` (default) or
+                  ``"MARKET"``.
+                - ``time_in_force`` (str, optional): ``"GTC"`` (default),
+                  ``"FOK"``, ``"IOC"`` or ``"PO"``.
+                - ``stp`` (str, optional): self-trade-prevention mode
+                  (default ``"CANCEL_TAKER"``).
+                - ``client_order_id`` (str, optional): 32-byte hex string.
             wait_for_receipt: If ``True``, block until the transaction is
                 confirmed on-chain.
 
@@ -1859,6 +1897,21 @@ class CLOBClient(DexalotBaseClient):
         except Exception as e:
             error_msg = self._sanitize_error(e, "placing batch orders")
             return Result.fail(error_msg)
+
+    async def add_order_list(
+        self, orders: list[dict], wait_for_receipt: bool = True
+    ) -> Result[dict]:
+        """Alias for :meth:`add_limit_order_list`.
+
+        The batch path accepts mixed order types (per-order ``order_type`` /
+        ``time_in_force`` / ``stp``), so this name reads more accurately than
+        the historical ``add_limit_order_list``, which is retained for
+        backward compatibility.
+        """
+        return cast(
+            Result[dict],
+            await self.add_limit_order_list(orders, wait_for_receipt=wait_for_receipt),
+        )
 
     @track_method("clob")
     async def cancel_list_orders(
@@ -2162,19 +2215,48 @@ class CLOBClient(DexalotBaseClient):
             )
         side_clean = raw_side.strip().upper()
         if side_clean == "BUY":
-            side_enum, req_token, req_amt = 0, pair_data["quote"], rep["price"] * rep["amount"]
+            side_enum = 0
         elif side_clean == "SELL":
-            side_enum, req_token, req_amt = 1, pair_data["base"], rep["amount"]
+            side_enum = 1
         else:
             return Result.fail(f"Invalid side '{rep['side']}'. Must be 'BUY' or 'SELL'.")
 
-        required_balances[req_token] = required_balances.get(req_token, 0) + req_amt
+        ot_res = parse_order_type(rep.get("order_type", "LIMIT"))
+        if not ot_res.success:
+            return cast(Result[dict], ot_res)
+        type1_enum = cast(int, ot_res.data)
 
-        norm_res = self._normalize_order_amounts(rep["price"], rep["amount"], pair_data)
+        norm_res = self._normalize_order_amounts(rep.get("price"), rep["amount"], pair_data)
         if not norm_res.success:
             return cast(Result[dict], norm_res)
         assert norm_res.data is not None
         price, amount = norm_res.data
+
+        mods_res = self._resolve_order_modifiers(
+            type1_enum,
+            rep.get("time_in_force", "GTC"),
+            rep.get("stp", "CANCEL_TAKER"),
+            has_price=bool(price),
+        )
+        if not mods_res.success:
+            return cast(Result[dict], mods_res)
+        assert mods_res.data is not None
+        type2_enum, stp_enum = mods_res.data
+
+        # Track required balance (informational; cancel_add_list relies on the
+        # contract revert for funds). Skipped for a MARKET BUY — notional is
+        # unknown without a price.
+        if type1_enum == OrderType.MARKET and side_enum == Side.BUY:
+            pass
+        elif side_enum == 0:  # BUY (non-market)
+            assert price is not None
+            required_balances[pair_data["quote"]] = required_balances.get(
+                pair_data["quote"], 0
+            ) + float(price * amount)
+        else:  # SELL
+            required_balances[pair_data["base"]] = required_balances.get(
+                pair_data["base"], 0
+            ) + float(amount)
 
         if raw_cid := rep.get("client_order_id"):
             cid_result = validate_order_id_format(raw_cid, "client_order_id")
@@ -2187,13 +2269,13 @@ class CLOBClient(DexalotBaseClient):
         new_order_tuple = (
             client_order_id,
             pair_data["tradePairId"],
-            self._to_wei(price, pair_data["quote_decimals"]),
+            self._to_wei(price, pair_data["quote_decimals"]) if price else 0,
             self._to_wei(amount, pair_data["base_decimals"]),
             from_addr,
             side_enum,
-            1,  # LIMIT
-            0,  # GTC
-            0,  # STP
+            type1_enum,
+            type2_enum,
+            stp_enum,
         )
         return Result.ok(
             {
@@ -2219,7 +2301,14 @@ class CLOBClient(DexalotBaseClient):
                 - ``pair`` (str): Trading pair, e.g. ``"AVAX/USDC"``.
                 - ``side`` (str): ``"BUY"`` or ``"SELL"``.
                 - ``amount`` (float): New quantity in base-token units.
-                - ``price`` (float): New limit price in quote-token units.
+                - ``price`` (float): New limit price in quote-token units
+                  (omit / ``None`` for MARKET orders).
+                - ``order_type`` (str, optional): ``"LIMIT"`` (default) or
+                  ``"MARKET"``.
+                - ``time_in_force`` (str, optional): ``"GTC"`` (default),
+                  ``"FOK"``, ``"IOC"`` or ``"PO"``.
+                - ``stp`` (str, optional): self-trade-prevention mode
+                  (default ``"CANCEL_TAKER"``).
                 - ``client_order_id`` (str, optional): 32-byte hex string for
                   the new replacement order.  When omitted, a random ID is
                   generated.
