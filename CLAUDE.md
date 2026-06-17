@@ -101,6 +101,11 @@ Unit tests in `tests/unit/` have no external dependencies. Integration tests in 
 - **Pairs missing display decimals are dropped at ingest**: `_store_clob_pairs` excludes any pair whose API record lacks `base_display_decimals` or `quote_display_decimals` and logs a WARNING. Downstream callers see "pair not found." Display decimals are contractual — defaulting them would mask the contract's `T-TMDQ-01` rejection downstream.
 - **`min_trade_amount` / `max_trade_amount` are enforced client-side**: quote-token-denominated bounds checked by `_check_trade_amount_bounds` inside `_normalize_order_amounts` so all four CLOB write paths gain the check. A bound of `0` means "no bound" (some pairs legitimately omit). Stored as `Decimal` so notional comparison is exact.
 - **`validate_positive_number` accepts int/float/Decimal/numeric-string**: renamed from `validate_positive_float` (alias kept for one release). Callers wanting precision-exact arithmetic should pass `Decimal('2933')` or `'2933.5'` directly; floats are still accepted and routed through `Decimal(str(value))` internally.
+- **Order enums have one home — `core/order_types.py`**: `Side`, `OrderType` (`MARKET`/`LIMIT` only), `TimeInForce` (`GTC`/`FOK`/`IOC`/`PO`), `SelfTradePrevention`, `OrderStatus` IntEnums with on-chain integer values, plus alias-aware parsers and `validate_order_combo`. Read paths (`_format_order_data`, `_transform_order_from_api`) and write paths share these maps via `enum_int_to_name` / `_resolve_order_modifiers`, so the integer↔label mapping cannot drift. Canonical output labels are the on-chain names (`PO`, not `POST_ONLY`); aliases are accepted on input only.
+- **STOP/STOPLIMIT do not exist on-chain**: the contract `OrderType` enum is `{MARKET, LIMIT}` and `NewOrder` has no trigger-price field. The SDK never emits `type1` 2/3, and unknown read-side integers map to `"UNKNOWN(<n>)"` rather than a fabricated `"STOP"` label (which previously misadvertised a non-existent capability).
+- **`time_in_force` / `stp` default to today's behavior**: `add_order` (and per-order dicts in `add_limit_order_list` / `cancel_add_list`) accept optional `time_in_force` (default `GTC`) and `stp` (default `CANCEL_TAKER`), replacing the previously hardcoded `type2=0` / `stp=0`. `validate_order_combo` rejects invalid (`type1`,`type2`,price) combos **client-side before any tx** (MARKET must be IOC/FOK with no price; PO is LIMIT-only). The `stp` integer→name mapping and the combo matrix are the SDK's working spec — centralized so one edit fixes every call site if the contract team confirms different semantics.
+- **MARKET BUY skips the pre-flight balance check**: without a price the quote-token notional is unknown, so `add_order` / `_build_order_tuple` / `_process_replacement` skip the balance check for a MARKET BUY and let the contract enforce it. MARKET SELL (base amount known) and all LIMIT paths keep the check.
+- **`replace_order` cannot change order type/TIF/stp**: `cancelReplaceOrder` carries only a new price and quantity, so the replacement inherits the original `type1`/`type2`/`stp`. To change those, cancel and re-place (e.g. `cancel_add_list`). The method intentionally exposes no `time_in_force`/`stp` params.
 
 ---
 
@@ -162,6 +167,7 @@ All paths relative to `src/dexalot_sdk/`.
 | Entry point | `core/client.py` |
 | Config | `core/config.py` |
 | Base client | `core/base.py` |
+| Order-type enums/validation | `core/order_types.py` |
 | Caching | `utils/cache.py` |
 | Result type | `utils/result.py` |
 | Retry | `utils/retry.py` |
