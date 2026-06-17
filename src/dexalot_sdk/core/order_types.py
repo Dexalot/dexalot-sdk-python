@@ -192,24 +192,19 @@ def parse_stp(value: object) -> Result[int]:
 def validate_order_combo(type1: int, type2: int, has_price: bool) -> Result[None]:
     """Validate a (``type1``, ``type2``, price-presence) combination client-side.
 
-    Encodes the SDK's working order-type matrix so invalid combinations are
-    rejected before a transaction is sent rather than reverting on-chain:
+    Only the one constraint the contract itself relies on is enforced here:
 
-    * MARKET orders must be IOC or FOK and must not carry a price.
     * LIMIT orders require a price.
-    * Post-Only (PO) is maker-only and therefore LIMIT-only.
 
-    Per-pair enabled order types are enforced by the contract; combinations a
-    pair has disabled still surface as on-chain reverts.
+    Everything else is left to the contract, matching its actual behavior
+    (verified against ``TradePairs.sol``): MARKET orders ignore ``type2`` and
+    any supplied price (no revert); per-pair enabled order types, Post-Only and
+    self-trade rules are enforced on-chain and surface as reverts (``T-IVOT-01``
+    for a disabled type, ``T-POOA-01`` for a Post-Only-only pair, ``T-T2PO-01``
+    when a Post-Only order would take, ``T-FOKF-01`` for an unfillable FOK).
+    The SDK does not pre-reject those — doing so was stricter than the contract
+    and rejected valid orders (e.g. a default MARKET order, which is GTC).
     """
-    if type1 == OrderType.MARKET:
-        if has_price:
-            return Result.fail("MARKET orders must not specify a price.")
-        if type2 not in (TimeInForce.IOC, TimeInForce.FOK):
-            return Result.fail("MARKET orders must use IOC or FOK time-in-force.")
-    elif type1 == OrderType.LIMIT:
-        if not has_price:
-            return Result.fail("LIMIT orders require a price.")
-        # Post-Only (PO) is maker-only and therefore LIMIT-only; the MARKET
-        # branch above already rejects MARKET+PO, so no extra check is needed.
+    if type1 == OrderType.LIMIT and not has_price:
+        return Result.fail("LIMIT orders require a price.")
     return Result.ok(None)
