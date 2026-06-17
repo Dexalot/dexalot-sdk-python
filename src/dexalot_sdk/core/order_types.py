@@ -38,10 +38,14 @@ class Side(IntEnum):
 
 
 class OrderType(IntEnum):
-    """Order type (``type1`` field).
+    """Order type (``type1`` field) the SDK can *place*.
 
-    The contract enum defines only ``MARKET`` and ``LIMIT``.  STOP / STOPLIMIT
-    do not exist on-chain and are deliberately absent.
+    The contract ``Type1`` enum is ``{MARKET, LIMIT, STOP, STOPLIMIT}``, but
+    ``STOP``/``STOPLIMIT`` are reserved/unused on-chain (no trigger-price field
+    in ``NewOrder``, never added to a pair's allowed order types).  This
+    write-side enum therefore intentionally omits them so the SDK never
+    originates a stop order.  Read-side labelling still recognises them — see
+    :data:`ORDER_TYPE_NAMES`.
     """
 
     MARKET = 0
@@ -85,7 +89,11 @@ class OrderStatus(IntEnum):
 # --- int -> canonical label maps (read paths) ------------------------------
 
 SIDE_NAMES: dict[int, str] = {m.value: m.name for m in Side}
-ORDER_TYPE_NAMES: dict[int, str] = {m.value: m.name for m in OrderType}
+# Read-side type1 labels mirror the full contract Type1 enum, including the
+# reserved STOP/STOPLIMIT members. The SDK never *places* those (the write-side
+# OrderType enum omits them), but a read should faithfully reflect any value the
+# contract could report rather than mislabel it as UNKNOWN.
+ORDER_TYPE_NAMES: dict[int, str] = {0: "MARKET", 1: "LIMIT", 2: "STOP", 3: "STOPLIMIT"}
 TIME_IN_FORCE_NAMES: dict[int, str] = {m.value: m.name for m in TimeInForce}
 STP_NAMES: dict[int, str] = {m.value: m.name for m in SelfTradePrevention}
 ORDER_STATUS_NAMES: dict[int, str] = {m.value: m.name for m in OrderStatus}
