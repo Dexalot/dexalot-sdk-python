@@ -64,14 +64,16 @@ class TimeInForce(IntEnum):
 class SelfTradePrevention(IntEnum):
     """Self-trade prevention mode (``stp`` field).
 
-    Names encode the SDK's working assumption; confirm against the contract
-    before relying on the distinction between maker/taker cancellation.
+    Integer values confirmed against the contract ``STP`` enum
+    (``CANCELTAKER, CANCELMAKER, CANCELBOTH, NONE``).  Canonical names here use
+    readable underscored spellings; the bare contract spellings are accepted as
+    input aliases.
     """
 
-    CANCEL_TAKER = 0  # cancel the incoming (newest) order
-    CANCEL_MAKER = 1  # cancel the resting (oldest) order
+    CANCEL_TAKER = 0  # cancel the incoming (taker) order
+    CANCEL_MAKER = 1  # cancel the resting (maker) order
     CANCEL_BOTH = 2
-    CANCEL_NONE = 3  # do not cancel; allow the self-trade
+    CANCEL_NONE = 3  # NONE on-chain: do not cancel; allow the self-trade
 
 
 class OrderStatus(IntEnum):
@@ -116,6 +118,11 @@ _TIME_IN_FORCE_ALIASES: dict[str, int] = {
 }
 
 _STP_ALIASES: dict[str, int] = {
+    # Contract spellings (ITradePairs.sol enum STP): no underscores, bare NONE.
+    "CANCELTAKER": SelfTradePrevention.CANCEL_TAKER,
+    "CANCELMAKER": SelfTradePrevention.CANCEL_MAKER,
+    "CANCELBOTH": SelfTradePrevention.CANCEL_BOTH,
+    # Readable aliases.
     "CANCEL_NEWEST": SelfTradePrevention.CANCEL_TAKER,
     "CANCEL_OLDEST": SelfTradePrevention.CANCEL_MAKER,
     "DO_NOT_CANCEL": SelfTradePrevention.CANCEL_NONE,
