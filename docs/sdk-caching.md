@@ -388,5 +388,5 @@ The cache has a maximum size of 256 entries per level. If you're concerned about
 
 ## See Also
 
-- [Python SDK README](../python/dexalot-sdk/README.md) - Python SDK main documentation
-- [TypeScript SDK README](../typescript/dexalot-sdk/README.md) - TypeScript SDK main documentation
+- [Python SDK README](https://github.com/Dexalot/dexalot-sdk-python/blob/main/README.md) - Python SDK main documentation
+- [TypeScript SDK README](https://github.com/Dexalot/dexalot-sdk-typescript/blob/main/README.md) - TypeScript SDK main documentation
