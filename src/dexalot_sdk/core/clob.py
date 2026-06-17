@@ -1976,6 +1976,14 @@ class CLOBClient(DexalotBaseClient):
         Uses the contract's ``cancelReplaceOrder`` function.  Fetches the
         existing order to determine the pair and decimal precision.
 
+        .. note::
+           ``cancelReplaceOrder`` only carries a new price and quantity, so the
+           replacement **inherits the original order's** ``type1``,
+           ``time_in_force`` (``type2``) and ``stp``.  This method therefore
+           exposes no time-in-force / stp parameters.  To change those, cancel
+           the order and place a new one (e.g. via :meth:`cancel_add_list`,
+           which builds a fresh order tuple).
+
         Args:
             order_id: Identifier of the order to replace (hex string, plain
                 string, or ``bytes32``).  Accepts either internal or client

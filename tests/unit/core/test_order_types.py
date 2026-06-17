@@ -1,7 +1,11 @@
 """Unit tests for the CLOB order-type domain model."""
 
+import json
+import os
+
 import pytest
 
+from dexalot_sdk.core.base import DexalotBaseClient
 from dexalot_sdk.core.order_types import (
     ORDER_STATUS_NAMES,
     ORDER_TYPE_NAMES,
@@ -19,6 +23,7 @@ from dexalot_sdk.core.order_types import (
     parse_time_in_force,
     validate_order_combo,
 )
+from dexalot_sdk.utils.error_sanitizer import sanitize_error_message
 
 
 class TestEnumValues:
@@ -161,3 +166,41 @@ class TestValidateOrderCombo:
 
     def test_limit_post_only_allowed(self):
         assert validate_order_combo(OrderType.LIMIT, TimeInForce.PO, has_price=True).success
+
+
+class TestOrderTypeRevertCodes:
+    """Order-type reverts surface a friendly description with the code intact."""
+
+    @pytest.fixture(scope="class")
+    def error_codes(self):
+        path = os.path.join(
+            os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(__file__)))),
+            "src",
+            "dexalot_sdk",
+            "core",
+            "errors.json",
+        )
+        with open(path) as f:
+            return json.load(f)
+
+    @pytest.mark.parametrize(
+        "code",
+        ["T-POOA-01", "T-T2PO-01", "T-STPR-01", "T-FOKF-01"],
+    )
+    def test_codes_present_with_descriptions(self, error_codes, code):
+        assert code in error_codes
+        assert error_codes[code].strip()
+
+    def test_parse_revert_reason_maps_code(self, error_codes):
+        # _parse_revert_reason only reads self.error_codes; call it on a stub.
+        stub = type("Stub", (), {"error_codes": error_codes})()
+        raw = "execution reverted: T-FOKF-01"
+        parsed = DexalotBaseClient._parse_revert_reason(stub, raw)
+        assert parsed.startswith("T-FOKF-01:")
+        assert "FOK" in parsed
+
+    def test_sanitizer_preserves_code(self):
+        # Sanitization strips paths/URLs but must keep the T-XXXX-NN code.
+        msg = "T-STPR-01: TradePairs: order cancled due to self trade prevention"
+        out = sanitize_error_message(msg, "placing order")
+        assert "T-STPR-01" in out
