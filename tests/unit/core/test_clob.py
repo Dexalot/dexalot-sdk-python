@@ -633,23 +633,27 @@ class TestCLOBClient:
         assert res.success
         order_client.get_portfolio_balance.assert_called()
 
-    async def test_add_order_rejects_invalid_combos(self, order_client):
-        """Invalid type1 x type2 / price combos are rejected before any tx is sent."""
-        # MARKET with GTC is invalid
-        r1 = await order_client.add_order(
-            "AVAX/USDC", "BUY", 1.0, None, order_type="MARKET", time_in_force="GTC"
-        )
-        assert not r1.success and "MARKET" in r1.error
+    async def test_add_order_market_is_permissive(self, order_client):
+        """MARKET ignores type2/price on-chain, so the SDK no longer pre-rejects."""
+        # Default MARKET (GTC) is accepted and sent.
+        r1 = await order_client.add_order("AVAX/USDC", "BUY", 1.0, None, order_type="MARKET")
+        assert r1.success
+        struct = order_client.trade_pairs_contract.functions.addNewOrder.call_args[0][0]
+        assert struct["type1"] == 0  # MARKET
 
-        # MARKET with a price is invalid
+        # A price on a MARKET order is accepted (contract ignores it).
         r2 = await order_client.add_order(
             "AVAX/USDC", "BUY", 1.0, 10.0, order_type="MARKET", time_in_force="IOC"
         )
-        assert not r2.success and "price" in r2.error.lower()
+        assert r2.success
 
-        # Unknown time-in-force is rejected
-        r3 = await order_client.add_order("AVAX/USDC", "BUY", 1.0, 10.0, time_in_force="FAST")
-        assert not r3.success and "time_in_force" in r3.error
+    async def test_add_order_rejects_unparseable_modifiers(self, order_client):
+        """Unknown time_in_force / stp are still rejected before any tx is sent."""
+        r1 = await order_client.add_order("AVAX/USDC", "BUY", 1.0, 10.0, time_in_force="FAST")
+        assert not r1.success and "time_in_force" in r1.error
+
+        r2 = await order_client.add_order("AVAX/USDC", "BUY", 1.0, 10.0, stp="BOGUS")
+        assert not r2.success and "stp" in r2.error
 
         order_client.trade_pairs_contract.functions.addNewOrder.assert_not_called()
 
@@ -811,8 +815,8 @@ class TestCLOBClient:
         assert market_ioc[6] == 0 and market_ioc[7] == 2 and market_ioc[8] == 2  # MARKET, IOC, BOTH
         assert market_ioc[2] == 0  # market price encoded as 0
 
-    async def test_add_order_list_rejects_invalid_combo(self, client):
-        """A bad combo in any batch entry fails the whole batch before sending."""
+    async def test_add_order_list_rejects_limit_without_price(self, client):
+        """A LIMIT entry missing a price fails the whole batch before sending."""
         client.pairs = {
             "AVAX/USDC": {
                 "pair": "AVAX/USDC",
@@ -828,11 +832,11 @@ class TestCLOBClient:
 
         orders = [
             {"pair": "AVAX/USDC", "side": "BUY", "amount": 1.0, "price": 10.0},
-            # MARKET + GTC is invalid
-            {"pair": "AVAX/USDC", "side": "BUY", "amount": 1.0, "order_type": "MARKET"},
+            # LIMIT without a price is invalid (the one rule still enforced)
+            {"pair": "AVAX/USDC", "side": "SELL", "amount": 1.0},
         ]
         res = await client.add_order_list(orders)
-        assert not res.success and "MARKET" in res.error
+        assert not res.success and "LIMIT" in res.error
         client.trade_pairs_contract.functions.addOrderList.assert_not_called()
 
     async def test_cancel_add_list_honours_tif_and_stp(self, client):

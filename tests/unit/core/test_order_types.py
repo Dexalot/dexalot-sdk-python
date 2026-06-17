@@ -32,11 +32,14 @@ class TestEnumValues:
     def test_side_values(self):
         assert (Side.BUY, Side.SELL) == (0, 1)
 
-    def test_order_type_values_no_stop(self):
-        # Only MARKET/LIMIT exist on-chain; STOP/STOPLIMIT must be absent.
+    def test_write_enum_excludes_stop_but_read_map_includes(self):
+        # The write-side enum places MARKET/LIMIT only (SDK never originates a
+        # stop order), but the read map mirrors the full contract Type1 enum.
         assert {m.name: m.value for m in OrderType} == {"MARKET": 0, "LIMIT": 1}
         assert "STOP" not in OrderType.__members__
         assert "STOPLIMIT" not in OrderType.__members__
+        assert ORDER_TYPE_NAMES[2] == "STOP"
+        assert ORDER_TYPE_NAMES[3] == "STOPLIMIT"
 
     def test_time_in_force_values(self):
         assert {m.name: m.value for m in TimeInForce} == {
@@ -59,13 +62,16 @@ class TestEnumIntToName:
     def test_known_values_map_to_labels(self):
         assert enum_int_to_name(0, SIDE_NAMES) == "BUY"
         assert enum_int_to_name(1, ORDER_TYPE_NAMES) == "LIMIT"
+        # STOP/STOPLIMIT are real contract Type1 members on the read side.
+        assert enum_int_to_name(2, ORDER_TYPE_NAMES) == "STOP"
+        assert enum_int_to_name(3, ORDER_TYPE_NAMES) == "STOPLIMIT"
         assert enum_int_to_name(3, TIME_IN_FORCE_NAMES) == "PO"
         assert enum_int_to_name(6, ORDER_STATUS_NAMES) == "KILLED"
         assert enum_int_to_name(2, STP_NAMES) == "CANCEL_BOTH"
 
-    def test_unknown_int_maps_to_sentinel_not_fabricated_label(self):
-        # type1=2 used to be mislabelled "STOP"; it is not a real value.
-        assert enum_int_to_name(2, ORDER_TYPE_NAMES) == "UNKNOWN(2)"
+    def test_unknown_int_maps_to_sentinel(self):
+        # Genuinely-unknown integers map to a visible sentinel, not a guess.
+        assert enum_int_to_name(7, ORDER_TYPE_NAMES) == "UNKNOWN(7)"
         assert enum_int_to_name(99, TIME_IN_FORCE_NAMES) == "UNKNOWN(99)"
 
     def test_non_int_passthrough(self):
@@ -128,6 +134,10 @@ class TestParsers:
             ("CANCEL_OLDEST", 1),
             ("DO_NOT_CANCEL", 3),
             ("NONE", 3),
+            # contract spellings (no underscores)
+            ("CANCELTAKER", 0),
+            ("CANCELMAKER", 1),
+            ("CANCELBOTH", 2),
             (SelfTradePrevention.CANCEL_BOTH, 2),
             (1, 1),
         ],
@@ -155,14 +165,11 @@ class TestValidateOrderCombo:
         assert validate_order_combo(OrderType.LIMIT, TimeInForce.GTC, has_price=True).success
         assert not validate_order_combo(OrderType.LIMIT, TimeInForce.GTC, has_price=False).success
 
-    def test_market_must_not_have_price(self):
-        assert not validate_order_combo(OrderType.MARKET, TimeInForce.IOC, has_price=True).success
-
-    def test_market_must_be_ioc_or_fok(self):
-        assert validate_order_combo(OrderType.MARKET, TimeInForce.IOC, has_price=False).success
-        assert validate_order_combo(OrderType.MARKET, TimeInForce.FOK, has_price=False).success
-        assert not validate_order_combo(OrderType.MARKET, TimeInForce.GTC, has_price=False).success
-        assert not validate_order_combo(OrderType.MARKET, TimeInForce.PO, has_price=False).success
+    def test_market_is_permissive(self):
+        # Contract ignores type2/price for MARKET (no revert); SDK matches that.
+        assert validate_order_combo(OrderType.MARKET, TimeInForce.GTC, has_price=False).success
+        assert validate_order_combo(OrderType.MARKET, TimeInForce.PO, has_price=False).success
+        assert validate_order_combo(OrderType.MARKET, TimeInForce.IOC, has_price=True).success
 
     def test_limit_post_only_allowed(self):
         assert validate_order_combo(OrderType.LIMIT, TimeInForce.PO, has_price=True).success
