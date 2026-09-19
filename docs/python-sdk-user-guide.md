@@ -350,12 +350,32 @@ if result.success:
     print("Firm quote ID:", quote["quote_id"])
 ```
 
+### Approve the maker (ERC20 sells only)
+
+Firm quotes come from several maker contracts behind the Dexalot router, and
+each maker pulls the taker asset itself. Grant the allowance to the quote's
+`order.maker` (the SDK validates the maker against the router's on-chain
+allow-list before approving). Native-asset sells skip this step.
+
+```python
+result = await client.approve_rfq_maker(quote)
+if result.success and result.data["approved"]:
+    print("Approval tx:", result.data["tx_hash"])
+```
+
 ### Execute swap
+
+`execute_rfq_swap` targets the quote's `tx.to` (the router) or `order.maker`,
+never the legacy `MainnetRFQ` deployment address, and refuses quotes whose
+maker or `tx` envelope fail validation. Errors include a
+`[target=..., maker=..., quote_id=...]` trail for diagnosis.
 
 ```python
 result = await client.execute_rfq_swap(quote)
 if result.success:
-    print("Swap tx:", result.data)
+    print("Swap tx:", result.data["tx_hash"], "via", result.data["target"])
+else:
+    print("Swap failed:", result.error)
 ```
 
 ---

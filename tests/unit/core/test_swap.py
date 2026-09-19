@@ -4,22 +4,35 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 from web3 import Web3
 
-from dexalot_sdk.core.base import _SEMI_STATIC_CACHE, DexalotBaseClient
+from dexalot_sdk.core.base import _SEMI_STATIC_CACHE, _STATIC_CACHE, DexalotBaseClient
 from dexalot_sdk.core.config import DexalotConfig
 from dexalot_sdk.core.swap import SwapClient
+from dexalot_sdk.utils.result import Result
+
+# Mainnet-shaped addresses used by the RFQ routing tests.  The legacy address
+# is what the deployments endpoint returns; the router is its
+# ``trustedForwarder()``; makers are what firm quotes carry in ``order.maker``.
+LEGACY_RFQ_ADDRESS = "0xeed3c159f3a96ab8d41c8b9ca49ee1e5071a7cdd"
+ROUTER_ADDRESS = "0xf00240e5256e72771b46d095666594E0f40D085c"
+MAKER_ADDRESS = "0x0000000000000000000000000000000000000003"
+OTHER_MAKER_ADDRESS = "0x1FDb2b265d2A5C4302A75cAd682222E4e7bCc313"
 
 
 class MockClient(SwapClient, DexalotBaseClient):
     chain_id = 43114
 
 
-class TestSwapClient:
+class SwapFixtures:
+    """Shared fixtures for every swap test class; holds no tests itself."""
+
     @pytest.fixture(autouse=True)
     def clear_cache(self):
         """Clear shared module-level caches between tests to ensure isolation."""
         _SEMI_STATIC_CACHE.clear()
+        _STATIC_CACHE.clear()
         yield
         _SEMI_STATIC_CACHE.clear()
+        _STATIC_CACHE.clear()
 
     @pytest.fixture
     def client(self):
@@ -56,6 +69,16 @@ class TestSwapClient:
                 client.pairs = {}
                 # Mock _get_nonce for nonce manager
                 client._get_nonce = AsyncMock(return_value=0)
+                # On-chain target discovery and the ERC20 allowance pre-flight
+                # have dedicated tests; stub them permissively here so the
+                # execution-path tests stay focused on the tx pipeline.
+                client._get_rfq_targets = AsyncMock(
+                    return_value=(
+                        ROUTER_ADDRESS,
+                        frozenset({LEGACY_RFQ_ADDRESS, MAKER_ADDRESS.lower()}),
+                    )
+                )
+                client._get_erc20_allowance = AsyncMock(return_value=2**256 - 1)
 
                 # Mock async session
                 client._mock_session = MagicMock()
@@ -72,6 +95,8 @@ class TestSwapClient:
 
                 yield client
 
+
+class TestSwapClient(SwapFixtures):
     async def test_get_swap_pairs(self, client):
         """Test get_swap_pairs."""
         # By ID
@@ -470,7 +495,20 @@ class TestSwapClient:
         mock_contract.functions.simpleSwap.side_effect = Exception("Err")
 
         result = await client.execute_rfq_swap(
-            {"success": True, "signature": "s", "order": {"a": 1}}
+            {
+                "success": True,
+                "signature": "0x1234",
+                "order": {
+                    "nonceAndMeta": 1,
+                    "expiry": 9999999999,
+                    "makerAsset": "0x0000000000000000000000000000000000000001",
+                    "takerAsset": "0x0000000000000000000000000000000000000002",
+                    "maker": MAKER_ADDRESS,
+                    "taker": "0x0000000000000000000000000000000000000004",
+                    "makerAmount": 1,
+                    "takerAmount": 1,
+                },
+            }
         )
         assert not result.success
         assert "executing swap" in result.error.lower()
@@ -635,6 +673,7 @@ class TestSwapClient:
             }
         )
         client._get_rfq_contract = AsyncMock(return_value=(client.w3_l1, mock_contract))
+        client.w3_l1.eth.contract.return_value = mock_contract
         client.w3_l1.eth.gas_price = AsyncMock(return_value=100)
         client.w3_l1.eth.send_raw_transaction = AsyncMock(return_value=b"tx_hash")
         client.w3_l1.to_hex = lambda x: "0xHash"
@@ -1047,6 +1086,7 @@ class TestSwapClient:
             }
         )
         client._get_rfq_contract = AsyncMock(return_value=(client.w3_l1, mock_contract))
+        client.w3_l1.eth.contract.return_value = mock_contract
         client.w3_l1.to_hex = lambda x: "0xdeadbeef"
         client.w3_l1.eth.call = AsyncMock(side_effect=Exception("execution reverted: RF-EXP-01"))
 
@@ -1115,6 +1155,7 @@ class TestSwapClient:
             }
         )
         client._get_rfq_contract = AsyncMock(return_value=(client.w3_l1, mock_contract))
+        client.w3_l1.eth.contract.return_value = mock_contract
         client.w3_l1.to_hex = lambda x: "0xabc123"
         # eth.call returns a value (no exception) — no revert reason available
         client.w3_l1.eth.call = AsyncMock(return_value=b"")
@@ -1165,6 +1206,7 @@ class TestSwapClient:
             }
         )
         client._get_rfq_contract = AsyncMock(return_value=(client.w3_l1, mock_contract))
+        client.w3_l1.eth.contract.return_value = mock_contract
         client.w3_l1.to_hex = lambda x: "0xHash"
 
         async def mock_rpc_call(w3, method, *args):
@@ -1200,7 +1242,7 @@ class TestSwapClient:
                 "expiry": 9999999999,
                 "makerAsset": "0x0000000000000000000000000000000000000001",
                 "takerAsset": "0x0000000000000000000000000000000000000002",
-                "maker": "0x0000000000000000000000000000000000000003",
+                "maker": LEGACY_RFQ_ADDRESS,
                 "taker": "0x0000000000000000000000000000000000000004",
                 "makerAmount": 1000,
                 "takerAmount": 2000,
@@ -1213,6 +1255,7 @@ class TestSwapClient:
         }
 
         mock_contract = MagicMock()
+        mock_contract.encode_abi.return_value = "0x"
         mock_contract.functions.simpleSwap.return_value.estimate_gas = AsyncMock(
             return_value=100000
         )
@@ -1225,6 +1268,7 @@ class TestSwapClient:
             }
         )
         client._get_rfq_contract = AsyncMock(return_value=(client.w3_l1, mock_contract))
+        client.w3_l1.eth.contract.return_value = mock_contract
         client.w3_l1.to_hex = lambda x: "0xHash"
 
         async def mock_rpc_call(w3, method, *args):
@@ -1248,7 +1292,7 @@ class TestSwapClient:
             9999999999,
             "0x0000000000000000000000000000000000000001",
             "0x0000000000000000000000000000000000000002",
-            "0x0000000000000000000000000000000000000003",
+            Web3.to_checksum_address(LEGACY_RFQ_ADDRESS),
             "0x0000000000000000000000000000000000000004",
             1000,
             2000,
@@ -1370,7 +1414,7 @@ class TestSwapClient:
                     "expiry": 9999999999,
                     "makerAsset": "0x0000000000000000000000000000000000000001",
                     "takerAsset": "0x0000000000000000000000000000000000000002",
-                    "maker": "0x0000000000000000000000000000000000000003",
+                    "maker": LEGACY_RFQ_ADDRESS,
                     "taker": "0x0000000000000000000000000000000000000004",
                     "makerAmount": 1000,
                     "takerAmount": 2000,
@@ -1384,6 +1428,7 @@ class TestSwapClient:
         }
 
         mock_contract = MagicMock()
+        mock_contract.encode_abi.return_value = "0x"
         mock_contract.functions.simpleSwap.return_value.estimate_gas = AsyncMock(
             return_value=100000
         )
@@ -1396,6 +1441,7 @@ class TestSwapClient:
             }
         )
         client._get_rfq_contract = AsyncMock(return_value=(client.w3_l1, mock_contract))
+        client.w3_l1.eth.contract.return_value = mock_contract
         client.w3_l1.to_hex = lambda x: "0xHash"
 
         async def mock_rpc_call(w3, method, *args):
@@ -1419,7 +1465,7 @@ class TestSwapClient:
             9999999999,
             "0x0000000000000000000000000000000000000001",
             "0x0000000000000000000000000000000000000002",
-            "0x0000000000000000000000000000000000000003",
+            Web3.to_checksum_address(LEGACY_RFQ_ADDRESS),
             "0x0000000000000000000000000000000000000004",
             1000,
             2000,
@@ -1473,6 +1519,7 @@ class TestSwapClient:
             }
         )
         client._get_rfq_contract = AsyncMock(return_value=(client.w3_l1, mock_contract))
+        client.w3_l1.eth.contract.return_value = mock_contract
         client.w3_l1.to_hex = lambda x: "0xHash"
 
         async def mock_rpc_call(w3, method, *args):
@@ -1657,7 +1704,11 @@ class TestSwapClient:
 
         assert res.success
         # Contract was created against the Avalanche provider, not L1.
-        avax_provider.eth.contract.assert_called_once()
+        addresses = [c.kwargs.get("address") for c in avax_provider.eth.contract.call_args_list]
+        assert addresses == [
+            Web3.to_checksum_address(LEGACY_RFQ_ADDRESS),
+            Web3.to_checksum_address(MAKER_ADDRESS),
+        ]
         l1_provider.eth.contract.assert_not_called()
 
     # ------------------------------------------------------------------
@@ -1727,6 +1778,7 @@ class TestSwapClient:
             return_value={"to": "0xeed3", "data": "0x"}
         )
         client._get_rfq_contract = AsyncMock(return_value=(client.w3_l1, mock_contract))
+        client.w3_l1.eth.contract.return_value = mock_contract
         client.w3_l1.to_hex = lambda x: "0xHash"
 
         async def mock_rpc_call(w3, method, *args):
@@ -1778,6 +1830,7 @@ class TestSwapClient:
             return_value={"to": "0xeed3", "data": "0x"}
         )
         client._get_rfq_contract = AsyncMock(return_value=(client.w3_l1, mock_contract))
+        client.w3_l1.eth.contract.return_value = mock_contract
         client.w3_l1.to_hex = lambda x: "0xHash"
 
         async def mock_rpc_call(w3, method, *args):
@@ -1803,3 +1856,692 @@ class TestSwapClient:
             0
         ][0]
         assert build_kwargs["value"] == 0
+
+
+# ---------------------------------------------------------------------------
+# RFQ execution-target routing: firm quotes are served by several maker
+# contracts behind DexalotRouter; the SDK must call tx.to / order.maker, never
+# the deployments address, and must validate the target on-chain first.
+# ---------------------------------------------------------------------------
+
+
+def _firm_quote(**overrides):
+    order = {
+        "nonceAndMeta": 123,
+        "expiry": 9999999999,
+        "makerAsset": "0x1111111111111111111111111111111111111111",
+        "takerAsset": "0x2222222222222222222222222222222222222222",
+        "maker": MAKER_ADDRESS,
+        "taker": "0x0000000000000000000000000000000000000004",
+        "makerAmount": 1000,
+        "takerAmount": 2000,
+    }
+    order.update(overrides.pop("order", {}))
+    quote = {"success": True, "signature": "0x1234", "order": order, "quote_id": "q-1"}
+    quote.update(overrides)
+    return quote
+
+
+def _wire_swap_pipeline(client):
+    """Make the connected-chain provider return one contract mock that can
+    estimate, build and be broadcast, and stub the RPC calls the pipeline makes."""
+    mock_w3 = client.connected_chain_providers["Avalanche"]
+    mock_contract = MagicMock()
+    fn_call = mock_contract.functions.simpleSwap.return_value
+    fn_call.estimate_gas = AsyncMock(return_value=100000)
+    fn_call.build_transaction = AsyncMock(return_value={"to": "0xtarget", "data": "0x"})
+    approve_call = mock_contract.functions.approve.return_value
+    approve_call.estimate_gas = AsyncMock(return_value=50000)
+    approve_call.build_transaction = AsyncMock(return_value={"to": "0xtoken", "data": "0x"})
+    mock_contract.encode_abi.return_value = "0xENCODED"
+    mock_w3.eth.contract.return_value = mock_contract
+    mock_w3.to_hex.return_value = "0xHash"
+
+    async def mock_rpc_call(w3, method, *args):
+        return {
+            "eth.wait_for_transaction_receipt": {"status": 1},
+            "eth.send_raw_transaction": b"hash",
+            "eth.gas_price": 100,
+        }.get(method)
+
+    client._rpc_call = AsyncMock(side_effect=mock_rpc_call)
+    return mock_w3, mock_contract
+
+
+def _contract_addresses(mock_w3):
+    return [str(call.kwargs.get("address")) for call in mock_w3.eth.contract.call_args_list]
+
+
+def _sent_tx_count(client):
+    return sum(
+        1 for call in client._rpc_call.call_args_list if call.args[1] == "eth.send_raw_transaction"
+    )
+
+
+class TestRfqExecutionTarget(SwapFixtures):
+    async def test_execute_targets_tx_to_when_it_is_the_router(self, client):
+        """With tx.to present and equal to the router, the call goes to the router."""
+        mock_w3, _ = _wire_swap_pipeline(client)
+        quote = _firm_quote(tx={"to": ROUTER_ADDRESS.lower()})
+
+        res = await client.execute_rfq_swap(quote)
+
+        assert res.success, res.error
+        assert res.data["target"] == Web3.to_checksum_address(ROUTER_ADDRESS)
+        assert res.data["maker"] == Web3.to_checksum_address(MAKER_ADDRESS)
+        assert Web3.to_checksum_address(ROUTER_ADDRESS) in _contract_addresses(mock_w3)
+
+    async def test_execute_targets_order_maker_without_tx(self, client):
+        """Without a tx envelope the maker contract itself is called."""
+        mock_w3, _ = _wire_swap_pipeline(client)
+
+        res = await client.execute_rfq_swap(_firm_quote())
+
+        assert res.success, res.error
+        assert res.data["target"] == Web3.to_checksum_address(MAKER_ADDRESS)
+        assert Web3.to_checksum_address(MAKER_ADDRESS) in _contract_addresses(mock_w3)
+
+    async def test_execute_never_targets_deployments_address_for_other_maker(self, client):
+        """A quote from a non-legacy maker must not be sent to the legacy address."""
+        mock_w3, _ = _wire_swap_pipeline(client)
+        client._get_rfq_targets = AsyncMock(
+            return_value=(
+                ROUTER_ADDRESS,
+                frozenset({LEGACY_RFQ_ADDRESS, OTHER_MAKER_ADDRESS.lower()}),
+            )
+        )
+        quote = _firm_quote(order={"maker": OTHER_MAKER_ADDRESS})
+
+        res = await client.execute_rfq_swap(quote)
+
+        assert res.success, res.error
+        assert res.data["target"] == OTHER_MAKER_ADDRESS
+        # The deployments contract is created once as the discovery anchor,
+        # but the simpleSwap call is bound on the maker.
+        assert _contract_addresses(mock_w3)[-1] == OTHER_MAKER_ADDRESS
+
+    async def test_execute_rejects_maker_outside_allowlist(self, client):
+        mock_w3, _ = _wire_swap_pipeline(client)
+        client._get_rfq_targets = AsyncMock(
+            return_value=(ROUTER_ADDRESS, frozenset({LEGACY_RFQ_ADDRESS}))
+        )
+
+        res = await client.execute_rfq_swap(_firm_quote(order={"maker": OTHER_MAKER_ADDRESS}))
+
+        assert not res.success
+        assert "not an allowed RFQ contract" in res.error
+        assert OTHER_MAKER_ADDRESS in res.error
+        assert _sent_tx_count(client) == 0
+
+    async def test_execute_rejects_tx_to_that_is_neither_router_nor_maker(self, client):
+        _wire_swap_pipeline(client)
+        stray = "0x0000000000000000000000000000000000000009"
+
+        res = await client.execute_rfq_swap(_firm_quote(tx={"to": stray}))
+
+        assert not res.success
+        assert "neither the RFQ router nor the order maker" in res.error
+        assert _sent_tx_count(client) == 0
+
+    async def test_execute_allows_tx_to_equal_to_maker(self, client):
+        _wire_swap_pipeline(client)
+
+        res = await client.execute_rfq_swap(_firm_quote(tx={"to": MAKER_ADDRESS}))
+
+        assert res.success, res.error
+        assert res.data["target"] == Web3.to_checksum_address(MAKER_ADDRESS)
+
+    async def test_execute_without_router_accepts_only_maker_as_tx_to(self, client):
+        """When no router could be resolved, tx.to must equal the maker."""
+        _wire_swap_pipeline(client)
+        client._get_rfq_targets = AsyncMock(
+            return_value=(None, frozenset({LEGACY_RFQ_ADDRESS, MAKER_ADDRESS.lower()}))
+        )
+
+        res = await client.execute_rfq_swap(_firm_quote(tx={"to": ROUTER_ADDRESS}))
+
+        assert not res.success
+        assert "neither the RFQ router nor the order maker" in res.error
+
+    async def test_execute_rejects_tx_data_mismatch(self, client):
+        _wire_swap_pipeline(client)
+
+        res = await client.execute_rfq_swap(
+            _firm_quote(tx={"to": ROUTER_ADDRESS, "data": "0xdeadbeef"})
+        )
+
+        assert not res.success
+        assert "tx.data does not match" in res.error
+        assert _sent_tx_count(client) == 0
+
+    async def test_execute_accepts_matching_tx_data_case_insensitively(self, client):
+        _wire_swap_pipeline(client)
+
+        res = await client.execute_rfq_swap(
+            _firm_quote(tx={"to": ROUTER_ADDRESS, "data": "0xencoded"})
+        )
+
+        assert res.success, res.error
+
+    async def test_execute_rejects_tx_value_mismatch(self, client):
+        _wire_swap_pipeline(client)
+
+        res = await client.execute_rfq_swap(_firm_quote(tx={"to": ROUTER_ADDRESS, "value": "5"}))
+
+        assert not res.success
+        assert "tx.value" in res.error
+        assert _sent_tx_count(client) == 0
+
+    async def test_execute_accepts_matching_tx_value_for_native_sell(self, client):
+        _, mock_contract = _wire_swap_pipeline(client)
+        quote = _firm_quote(
+            order={"takerAsset": "0x" + "0" * 40, "takerAmount": 2000},
+            tx={"to": ROUTER_ADDRESS, "value": "2000"},
+        )
+
+        res = await client.execute_rfq_swap(quote)
+
+        assert res.success, res.error
+        build_args = mock_contract.functions.simpleSwap.return_value.build_transaction.call_args
+        assert build_args[0][0]["value"] == 2000
+
+    async def test_execute_fails_fast_when_allowance_insufficient(self, client):
+        mock_w3, _ = _wire_swap_pipeline(client)
+        client._get_erc20_allowance = AsyncMock(return_value=10)
+
+        res = await client.execute_rfq_swap(_firm_quote())
+
+        assert not res.success
+        assert "Insufficient allowance" in res.error
+        assert Web3.to_checksum_address(MAKER_ADDRESS) in res.error
+        assert "approve_rfq_maker" in res.error
+        assert _sent_tx_count(client) == 0
+        client._get_erc20_allowance.assert_awaited_once_with(
+            mock_w3,
+            Web3.to_checksum_address("0x2222222222222222222222222222222222222222"),
+            client.account.address,
+            Web3.to_checksum_address(MAKER_ADDRESS),
+        )
+
+    async def test_execute_skips_allowance_check_for_native_sell(self, client):
+        _wire_swap_pipeline(client)
+        client._get_erc20_allowance = AsyncMock(return_value=0)
+
+        res = await client.execute_rfq_swap(_firm_quote(order={"takerAsset": "0x" + "0" * 40}))
+
+        assert res.success, res.error
+        client._get_erc20_allowance.assert_not_awaited()
+
+    async def test_execute_error_carries_quote_context(self, client):
+        _, mock_contract = _wire_swap_pipeline(client)
+        mock_contract.functions.simpleSwap.side_effect = Exception("boom")
+
+        res = await client.execute_rfq_swap(_firm_quote(tx={"to": ROUTER_ADDRESS}))
+
+        assert not res.success
+        assert "executing swap" in res.error
+        assert f"target={Web3.to_checksum_address(ROUTER_ADDRESS)}" in res.error
+        assert f"maker={MAKER_ADDRESS}" in res.error
+        assert "quote_id=q-1" in res.error
+        assert "nonce_and_meta=123" in res.error
+        assert "expiry=9999999999" in res.error
+
+    async def test_execute_reverted_receipt_carries_context(self, client):
+        _wire_swap_pipeline(client)
+
+        async def mock_rpc_call(w3, method, *args):
+            if method == "eth.wait_for_transaction_receipt":
+                return {"status": 0, "blockNumber": 7}
+            if method == "eth.send_raw_transaction":
+                return b"hash"
+            if method == "eth.gas_price":
+                return 100
+            return None
+
+        client._rpc_call = AsyncMock(side_effect=mock_rpc_call)
+        client._extract_revert_reason = AsyncMock(return_value="RF-IS-01")
+
+        res = await client.execute_rfq_swap(_firm_quote())
+
+        assert not res.success
+        assert res.error.startswith("Transaction reverted: tx=0xHash, block=7, reason=RF-IS-01")
+        assert f"maker={MAKER_ADDRESS}" in res.error
+
+    async def test_execute_fails_when_order_maker_missing(self, client):
+        _wire_swap_pipeline(client)
+        quote = _firm_quote()
+        del quote["order"]["maker"]
+
+        res = await client.execute_rfq_swap(quote)
+
+        assert not res.success
+        assert "order.maker" in res.error
+
+    async def test_execute_fails_when_order_maker_is_not_an_address(self, client):
+        _wire_swap_pipeline(client)
+
+        res = await client.execute_rfq_swap(_firm_quote(order={"maker": "not-an-address"}))
+
+        assert not res.success
+        assert "not an address" in res.error
+
+    async def test_execute_fails_when_tx_to_is_not_an_address(self, client):
+        _wire_swap_pipeline(client)
+
+        res = await client.execute_rfq_swap(_firm_quote(tx={"to": "garbage"}))
+
+        assert not res.success
+        assert "'tx.to' is not an address" in res.error
+
+    async def test_execute_ignores_non_dict_tx_field(self, client):
+        _wire_swap_pipeline(client)
+
+        res = await client.execute_rfq_swap(_firm_quote(tx="0xabc"))
+
+        assert res.success, res.error
+        assert res.data["target"] == Web3.to_checksum_address(MAKER_ADDRESS)
+
+    async def test_execute_no_wait_returns_target(self, client):
+        _wire_swap_pipeline(client)
+
+        res = await client.execute_rfq_swap(_firm_quote(), wait_for_receipt=False)
+
+        assert res.success, res.error
+        assert res.data["tx_hash"] == "0xHash"
+        assert not any(
+            call.args[1] == "eth.wait_for_transaction_receipt"
+            for call in client._rpc_call.call_args_list
+        )
+
+    async def test_signature_to_bytes_variants(self, client):
+        assert client._signature_to_bytes("0x1234") == b"\x12\x34"
+        assert client._signature_to_bytes("1234") == b"\x12\x34"
+        assert client._signature_to_bytes(b"\x12") == b"\x12"
+
+    async def test_encode_simple_swap_falls_back_to_web3_v6_name(self, client):
+        contract = MagicMock(spec=["encodeABI"])
+        contract.encodeABI.return_value = "0xv6"
+        assert client._encode_simple_swap(contract, (), b"") == "0xv6"
+        contract.encodeABI.assert_called_once_with("simpleSwap", args=[(), b""])
+
+
+class TestRfqTargetDiscovery(SwapFixtures):
+    """``_get_rfq_targets`` reads trustedForwarder() and getAllowedRFQs() on-chain."""
+
+    @pytest.fixture
+    def discovery(self, client):
+        # Restore the real implementation the base fixture stubs out.
+        client._get_rfq_targets = SwapClient._get_rfq_targets.__get__(client)
+        client._rpc_rate_limiter = None
+
+        deployment = MagicMock()
+        deployment.address = Web3.to_checksum_address(LEGACY_RFQ_ADDRESS)
+
+        forwarder_contract = MagicMock()
+        forwarder_contract.functions.trustedForwarder.return_value.call = AsyncMock(
+            return_value=ROUTER_ADDRESS
+        )
+        router_contract = MagicMock()
+        router_contract.functions.getAllowedRFQs.return_value.call = AsyncMock(
+            return_value=[
+                Web3.to_checksum_address(LEGACY_RFQ_ADDRESS),
+                OTHER_MAKER_ADDRESS,
+            ]
+        )
+        w3 = MagicMock()
+
+        def contract_factory(address, abi):
+            names = {entry["name"] for entry in abi}
+            if "trustedForwarder" in names:
+                return forwarder_contract
+            if "getAllowedRFQs" in names:
+                return router_contract
+            raise AssertionError(f"unexpected abi {names}")
+
+        w3.eth.contract.side_effect = contract_factory
+        return client, w3, deployment, forwarder_contract, router_contract
+
+    async def test_resolves_router_and_allowed_makers(self, discovery):
+        client, w3, deployment, _, _ = discovery
+
+        router, allowed = await client._get_rfq_targets(w3, deployment)
+
+        assert router == Web3.to_checksum_address(ROUTER_ADDRESS)
+        assert allowed == frozenset({LEGACY_RFQ_ADDRESS, OTHER_MAKER_ADDRESS.lower()})
+
+    async def test_result_is_cached_in_static_tier(self, discovery):
+        client, w3, deployment, forwarder_contract, _ = discovery
+
+        first = await client._get_rfq_targets(w3, deployment)
+        second = await client._get_rfq_targets(w3, deployment)
+
+        assert first == second
+        assert forwarder_contract.functions.trustedForwarder.return_value.call.await_count == 1
+
+    async def test_cache_disabled_refetches(self, discovery):
+        client, w3, deployment, forwarder_contract, _ = discovery
+        client._cache_enabled = False
+
+        await client._get_rfq_targets(w3, deployment)
+        await client._get_rfq_targets(w3, deployment)
+
+        assert forwarder_contract.functions.trustedForwarder.return_value.call.await_count == 2
+
+    async def test_lookup_failure_degrades_to_deployment_only_and_is_not_cached(self, discovery):
+        client, w3, deployment, forwarder_contract, _ = discovery
+        client.config.retry_enabled = False
+        forwarder_contract.functions.trustedForwarder.return_value.call = AsyncMock(
+            side_effect=Exception("rpc down")
+        )
+
+        router, allowed = await client._get_rfq_targets(w3, deployment)
+        await client._get_rfq_targets(w3, deployment)
+
+        assert router is None
+        assert allowed == frozenset({LEGACY_RFQ_ADDRESS})
+        assert forwarder_contract.functions.trustedForwarder.return_value.call.await_count == 2
+
+    async def test_router_lookup_failure_degrades_to_deployment_only(self, discovery):
+        client, w3, deployment, _, router_contract = discovery
+        client.config.retry_enabled = False
+        router_contract.functions.getAllowedRFQs.return_value.call = AsyncMock(
+            side_effect=Exception("rpc down")
+        )
+
+        router, allowed = await client._get_rfq_targets(w3, deployment)
+
+        assert router is None
+        assert allowed == frozenset({LEGACY_RFQ_ADDRESS})
+
+    async def test_zero_forwarder_means_no_router(self, discovery):
+        client, w3, deployment, forwarder_contract, router_contract = discovery
+        forwarder_contract.functions.trustedForwarder.return_value.call = AsyncMock(
+            return_value="0x" + "0" * 40
+        )
+
+        router, allowed = await client._get_rfq_targets(w3, deployment)
+
+        assert router is None
+        assert allowed == frozenset({LEGACY_RFQ_ADDRESS})
+        router_contract.functions.getAllowedRFQs.assert_not_called()
+
+    async def test_rate_limiter_is_honoured(self, discovery):
+        client, w3, deployment, _, _ = discovery
+        limiter = MagicMock()
+        limiter.acquire = AsyncMock()
+        client._rpc_rate_limiter = limiter
+
+        await client._get_rfq_targets(w3, deployment)
+
+        assert limiter.acquire.await_count == 2
+
+    async def test_get_erc20_allowance_reads_chain(self, client):
+        client._get_erc20_allowance = SwapClient._get_erc20_allowance.__get__(client)
+        client._rpc_rate_limiter = None
+        w3 = MagicMock()
+        token_contract = MagicMock()
+        token_contract.functions.allowance.return_value.call = AsyncMock(return_value="42")
+        w3.eth.contract.return_value = token_contract
+
+        allowance = await client._get_erc20_allowance(
+            w3, "0x2222222222222222222222222222222222222222", "0xowner", MAKER_ADDRESS
+        )
+
+        assert allowance == 42
+        token_contract.functions.allowance.assert_called_once_with("0xowner", MAKER_ADDRESS)
+
+
+class TestApproveRfqMaker(SwapFixtures):
+    async def test_requires_account(self, client):
+        client.account = None
+        with pytest.raises(ValueError, match="Account is required"):
+            await client.approve_rfq_maker(_firm_quote())
+
+    async def test_failed_result_input(self, client):
+        res = await client.approve_rfq_maker(Result.fail("no quote"))
+        assert not res.success
+        assert "no quote" in res.error
+
+    async def test_empty_result_input(self, client):
+        res = await client.approve_rfq_maker(Result.ok(None))
+        assert not res.success
+        assert "empty data" in res.error
+
+    async def test_missing_order(self, client):
+        res = await client.approve_rfq_maker({"signature": "0x12"})
+        assert not res.success
+        assert "'order'" in res.error
+
+    async def test_missing_taker_asset(self, client):
+        quote = _firm_quote()
+        del quote["order"]["takerAsset"]
+        res = await client.approve_rfq_maker(quote)
+        assert not res.success
+        assert "takerAsset" in res.error
+
+    async def test_contract_not_initialized(self, client):
+        client.connected_chain_providers = {}
+        res = await client.approve_rfq_maker(_firm_quote())
+        assert not res.success
+        assert "not initialized" in res.error
+
+    async def test_native_taker_asset_is_rejected(self, client):
+        _wire_swap_pipeline(client)
+        res = await client.approve_rfq_maker(_firm_quote(order={"takerAsset": "0x" + "0" * 40}))
+        assert not res.success
+        assert "does not need an allowance" in res.error
+
+    async def test_maker_outside_allowlist_is_rejected(self, client):
+        _wire_swap_pipeline(client)
+        client._get_rfq_targets = AsyncMock(
+            return_value=(ROUTER_ADDRESS, frozenset({LEGACY_RFQ_ADDRESS}))
+        )
+        res = await client.approve_rfq_maker(_firm_quote())
+        assert not res.success
+        assert "not an allowed RFQ contract" in res.error
+        assert _sent_tx_count(client) == 0
+
+    async def test_non_positive_amount_is_rejected(self, client):
+        _wire_swap_pipeline(client)
+        res = await client.approve_rfq_maker(_firm_quote(), amount_wei=0)
+        assert not res.success
+        assert "must be positive" in res.error
+
+    async def test_sufficient_allowance_sends_nothing(self, client):
+        _wire_swap_pipeline(client)
+        client._get_erc20_allowance = AsyncMock(return_value=2000)
+
+        res = await client.approve_rfq_maker(_firm_quote())
+
+        assert res.success, res.error
+        assert res.data["approved"] is False
+        assert res.data["allowance"] == 2000
+        assert res.data["spender"] == Web3.to_checksum_address(MAKER_ADDRESS)
+        assert _sent_tx_count(client) == 0
+
+    async def test_insufficient_allowance_approves_maker_for_taker_amount(self, client):
+        _, mock_contract = _wire_swap_pipeline(client)
+        client._get_erc20_allowance = AsyncMock(return_value=0)
+
+        res = await client.approve_rfq_maker(_firm_quote())
+
+        assert res.success, res.error
+        assert res.data["approved"] is True
+        assert res.data["tx_hash"] == "0xHash"
+        assert res.data["amount"] == 2000
+        mock_contract.functions.approve.assert_called_once_with(
+            Web3.to_checksum_address(MAKER_ADDRESS), 2000
+        )
+        assert _sent_tx_count(client) == 1
+
+    async def test_custom_amount_is_used(self, client):
+        _, mock_contract = _wire_swap_pipeline(client)
+        client._get_erc20_allowance = AsyncMock(return_value=0)
+
+        res = await client.approve_rfq_maker(_firm_quote(), amount_wei=10**30)
+
+        assert res.success, res.error
+        assert res.data["amount"] == 10**30
+        mock_contract.functions.approve.assert_called_once_with(
+            Web3.to_checksum_address(MAKER_ADDRESS), 10**30
+        )
+
+    async def test_no_wait_skips_receipt(self, client):
+        _wire_swap_pipeline(client)
+        client._get_erc20_allowance = AsyncMock(return_value=0)
+
+        res = await client.approve_rfq_maker(_firm_quote(), wait_for_receipt=False)
+
+        assert res.success, res.error
+        assert not any(
+            call.args[1] == "eth.wait_for_transaction_receipt"
+            for call in client._rpc_call.call_args_list
+        )
+
+    async def test_reverted_approval_is_reported(self, client):
+        _wire_swap_pipeline(client)
+        client._get_erc20_allowance = AsyncMock(return_value=0)
+        client._extract_revert_reason = AsyncMock(return_value=None)
+
+        async def mock_rpc_call(w3, method, *args):
+            if method == "eth.wait_for_transaction_receipt":
+                return {"status": 0}
+            if method == "eth.send_raw_transaction":
+                return b"hash"
+            if method == "eth.gas_price":
+                return 100
+            return None
+
+        client._rpc_call = AsyncMock(side_effect=mock_rpc_call)
+
+        res = await client.approve_rfq_maker(_firm_quote())
+
+        assert not res.success
+        assert res.error.startswith("Transaction reverted: tx=0xHash")
+        assert f"maker={MAKER_ADDRESS}" in res.error
+
+    async def test_exception_is_sanitized_with_context(self, client):
+        _wire_swap_pipeline(client)
+        client._get_erc20_allowance = AsyncMock(side_effect=Exception("rpc down"))
+
+        res = await client.approve_rfq_maker(_firm_quote())
+
+        assert not res.success
+        assert "approving RFQ maker" in res.error
+        assert "quote_id=q-1" in res.error
+
+    async def test_successful_result_input_is_unwrapped(self, client):
+        _wire_swap_pipeline(client)
+        client._get_erc20_allowance = AsyncMock(return_value=2000)
+
+        res = await client.approve_rfq_maker(Result.ok(_firm_quote()))
+
+        assert res.success, res.error
+        assert res.data["approved"] is False
+
+
+class TestSwapTxHelpers(SwapFixtures):
+    async def test_send_swap_tx_requires_account(self, client):
+        client.account = None
+        with pytest.raises(ValueError, match="Account is required"):
+            await client._send_swap_tx(MagicMock(), MagicMock(), value=0, wait_for_receipt=False)
+
+    async def test_estimate_swap_gas_binds_simple_swap_and_estimates(self, client):
+        client._rpc_rate_limiter = None
+        contract = MagicMock()
+        contract.functions.simpleSwap.return_value.estimate_gas = AsyncMock(return_value=90000)
+
+        estimate = await client._estimate_swap_gas(contract, (1, 2), b"\x01", msg_value=5)
+
+        assert estimate == 90000
+        contract.functions.simpleSwap.assert_called_once_with((1, 2), b"\x01")
+        contract.functions.simpleSwap.return_value.estimate_gas.assert_awaited_once_with(
+            {"from": client.account.address, "value": 5}
+        )
+
+
+class TestRouterFromDeployments(SwapFixtures):
+    """The router address is taken from the deployments endpoint when published,
+    with the on-chain trustedForwarder() lookup kept as fallback."""
+
+    @pytest.fixture
+    def discovery(self, client):
+        client._get_rfq_targets = SwapClient._get_rfq_targets.__get__(client)
+        client._rpc_rate_limiter = None
+        deployment = MagicMock()
+        deployment.address = Web3.to_checksum_address(LEGACY_RFQ_ADDRESS)
+        forwarder_contract = MagicMock()
+        forwarder_contract.functions.trustedForwarder.return_value.call = AsyncMock(
+            return_value=ROUTER_ADDRESS
+        )
+        router_contract = MagicMock()
+        router_contract.functions.getAllowedRFQs.return_value.call = AsyncMock(
+            return_value=[OTHER_MAKER_ADDRESS]
+        )
+        w3 = MagicMock()
+        created: list[str] = []
+
+        def contract_factory(address, abi):
+            created.append(address)
+            names = {entry["name"] for entry in abi}
+            if "trustedForwarder" in names:
+                return forwarder_contract
+            if "getAllowedRFQs" in names:
+                return router_contract
+            raise AssertionError(f"unexpected abi {names}")
+
+        w3.eth.contract.side_effect = contract_factory
+        return client, w3, deployment, forwarder_contract, router_contract, created
+
+    async def test_api_router_skips_on_chain_forwarder_lookup(self, discovery):
+        client, w3, deployment, forwarder_contract, _, created = discovery
+        client.deployments["DexalotRouter"] = {"Avalanche": {"address": ROUTER_ADDRESS.lower()}}
+
+        router, allowed = await client._get_rfq_targets(w3, deployment, chain_id=43114)
+
+        assert router == Web3.to_checksum_address(ROUTER_ADDRESS)
+        assert allowed == frozenset({LEGACY_RFQ_ADDRESS, OTHER_MAKER_ADDRESS.lower()})
+        forwarder_contract.functions.trustedForwarder.assert_not_called()
+        assert created == [Web3.to_checksum_address(ROUTER_ADDRESS)]
+
+    async def test_missing_api_router_falls_back_to_trusted_forwarder(self, discovery):
+        client, w3, deployment, forwarder_contract, _, _ = discovery
+        client.deployments["DexalotRouter"] = {}
+
+        router, _ = await client._get_rfq_targets(w3, deployment, chain_id=43114)
+
+        assert router == Web3.to_checksum_address(ROUTER_ADDRESS)
+        forwarder_contract.functions.trustedForwarder.assert_called_once()
+
+    async def test_router_address_resolves_by_chain_name_then_chain_id(self, client):
+        client.deployments["DexalotRouter"] = {"Avalanche": {"address": ROUTER_ADDRESS}}
+        assert client._router_address_from_deployments(43114) == Web3.to_checksum_address(
+            ROUTER_ADDRESS
+        )
+        # Defaults to self.chain_id when no chain is given.
+        assert client._router_address_from_deployments(None) == Web3.to_checksum_address(
+            ROUTER_ADDRESS
+        )
+        client.deployments["DexalotRouter"] = {43113: {"address": ROUTER_ADDRESS}}
+        assert client._router_address_from_deployments(43113) == Web3.to_checksum_address(
+            ROUTER_ADDRESS
+        )
+        client.deployments["DexalotRouter"] = {"43113": {"address": ROUTER_ADDRESS}}
+        assert client._router_address_from_deployments(43113) == Web3.to_checksum_address(
+            ROUTER_ADDRESS
+        )
+
+    async def test_router_address_missing_or_malformed_is_none(self, client):
+        client.deployments.pop("DexalotRouter", None)
+        assert client._router_address_from_deployments(43114) is None
+        client.deployments["DexalotRouter"] = {"Avalanche": {}}
+        assert client._router_address_from_deployments(43114) is None
+        client.deployments["DexalotRouter"] = {"Avalanche": {"address": "not-an-address"}}
+        assert client._router_address_from_deployments(43114) is None
+        client.chain_id = None
+        assert client._router_address_from_deployments(None) is None
+
+    async def test_chain_name_for_id(self, client):
+        assert client._chain_name_for_id(43114) == "Avalanche"
+        assert client._chain_name_for_id(1) is None
+        assert client._chain_name_for_id(None) is None
