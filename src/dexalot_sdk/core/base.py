@@ -278,6 +278,7 @@ class DexalotBaseClient:
             "PortfolioMain": {},
             "PortfolioSub": {},
             "MainnetRFQ": {},
+            "DexalotRouter": {},
         }
         self.pairs: dict[str, Any] = {}
         self.token_data: dict[str, Any] = {}
@@ -1396,7 +1397,22 @@ class DexalotBaseClient:
             self._fetch_contract_deployment(deploy_url, "TradePairs"),
             self._fetch_contract_deployment(deploy_url, "Portfolio"),
             self._fetch_contract_deployment(deploy_url, "MainnetRFQ"),
+            # The RFQ router is newer than the other contract types; a backend
+            # that does not publish it must not break initialization (the swap
+            # path falls back to MainnetRFQ.trustedForwarder() on-chain).
+            self._fetch_optional_contract_deployment(deploy_url, "DexalotRouter"),
         )
+
+    async def _fetch_optional_contract_deployment(self, deploy_url, contract_type):
+        """Best-effort ``_fetch_contract_deployment``: log and continue on failure."""
+        try:
+            await self._fetch_contract_deployment(deploy_url, contract_type)
+        except Exception as exc:
+            self.logger.warning(
+                "Deployment lookup for %s failed (%s); continuing without it",
+                contract_type,
+                exc,
+            )
 
     async def _fetch_clob_pairs(self):
         """Fetch CLOB pairs if get_clob_pairs method is available.
@@ -1495,9 +1511,35 @@ class DexalotBaseClient:
                         address=address, abi=abi
                     )
 
-        elif contract_type == "MainnetRFQ":
-            if env in [self.ENV_PROD_MULTI_AVAX, self.ENV_FUJI_MULTI_AVAX]:
-                self.deployments["MainnetRFQ"]["Avalanche"] = {"address": address, "abi": abi}
+        elif contract_type in ("MainnetRFQ", "DexalotRouter"):
+            self._store_connected_chain_deployment(contract_type, env, address, abi)
+
+    def _connected_chain_key(self, env: str | None) -> str:
+        """Deployment-map key for a connected-chain env.
+
+        ``chain_config`` names the chain (``"Avalanche"`` on mainnet,
+        ``"Fuji"`` on testnet) and ``_get_rfq_contract`` looks deployments up
+        by that name, so store them under it.  Falls back to ``"Avalanche"``
+        when the environments have not been loaded.
+        """
+        chain_id = (
+            self.CHAIN_ID_AVAX_MAINNET
+            if env == self.ENV_PROD_MULTI_AVAX
+            else self.CHAIN_ID_AVAX_FUJI
+        )
+        for name, cfg in (self.chain_config or {}).items():
+            if cfg.get("chain_id") == chain_id:
+                return name
+        return "Avalanche"
+
+    def _store_connected_chain_deployment(
+        self, contract_type: str, env: str | None, address: Any, abi: Any
+    ) -> None:
+        """Record a connected-chain (AVAX env) deployment keyed by chain name."""
+        if env not in (self.ENV_PROD_MULTI_AVAX, self.ENV_FUJI_MULTI_AVAX):
+            return
+        key = self._connected_chain_key(env)
+        self.deployments.setdefault(contract_type, {})[key] = {"address": address, "abi": abi}
 
     def _transform_deployment_from_api(self, item: dict) -> dict:
         """Transform API deployment response to match standardized field names.

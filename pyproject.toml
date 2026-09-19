@@ -8,7 +8,7 @@ license = "MIT"
 license-files = [
     "LICENSE.txt"
 ]
-version = "0.6.0"
+version = "0.6.1"
 description = "Dexalot Python SDK - Core library for Dexalot interaction"
 readme = "README.md"
 requires-python = ">=3.12,<3.15"
@@ -29,11 +29,11 @@ classifiers = [
 ]
 dependencies = [
     "web3>=6.0.0,<8",
-    "aiohttp>=3.14.1,<4",
+    "aiohttp>=3.14.3,<4",
     "python-dotenv>=1.0,<2",
     "eth-account>=0.11,<1",
     "websockets>=13.0,<15",
-    "cryptography>=48.0.1,<49",
+    "cryptography>=50.0.0,<51",
     # Pin transitive deps to versions free of known CVEs (pip-audit gate).
     # - idna>=3.15 closes CVE-2026-45409
     # - urllib3>=2.7.0 closes PYSEC-2026-141 and PYSEC-2026-142
@@ -60,6 +60,9 @@ dev = [
 docs = [
     "mkdocstrings[python]>=0.29",
     "zensical>=0.0.29",
+    # Transitive floor: pymdown-extensions<11.0.1 is flagged by pip-audit
+    # (PYSEC-2026-3609, PYSEC-2026-3654).
+    "pymdown-extensions>=11.0.1",
 ]
 
 # Security audit tooling — kept out of `dev` so a normal contributor install
@@ -67,6 +70,10 @@ docs = [
 security = [
     "bandit[toml]",
     "pip-audit",
+    # Transitive floors for pip-audit's own dependency tree, flagged by the
+    # pip-audit gate: msgpack (PYSEC-2026-3625) and pip (PYSEC-2026-3721).
+    "msgpack>=1.2.1",
+    "pip>=26.2",
 ]
 
 [project.scripts]

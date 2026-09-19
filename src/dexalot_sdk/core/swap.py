@@ -1,3 +1,4 @@
+from collections.abc import Awaitable, Callable
 from typing import Any, cast
 
 from web3 import Web3
@@ -15,12 +16,91 @@ from ..utils.input_validators import (
 )
 from ..utils.observability import track_method
 from ..utils.result import Result
-from .base import _SEMI_STATIC_CACHE, DexalotBaseClient
+from .base import _SEMI_STATIC_CACHE, _STATIC_CACHE, DexalotBaseClient
 
 # MainnetRFQ uses the zero address to mean "the chain's native coin" (e.g. AVAX
 # on 43114).  When the taker is selling native, ``msg.value`` must equal
 # ``takerAmount``; for ERC20 takers it must be 0.
 NATIVE_ZERO_ADDRESS = "0x" + "0" * 40
+
+# Gas headroom applied on top of ``estimate_gas`` for swap and approval txs.
+SWAP_GAS_BUFFER = 1.2
+
+# The RFQ API serves firm quotes from several maker contracts (the legacy
+# MainnetRFQ plus DexalotRFQ instances), all reachable through DexalotRouter,
+# which ``MainnetRFQ.trustedForwarder()`` points at.  Each maker has its own
+# EIP-712 domain and swap signer, so a quote is only valid on ``order.maker``
+# (called directly, or via the router which forwards the call to it).  The
+# deployments endpoint publishes the legacy MainnetRFQ and the DexalotRouter
+# but not the individual makers, so the allow-list is read on-chain with these
+# ABI fragments (and the router too, when the backend does not publish it).
+_RFQ_TRUSTED_FORWARDER_ABI: list[dict[str, Any]] = [
+    {
+        "name": "trustedForwarder",
+        "type": "function",
+        "stateMutability": "view",
+        "inputs": [],
+        "outputs": [{"name": "", "type": "address"}],
+    }
+]
+_ROUTER_ALLOWED_RFQS_ABI: list[dict[str, Any]] = [
+    {
+        "name": "getAllowedRFQs",
+        "type": "function",
+        "stateMutability": "view",
+        "inputs": [],
+        "outputs": [{"name": "", "type": "address[]"}],
+    }
+]
+# simpleSwap((uint256,uint128,address,address,address,address,uint256,uint256),bytes)
+# is shared by MainnetRFQ, DexalotRFQ and the router's forwarding fallback.
+_SIMPLE_SWAP_ABI: list[dict[str, Any]] = [
+    {
+        "name": "simpleSwap",
+        "type": "function",
+        "stateMutability": "payable",
+        "inputs": [
+            {
+                "name": "_order",
+                "type": "tuple",
+                "components": [
+                    {"name": "nonceAndMeta", "type": "uint256"},
+                    {"name": "expiry", "type": "uint128"},
+                    {"name": "makerAsset", "type": "address"},
+                    {"name": "takerAsset", "type": "address"},
+                    {"name": "maker", "type": "address"},
+                    {"name": "taker", "type": "address"},
+                    {"name": "makerAmount", "type": "uint256"},
+                    {"name": "takerAmount", "type": "uint256"},
+                ],
+            },
+            {"name": "_signature", "type": "bytes"},
+        ],
+        "outputs": [],
+    }
+]
+_ERC20_ALLOWANCE_ABI: list[dict[str, Any]] = [
+    {
+        "name": "allowance",
+        "type": "function",
+        "stateMutability": "view",
+        "inputs": [
+            {"name": "_owner", "type": "address"},
+            {"name": "_spender", "type": "address"},
+        ],
+        "outputs": [{"name": "", "type": "uint256"}],
+    },
+    {
+        "name": "approve",
+        "type": "function",
+        "stateMutability": "nonpayable",
+        "inputs": [
+            {"name": "_spender", "type": "address"},
+            {"name": "_value", "type": "uint256"},
+        ],
+        "outputs": [{"name": "", "type": "bool"}],
+    },
+]
 
 
 class SwapClient(DexalotBaseClient):
@@ -443,8 +523,18 @@ class SwapClient(DexalotBaseClient):
     async def execute_rfq_swap(self, quote: dict, wait_for_receipt: bool = True) -> Result[dict]:
         """Execute a SimpleSwap using a firm quote from ``get_swap_firm_quote()``.
 
-        Signs the quote with the current account's private key and submits the
-        transaction to the ``MainnetRFQ`` contract.
+        Signs and submits ``simpleSwap(order, signature)`` to the contract the
+        quote is valid on: the quote's ``tx.to`` (the DexalotRouter, which
+        forwards to the maker) when present, otherwise ``order.maker``
+        directly.  The legacy ``MainnetRFQ`` address from the deployments
+        endpoint is never used as the execution target because firm quotes are
+        served by several maker contracts, each with its own signer.
+
+        Before broadcasting, the SDK checks on-chain that ``order.maker`` is a
+        maker the router allows, that ``tx.to`` is the router or the maker,
+        that any ``tx.data``/``tx.value`` the API returned match the call the
+        SDK encodes itself, and, for ERC20 sells, that the maker already holds a
+        sufficient allowance (see ``approve_rfq_maker``).
 
         Args:
             quote: Firm quote dict as returned by ``get_swap_firm_quote()``.
@@ -454,8 +544,10 @@ class SwapClient(DexalotBaseClient):
                 confirmed on-chain.
 
         Returns:
-            Result containing a confirmation message with the transaction hash on
-            success, or an error message on failure.
+            Result with ``tx_hash``, ``target`` (contract called) and ``maker``
+            on success, or an error message on failure.  Errors carry a
+            ``[target=..., maker=..., quote_id=..., ...]`` suffix so failures
+            can be traced back to the quote.
 
         Raises:
             ValueError: If no signer account is configured.
@@ -488,85 +580,455 @@ class SwapClient(DexalotBaseClient):
         if not signature or not order_data:
             return Result.fail("Invalid firm quote: missing 'signature' or 'order' field.")
 
-        # Resolve contract and w3 for the connected chain carried in the quote.
+        # Resolve w3 and the deployments (legacy) contract for the connected
+        # chain carried in the quote.  The contract is only used as the anchor
+        # for on-chain target discovery, never as the execution target.
         w3, contract = await self._get_rfq_contract(quote.get("chain_id"))
         if not w3 or not contract:
             return Result.fail("RFQ Contract not found or W3 not initialized.")
 
+        target_res = await self._resolve_rfq_execution_target(w3, contract, quote, order_data)
+        if not target_res.success or target_res.data is None:
+            return Result.fail(target_res.error or "Could not resolve RFQ execution target.")
+        target = target_res.data
+        maker = Web3.to_checksum_address(order_data["maker"])
+        context = self._rfq_error_context(quote, order_data, target)
+
         try:
-            # Construct Order tuple
             order_tuple = self._construct_rfq_order(order_data)
             # MainnetRFQ requires msg.value == takerAmount for native sells
             # (takerAsset == zero address), 0 otherwise.
             msg_value = self._compute_msg_value(order_data)
+            signature_bytes = self._signature_to_bytes(signature)
 
-            # Convert signature to bytes
-            if isinstance(signature, str):
-                if signature.startswith("0x"):
-                    signature_bytes = bytes.fromhex(signature[2:])
-                else:
-                    signature_bytes = bytes.fromhex(signature)
-            else:
-                signature_bytes = signature
+            target_contract = w3.eth.contract(address=target, abi=_SIMPLE_SWAP_ABI)
+            fn_call = target_contract.functions.simpleSwap(order_tuple, signature_bytes)
 
-            nonce = await self._get_nonce(w3)
-
-            # Estimate gas
-            gas_estimate = await self._estimate_swap_gas(
-                contract, order_tuple, signature_bytes, msg_value=msg_value
+            envelope_error = self._check_tx_envelope(
+                quote, target_contract, order_tuple, signature_bytes, msg_value
             )
+            if envelope_error:
+                return Result.fail(f"{envelope_error} [{context}]")
 
-            gas_price = await self._rpc_call(w3, "eth.gas_price")
+            # ERC20 sells: the maker contract pulls funds with transferFrom, so
+            # the allowance must be granted to order.maker (not the router and
+            # not the legacy MainnetRFQ).  Fail here with a clear message
+            # instead of letting the contract revert.
+            taker_asset = str(order_tuple[3])
+            if taker_asset.lower() != NATIVE_ZERO_ADDRESS:
+                needed = int(order_tuple[7])
+                allowance = await self._get_erc20_allowance(w3, taker_asset, from_addr, maker)
+                if allowance < needed:
+                    return Result.fail(
+                        f"Insufficient allowance: RFQ maker {maker} may spend {allowance} of "
+                        f"{taker_asset}, swap needs {needed}. Call approve_rfq_maker(quote) first "
+                        f"(approvals are per maker contract) [{context}]"
+                    )
 
-            tx = await contract.functions.simpleSwap(
-                order_tuple, signature_bytes
-            ).build_transaction(
+            tx_hex, tx, receipt = await self._send_swap_tx(
+                w3, fn_call, value=msg_value, wait_for_receipt=wait_for_receipt
+            )
+            if wait_for_receipt:
+                failure = await self._describe_receipt_failure(w3, tx, receipt, tx_hex)
+                if failure:
+                    return Result.fail(f"{failure} [{context}]")
+
+            return Result.ok(
                 {
-                    "from": from_addr,
-                    "nonce": nonce,
-                    "gas": int(gas_estimate * 1.2),
-                    "gasPrice": gas_price,
-                    "value": msg_value,
+                    "tx_hash": tx_hex,
+                    "operation": "execute_rfq_swap",
+                    "target": target,
+                    "maker": maker,
                 }
             )
 
-            # Use Account instance method - never expose private key
-            signed_tx = self.account.sign_transaction(tx)
-            tx_hash = await self._rpc_call(
-                w3, "eth.send_raw_transaction", signed_tx.raw_transaction
-            )
-
-            tx_hex = w3.to_hex(tx_hash)
-
-            if wait_for_receipt:
-                receipt = await self._rpc_call(w3, "eth.wait_for_transaction_receipt", tx_hash)
-                receipt_status = (
-                    receipt.status
-                    if hasattr(receipt, "status")
-                    else receipt.get("status", 1)
-                    if receipt
-                    else 1
-                )
-                if receipt_status != 1:
-                    revert_reason = await self._extract_revert_reason(w3, tx, receipt)
-                    block_number = (
-                        receipt.get("blockNumber")
-                        if isinstance(receipt, dict)
-                        else getattr(receipt, "blockNumber", None)
-                    )
-                    detail_parts = [f"tx={tx_hex}"]
-                    if block_number is not None:
-                        detail_parts.append(f"block={block_number}")
-                    if revert_reason:
-                        detail_parts.append(f"reason={revert_reason}")
-                    return Result.fail(f"Transaction reverted: {', '.join(detail_parts)}")
-                return Result.ok({"tx_hash": tx_hex, "operation": "execute_rfq_swap"})
-
-            return Result.ok({"tx_hash": tx_hex, "operation": "execute_rfq_swap"})
-
         except Exception as e:
             error_msg = self._sanitize_error(e, "executing swap")
-            return Result.fail(error_msg)
+            return Result.fail(f"{error_msg} [{context}]")
+
+    @track_method("swap")
+    async def approve_rfq_maker(
+        self, quote: dict, amount_wei: int | None = None, wait_for_receipt: bool = True
+    ) -> Result[dict]:
+        """Grant the quote's maker contract an ERC20 allowance for the taker asset.
+
+        Firm quotes are served by several maker contracts and each one pulls
+        the taker asset with ``transferFrom`` itself, so the allowance has to
+        be granted to ``order.maker`` — approving the router or the legacy
+        ``MainnetRFQ`` address does nothing for a quote from another maker.
+        Call this before ``execute_rfq_swap`` when selling an ERC20 token.
+
+        The maker is validated against the router's on-chain allow-list before
+        any approval is sent.  Native-asset sells need no allowance and are
+        rejected.
+
+        Args:
+            quote: Firm quote dict (or ``Result[dict]``) from
+                ``get_swap_firm_quote()``.
+            amount_wei: Allowance to grant, in the token's base units.
+                Defaults to the quote's ``takerAmount``.
+            wait_for_receipt: If ``True``, block until the approval is mined.
+
+        Returns:
+            ``Result.ok`` with ``approved=False`` and the current ``allowance``
+            when nothing had to be sent, or ``approved=True`` with the approval
+            ``tx_hash`` otherwise.
+
+        Raises:
+            ValueError: If no signer account is configured.
+        """
+        if not self.account:
+            raise ValueError(
+                "Account is required for signing transactions. Set signer or PRIVATE_KEY."
+            )
+        from_addr = cast(str, cast(Any, self.account).address)
+
+        if isinstance(quote, Result):
+            if not quote.success:
+                return Result.fail(f"Cannot approve failed quote: {quote.error}")
+            if quote.data is None:
+                return Result.fail("Invalid quote: empty data")
+            quote = quote.data
+
+        quote_typed: dict[Any, Any] = self._transform_quote_from_api(quote)
+        quote = quote_typed
+        order_data = quote.get("order")
+        if not order_data:
+            return Result.fail("Invalid firm quote: missing 'order' field.")
+
+        w3, contract = await self._get_rfq_contract(quote.get("chain_id"))
+        if not w3 or not contract:
+            return Result.fail("RFQ Contract not found or W3 not initialized.")
+
+        taker_asset = str(order_data.get("taker_asset") or order_data.get("takerAsset") or "")
+        if not taker_asset:
+            return Result.fail("Invalid firm quote: missing 'order.takerAsset' field.")
+        if taker_asset.lower() == NATIVE_ZERO_ADDRESS:
+            return Result.fail(
+                "Native taker asset does not need an allowance; "
+                "execute_rfq_swap sends it as msg.value."
+            )
+
+        target_res = await self._resolve_rfq_execution_target(w3, contract, quote, order_data)
+        if not target_res.success or target_res.data is None:
+            return Result.fail(target_res.error or "Could not resolve RFQ execution target.")
+        maker = Web3.to_checksum_address(order_data["maker"])
+        token = Web3.to_checksum_address(taker_asset)
+        needed = (
+            amount_wei
+            if amount_wei is not None
+            else self._to_int(order_data.get("taker_amount") or order_data.get("takerAmount"))
+        )
+        if needed <= 0:
+            return Result.fail("Approval amount must be positive.")
+        context = self._rfq_error_context(quote, order_data, maker)
+
+        try:
+            allowance = await self._get_erc20_allowance(w3, token, from_addr, maker)
+            if allowance >= needed:
+                return Result.ok(
+                    {
+                        "approved": False,
+                        "allowance": allowance,
+                        "spender": maker,
+                        "token": token,
+                        "operation": "approve_rfq_maker",
+                    }
+                )
+
+            token_contract = w3.eth.contract(address=token, abi=_ERC20_ALLOWANCE_ABI)
+            fn_call = token_contract.functions.approve(maker, needed)
+            tx_hex, tx, receipt = await self._send_swap_tx(
+                w3, fn_call, value=0, wait_for_receipt=wait_for_receipt
+            )
+            if wait_for_receipt:
+                failure = await self._describe_receipt_failure(w3, tx, receipt, tx_hex)
+                if failure:
+                    return Result.fail(f"{failure} [{context}]")
+
+            return Result.ok(
+                {
+                    "approved": True,
+                    "tx_hash": tx_hex,
+                    "amount": needed,
+                    "spender": maker,
+                    "token": token,
+                    "operation": "approve_rfq_maker",
+                }
+            )
+        except Exception as e:
+            error_msg = self._sanitize_error(e, "approving RFQ maker")
+            return Result.fail(f"{error_msg} [{context}]")
+
+    # ------------------------------------------------------------------
+    # RFQ execution-target discovery and validation
+    # ------------------------------------------------------------------
+
+    async def _call_with_rpc_policy(self, fn: Callable[[], Awaitable[Any]]) -> Any:
+        """Run an awaitable RPC-backed call under the rate limiter and retry policy."""
+        if self._rpc_rate_limiter:
+            await self._rpc_rate_limiter.acquire()
+
+        if self.config.retry_enabled:
+            from ..utils.retry import async_retry
+
+            retry_func = async_retry(
+                max_attempts=self.config.retry_max_attempts,
+                initial_delay=self.config.retry_initial_delay,
+                max_delay=self.config.retry_max_delay,
+                exponential_base=self.config.retry_exponential_base,
+                retry_on_status=self.config.retry_on_status,
+                retry_on_exceptions=self.config.retry_on_exceptions,
+            )(fn)
+            return await retry_func()
+        return await fn()
+
+    async def _get_rfq_targets(
+        self, w3: Any, deployment_contract: Any, chain_id: int | None = None
+    ) -> tuple[str | None, frozenset[str]]:
+        """Discover the RFQ router and the maker contracts it forwards to.
+
+        The router address comes from the deployments endpoint
+        (``DexalotRouter`` for the chain) when the backend publishes it, and
+        otherwise from ``trustedForwarder()`` on the deployments (legacy
+        MainnetRFQ) contract.  The allowed makers always come from
+        ``getAllowedRFQs()`` on that router — the API does not list them and
+        the router's own allow-list is what it enforces.  Returns
+        ``(router_address, allowed_makers)`` with lowercase maker addresses;
+        the deployments address is always part of the allowed set.
+
+        The result is cached in the static tier (1h) per API base URL and
+        deployment address.  Lookup failures are *not* cached and degrade to
+        ``(None, {deployment address})`` — the legacy behaviour — so a quote
+        from another maker is refused rather than sent to the wrong contract.
+        """
+        deployment_addr = str(deployment_contract.address)
+        cache_key = ("rfq_targets", self.api_base_url, deployment_addr.lower())
+        if self._cache_enabled:
+            cached = _STATIC_CACHE.get(cache_key)
+            if cached is not None:
+                return cast(tuple[str | None, frozenset[str]], cached)
+
+        router: str | None = None
+        allowed: set[str] = {deployment_addr.lower()}
+        try:
+            router_addr = self._router_address_from_deployments(chain_id)
+            if router_addr is None:
+                forwarder_contract = w3.eth.contract(
+                    address=Web3.to_checksum_address(deployment_addr),
+                    abi=_RFQ_TRUSTED_FORWARDER_ABI,
+                )
+                forwarder = await self._call_with_rpc_policy(
+                    lambda: forwarder_contract.functions.trustedForwarder().call()
+                )
+                if forwarder and str(forwarder).lower() != NATIVE_ZERO_ADDRESS:
+                    router_addr = Web3.to_checksum_address(forwarder)
+            if router_addr is not None:
+                router_contract = w3.eth.contract(address=router_addr, abi=_ROUTER_ALLOWED_RFQS_ABI)
+                makers = await self._call_with_rpc_policy(
+                    lambda: router_contract.functions.getAllowedRFQs().call()
+                )
+                allowed.update(str(m).lower() for m in makers)
+                router = router_addr
+        except Exception as exc:
+            self.logger.warning(
+                "Could not resolve RFQ router/allowed makers via %s (%s); "
+                "only the deployments address will be accepted as maker",
+                deployment_addr,
+                exc,
+            )
+            return None, frozenset({deployment_addr.lower()})
+
+        result = (router, frozenset(allowed))
+        if self._cache_enabled:
+            _STATIC_CACHE.set(cache_key, result)
+        return result
+
+    async def _resolve_rfq_execution_target(
+        self, w3: Any, deployment_contract: Any, quote: dict, order_data: dict
+    ) -> Result[str]:
+        """Pick and validate the contract ``simpleSwap`` must be sent to.
+
+        * ``order.maker`` must be on the router's allow-list (or be the
+          deployments address).
+        * If the quote carries ``tx.to`` it must be the router or the maker;
+          it is then used as the target so the call follows the API's own
+          routing.  Otherwise the maker is called directly.
+        """
+        maker_raw = order_data.get("maker")
+        if not maker_raw:
+            return Result.fail("Invalid firm quote: missing 'order.maker' field.")
+        try:
+            maker = Web3.to_checksum_address(maker_raw)
+        except Exception:
+            return Result.fail(f"Invalid firm quote: 'order.maker' is not an address: {maker_raw}")
+
+        router, allowed = await self._get_rfq_targets(
+            w3, deployment_contract, quote.get("chain_id")
+        )
+        if maker.lower() not in allowed:
+            return Result.fail(
+                f"Firm quote maker {maker} is not an allowed RFQ contract "
+                f"(router={router or 'unknown'}); refusing to execute"
+            )
+
+        tx_meta = quote.get("tx")
+        tx_to = tx_meta.get("to") if isinstance(tx_meta, dict) else None
+        if not tx_to:
+            return Result.ok(maker)
+        try:
+            tx_to_cs = Web3.to_checksum_address(tx_to)
+        except Exception:
+            return Result.fail(f"Invalid firm quote: 'tx.to' is not an address: {tx_to}")
+        permitted = {maker.lower()}
+        if router:
+            permitted.add(router.lower())
+        if tx_to_cs.lower() not in permitted:
+            return Result.fail(
+                f"Firm quote tx.to {tx_to_cs} is neither the RFQ router nor the order maker "
+                f"{maker}; refusing to execute"
+            )
+        return Result.ok(tx_to_cs)
+
+    def _check_tx_envelope(
+        self,
+        quote: dict,
+        target_contract: Any,
+        order_tuple: tuple,
+        signature_bytes: bytes,
+        msg_value: int,
+    ) -> str | None:
+        """Cross-check the API's ``tx`` envelope against the call the SDK encodes.
+
+        The SDK always builds the calldata itself; the envelope is only used to
+        detect disagreement.  Returns an error message when ``tx.data`` or
+        ``tx.value`` are present and differ, ``None`` otherwise.
+        """
+        raw_tx = quote.get("tx")
+        tx_meta: dict[str, Any] = raw_tx if isinstance(raw_tx, dict) else {}
+
+        api_data = tx_meta.get("data")
+        if api_data:
+            expected = self._encode_simple_swap(target_contract, order_tuple, signature_bytes)
+            if str(api_data).lower() != expected.lower():
+                return (
+                    "Firm quote tx.data does not match the SDK-encoded simpleSwap call; "
+                    "refusing to execute"
+                )
+
+        api_value = tx_meta.get("value")
+        if api_value not in (None, "") and self._to_int(api_value) != msg_value:
+            return (
+                f"Firm quote tx.value {api_value} does not match the computed msg.value "
+                f"{msg_value}; refusing to execute"
+            )
+        return None
+
+    async def _get_erc20_allowance(self, w3: Any, token: str, owner: str, spender: str) -> int:
+        """Return ``allowance(owner, spender)`` of an ERC20 token in base units."""
+        token_contract = w3.eth.contract(
+            address=Web3.to_checksum_address(token), abi=_ERC20_ALLOWANCE_ABI
+        )
+        raw = await self._call_with_rpc_policy(
+            lambda: token_contract.functions.allowance(owner, spender).call()
+        )
+        return int(raw)
+
+    @staticmethod
+    def _encode_simple_swap(contract: Any, order_tuple: tuple, signature_bytes: bytes) -> str:
+        """ABI-encode ``simpleSwap(order, signature)`` calldata (web3 v7 / v6)."""
+        encoder = getattr(contract, "encode_abi", None) or contract.encodeABI
+        return str(encoder("simpleSwap", args=[order_tuple, signature_bytes]))
+
+    @staticmethod
+    def _signature_to_bytes(signature: Any) -> bytes:
+        """Coerce a hex string (with or without ``0x``) or bytes to bytes."""
+        if isinstance(signature, str):
+            hex_text = signature[2:] if signature.startswith("0x") else signature
+            return bytes.fromhex(hex_text)
+        return cast(bytes, signature)
+
+    @staticmethod
+    def _rfq_error_context(quote: dict, order_data: dict, target: str) -> str:
+        """Compact ``key=value`` trail appended to swap errors for diagnosis."""
+        parts = [f"target={target}", f"maker={order_data.get('maker')}"]
+        quote_id = quote.get("quote_id")
+        if quote_id:
+            parts.append(f"quote_id={quote_id}")
+        nonce_and_meta = order_data.get("nonce_and_meta") or order_data.get("nonceAndMeta")
+        if nonce_and_meta not in (None, ""):
+            parts.append(f"nonce_and_meta={nonce_and_meta}")
+        expiry = order_data.get("expiry")
+        if expiry not in (None, ""):
+            parts.append(f"expiry={expiry}")
+        return ", ".join(parts)
+
+    async def _send_swap_tx(
+        self, w3: Any, fn_call: Any, *, value: int, wait_for_receipt: bool
+    ) -> tuple[str, dict, Any]:
+        """Estimate gas, build, sign and broadcast a contract call.
+
+        Returns ``(tx_hex, tx, receipt)``; ``receipt`` is ``None`` unless
+        ``wait_for_receipt`` is set.
+        """
+        if not self.account:
+            raise ValueError(
+                "Account is required for signing transactions. Set signer or PRIVATE_KEY."
+            )
+        from_addr = cast(str, cast(Any, self.account).address)
+
+        nonce = await self._get_nonce(w3)
+        gas_estimate = await self._estimate_function_gas(
+            fn_call, {"from": from_addr, "value": value}
+        )
+        gas_price = await self._rpc_call(w3, "eth.gas_price")
+
+        tx = await fn_call.build_transaction(
+            {
+                "from": from_addr,
+                "nonce": nonce,
+                "gas": int(gas_estimate * SWAP_GAS_BUFFER),
+                "gasPrice": gas_price,
+                "value": value,
+            }
+        )
+
+        # Use Account instance method - never expose private key
+        signed_tx = self.account.sign_transaction(tx)
+        tx_hash = await self._rpc_call(w3, "eth.send_raw_transaction", signed_tx.raw_transaction)
+        tx_hex = w3.to_hex(tx_hash)
+
+        receipt = None
+        if wait_for_receipt:
+            receipt = await self._rpc_call(w3, "eth.wait_for_transaction_receipt", tx_hash)
+        return tx_hex, tx, receipt
+
+    async def _describe_receipt_failure(
+        self, w3: Any, tx: dict, receipt: Any, tx_hex: str
+    ) -> str | None:
+        """Return a ``Transaction reverted: ...`` message, or ``None`` on success."""
+        receipt_status = (
+            receipt.status
+            if hasattr(receipt, "status")
+            else receipt.get("status", 1)
+            if receipt
+            else 1
+        )
+        if receipt_status == 1:
+            return None
+
+        revert_reason = await self._extract_revert_reason(w3, tx, receipt)
+        block_number = (
+            receipt.get("blockNumber")
+            if isinstance(receipt, dict)
+            else getattr(receipt, "blockNumber", None)
+        )
+        detail_parts = [f"tx={tx_hex}"]
+        if block_number is not None:
+            detail_parts.append(f"block={block_number}")
+        if revert_reason:
+            detail_parts.append(f"reason={revert_reason}")
+        return f"Transaction reverted: {', '.join(detail_parts)}"
 
     async def _extract_revert_reason(self, w3: Any, tx: dict, receipt: Any) -> str | None:
         """Best-effort extraction of the on-chain revert reason for a failed tx.
@@ -606,12 +1068,16 @@ class SwapClient(DexalotBaseClient):
             return None
 
     async def _get_rfq_contract(self, chain_id: int | None = None):
-        """Resolve MainnetRFQ contract and W3 instance for the target chain.
+        """Resolve the deployments MainnetRFQ contract and W3 for the target chain.
 
         RFQ SimpleSwap executes on the connected chain (e.g. Avalanche
         C-Chain for ``chain_id`` 43114), not on Dexalot L1.  The ``chain_id``
         argument selects which connected chain to route to; when ``None``,
         falls back to ``self.chain_id``.
+
+        The returned contract is the legacy MainnetRFQ from the deployments
+        endpoint.  It anchors router/maker discovery (``_get_rfq_targets``)
+        but is not itself the execution target — see ``execute_rfq_swap``.
         """
         if "MainnetRFQ" not in self.deployments:
             return None, None
@@ -622,12 +1088,7 @@ class SwapClient(DexalotBaseClient):
 
         rfq_deployments = self.deployments["MainnetRFQ"]
 
-        # Reverse-resolve target chain_id to its chain name via chain_config.
-        chain_name: str | None = None
-        for name, cfg in (self.chain_config or {}).items():
-            if cfg.get("chain_id") == target_chain_id:
-                chain_name = name
-                break
+        chain_name = self._chain_name_for_id(target_chain_id)
 
         # Pick the deployment for the resolved chain.  Deployments may be
         # keyed by chain name or by chain_id; check both.
@@ -655,6 +1116,33 @@ class SwapClient(DexalotBaseClient):
         contract = w3.eth.contract(address=Web3.to_checksum_address(contract_address), abi=abi)
         return w3, contract
 
+    def _chain_name_for_id(self, chain_id: int | None) -> str | None:
+        """Reverse-resolve a connected-chain id to its ``chain_config`` name."""
+        if chain_id is None:
+            return None
+        for name, cfg in (self.chain_config or {}).items():
+            if cfg.get("chain_id") == chain_id:
+                return name
+        return None
+
+    def _router_address_from_deployments(self, chain_id: int | None) -> str | None:
+        """Return the ``DexalotRouter`` address the deployments endpoint published
+        for *chain_id* (checksummed), or ``None`` when the backend did not list it."""
+        routers = self.deployments.get("DexalotRouter") or {}
+        target_chain_id = chain_id if chain_id is not None else self.chain_id
+        chain_name = self._chain_name_for_id(target_chain_id)
+        entry = routers.get(chain_name) if chain_name is not None else None
+        if entry is None and target_chain_id is not None:
+            entry = routers.get(target_chain_id) or routers.get(str(target_chain_id))
+        address = (entry or {}).get("address")
+        if not address:
+            return None
+        try:
+            return Web3.to_checksum_address(address)
+        except Exception:
+            self.logger.warning("Ignoring malformed DexalotRouter deployment address %r", address)
+            return None
+
     async def _estimate_swap_gas(self, contract, order_tuple, signature_bytes, msg_value: int = 0):
         """Estimate gas for swap transaction with retry/rate limiting.
 
@@ -666,30 +1154,13 @@ class SwapClient(DexalotBaseClient):
             raise ValueError("Account is required for gas estimation.")
         from_addr = cast(str, cast(Any, self.account).address)
 
-        if self._rpc_rate_limiter:
-            await self._rpc_rate_limiter.acquire()
+        fn_call = contract.functions.simpleSwap(order_tuple, signature_bytes)
+        return await self._estimate_function_gas(fn_call, {"from": from_addr, "value": msg_value})
 
-        if self.config.retry_enabled:
-            from ..utils.retry import async_retry
-
-            async def _estimate_gas():
-                return await contract.functions.simpleSwap(
-                    order_tuple, signature_bytes
-                ).estimate_gas({"from": from_addr, "value": msg_value})
-
-            retry_func = async_retry(
-                max_attempts=self.config.retry_max_attempts,
-                initial_delay=self.config.retry_initial_delay,
-                max_delay=self.config.retry_max_delay,
-                exponential_base=self.config.retry_exponential_base,
-                retry_on_status=self.config.retry_on_status,
-                retry_on_exceptions=self.config.retry_on_exceptions,
-            )(_estimate_gas)
-            return await retry_func()
-        else:
-            return await contract.functions.simpleSwap(order_tuple, signature_bytes).estimate_gas(
-                {"from": from_addr, "value": msg_value}
-            )
+    async def _estimate_function_gas(self, fn_call: Any, tx_params: dict) -> int:
+        """``estimate_gas`` for a bound contract call under the RPC rate/retry policy."""
+        estimate = await self._call_with_rpc_policy(lambda: fn_call.estimate_gas(tx_params))
+        return cast(int, estimate)
 
     @staticmethod
     def _compute_msg_value(order_data: dict) -> int:

@@ -1013,6 +1013,27 @@ Enum-style fields are normalized to human-readable strings such as `BUY`, `SELL`
 
 **Swap Operations:**
 - `execute_rfq_swap(quote, wait_for_receipt=True)`
+- `approve_rfq_maker(quote, amount_wei=None, wait_for_receipt=True)`
+
+**RFQ execution target.** Firm quotes are served by several maker contracts
+(the legacy `MainnetRFQ` plus `DexalotRFQ` instances) behind the
+`DexalotRouter`, and each maker verifies its own signer. `execute_rfq_swap`
+therefore sends `simpleSwap` to the quote's `tx.to` (the router) or, when the
+quote carries no `tx`, to `order.maker` directly. It never uses the
+`MainnetRFQ` address from the deployments endpoint as the target. The router
+address comes from the deployments endpoint (`DexalotRouter`), falling back to
+`MainnetRFQ.trustedForwarder()` on-chain; the makers come from the router's
+`getAllowedRFQs()`. Before
+broadcasting it checks that `order.maker` is on that
+allow-list, that `tx.to` is the router or the maker, and that any `tx.data` /
+`tx.value` in the quote match the call the SDK encodes itself. Errors carry a
+`[target=..., maker=..., quote_id=..., nonce_and_meta=..., expiry=...]` suffix.
+
+**ERC20 sells need a per-maker allowance.** The maker contract pulls the taker
+asset with `transferFrom`, so the allowance must be granted to `order.maker`,
+not to the router and not to the legacy address. `execute_rfq_swap` fails fast
+with an actionable message when the allowance is short; call
+`approve_rfq_maker(quote)` first. Native-asset sells (AVAX) need no approval.
 
 ### Example: Batch Order Placement
 

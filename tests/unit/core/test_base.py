@@ -2948,3 +2948,70 @@ class TestDexalotBaseClient:
 
         assert not result.success
         assert "FQ-015" in result.error or "insufficient liquidity" in result.error.lower()
+
+
+class TestDexalotRouterDeployment:
+    """The RFQ router is loaded from the deployments endpoint on a best-effort basis."""
+
+    @pytest.fixture
+    def client(self):
+        with patch.dict(os.environ, {"PRIVATE_KEY": "0x" + "a" * 64}, clear=False):
+            with patch("dexalot_sdk.core.config.load_dotenv"):
+                yield DexalotBaseClient()
+
+    def test_deployments_include_router_slot(self, client):
+        assert client.deployments["DexalotRouter"] == {}
+
+    def test_process_deployment_item_stores_router_for_avax_env(self, client):
+        client.deployments.pop("DexalotRouter", None)  # setdefault path
+        item = {"env": client.ENV_PROD_MULTI_AVAX, "address": "0xRouter", "abi": [{"name": "f"}]}
+        client._process_deployment_item(item, "DexalotRouter")
+        assert client.deployments["DexalotRouter"]["Avalanche"] == {
+            "address": "0xRouter",
+            "abi": [{"name": "f"}],
+        }
+
+    def test_process_deployment_item_ignores_router_on_subnet_env(self, client):
+        item = {"env": client.ENV_PROD_MULTI_SUBNET, "address": "0xRouter", "abi": []}
+        client._process_deployment_item(item, "DexalotRouter")
+        assert client.deployments["DexalotRouter"] == {}
+
+    async def test_fetch_deployments_requests_router(self, client):
+        client._fetch_contract_deployment = AsyncMock()
+        await client._fetch_deployments()
+        requested = [call.args[1] for call in client._fetch_contract_deployment.call_args_list]
+        assert requested == ["TradePairs", "Portfolio", "MainnetRFQ", "DexalotRouter"]
+
+    async def test_optional_router_fetch_failure_does_not_break_initialization(self, client):
+        async def fetch(deploy_url, contract_type):
+            if contract_type == "DexalotRouter":
+                raise RuntimeError("404")
+
+        client._fetch_contract_deployment = AsyncMock(side_effect=fetch)
+        await client._fetch_deployments()  # must not raise
+        assert client.deployments["DexalotRouter"] == {}
+
+    def test_connected_chain_deployments_are_keyed_by_chain_name(self, client):
+        """On Fuji the connected chain is named "Fuji"; RFQ lookups use that name."""
+        client.chain_config = {"Fuji": {"chain_id": 43113}, "BSC Testnet": {"chain_id": 97}}
+        client._process_deployment_item(
+            {"env": client.ENV_FUJI_MULTI_AVAX, "address": "0xRfq", "abi": []}, "MainnetRFQ"
+        )
+        client._process_deployment_item(
+            {"env": client.ENV_FUJI_MULTI_AVAX, "address": "0xRouter", "abi": []}, "DexalotRouter"
+        )
+        assert client.deployments["MainnetRFQ"] == {"Fuji": {"address": "0xRfq", "abi": []}}
+        assert client.deployments["DexalotRouter"] == {"Fuji": {"address": "0xRouter", "abi": []}}
+
+    def test_connected_chain_key_falls_back_to_avalanche(self, client):
+        client.chain_config = {}
+        assert client._connected_chain_key(client.ENV_PROD_MULTI_AVAX) == "Avalanche"
+        client.chain_config = {"Avalanche": {"chain_id": 43114}}
+        assert client._connected_chain_key(client.ENV_PROD_MULTI_AVAX) == "Avalanche"
+        assert client._connected_chain_key(client.ENV_FUJI_MULTI_AVAX) == "Avalanche"
+
+    def test_store_connected_chain_deployment_ignores_other_envs(self, client):
+        client._store_connected_chain_deployment(
+            "MainnetRFQ", client.ENV_PROD_MULTI_SUBNET, "0xRfq", []
+        )
+        assert client.deployments["MainnetRFQ"] == {}
