@@ -1523,7 +1523,9 @@ class DexalotBaseClient:
         when the environments have not been loaded.
         """
         chain_id = (
-            self.CHAIN_ID_AVAX_MAINNET if env == self.ENV_PROD_MULTI_AVAX else self.CHAIN_ID_AVAX_FUJI
+            self.CHAIN_ID_AVAX_MAINNET
+            if env == self.ENV_PROD_MULTI_AVAX
+            else self.CHAIN_ID_AVAX_FUJI
         )
         for name, cfg in (self.chain_config or {}).items():
             if cfg.get("chain_id") == chain_id:
