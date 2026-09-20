@@ -58,4 +58,4 @@ pip install dexalot-sdk
 
 ## Version
 
-Current release: **0.4.0** — Python ≥ 3.12
+Current release: **0.6.2** — Python ≥ 3.12
