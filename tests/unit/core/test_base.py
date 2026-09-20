@@ -2298,6 +2298,36 @@ class TestDexalotBaseClient:
             assert "E001" in call_args[0] or "Some Error Description" in call_args[0]
             assert result == "Sanitized error"
 
+    async def test_sanitize_error_default_level_logs_error_with_traceback(self, client):
+        """Without an explicit level the sanitizer logs at ERROR and attaches exc_info."""
+        import logging
+
+        client.logger = MagicMock()
+        error = ValueError("plain failure")
+
+        client._sanitize_error(error, "doing thing")
+
+        client.logger.log.assert_called_once()
+        level = client.logger.log.call_args[0][0]
+        assert level == logging.ERROR
+        assert client.logger.log.call_args.kwargs["exc_info"] is error
+        assert client.logger.log.call_args.kwargs["extra"]["error_type"] == "ValueError"
+
+    async def test_sanitize_error_warning_level_omits_traceback(self, client):
+        """Callers that tolerate the failure can log at WARNING without a stack trace."""
+        import logging
+
+        client.logger = MagicMock()
+
+        sanitized = client._sanitize_error(
+            ValueError("tolerated"), "fetching balance", level=logging.WARNING
+        )
+
+        assert sanitized
+        level = client.logger.log.call_args[0][0]
+        assert level == logging.WARNING
+        assert client.logger.log.call_args.kwargs["exc_info"] is None
+
     @patch("dexalot_sdk.core.base.aiohttp.TCPConnector")
     @patch("dexalot_sdk.core.base.aiohttp.ClientSession")
     async def test_make_http_request_python_lt_314(self, mock_session, mock_connector, client):

@@ -119,23 +119,69 @@ class TestStaticDataCaching:
             assert elapsed < 0.01  # Should be near-instant (cached)
 
     async def test_get_deployment_uses_cache(self, mock_env_setup):
-        """Verify get_deployment() uses cache."""
+        """Verify a successful get_deployment() is served from cache on the second call."""
+        with patch("dexalot_sdk.core.base.aiohttp.ClientSession"):
+            mock_resp = AsyncMock()
+            mock_resp.status = 200
+            mock_resp.json = AsyncMock(
+                return_value=[
+                    {"contract_name": "TradePairs", "address": "0x123", "abi": {"abi": []}}
+                ]
+            )
+            mock_resp.text = AsyncMock(return_value="")
+            mock_resp.raise_for_status = MagicMock()
+            mock_cm = AsyncMock()
+            mock_cm.__aenter__.return_value = mock_resp
+            mock_cm.__aexit__.return_value = None
+
+            with patch.dict(os.environ, {"PRIVATE_KEY": "0x" + "a" * 64}, clear=False):
+                with patch("dexalot_sdk.core.config.load_dotenv"):
+                    client = DexalotClient()
+            client._mock_session = MagicMock()
+            client._session = client._mock_session
+            client._mock_session.get.return_value = mock_cm
+
+            result1 = await client.get_deployment()
+            assert result1.success
+            call_count_1 = client._mock_session.get.call_count
+
+            result2 = await client.get_deployment()
+            assert result2.success
+            call_count_2 = client._mock_session.get.call_count
+
+            assert result1.data == result2.data
+            assert call_count_2 == call_count_1
+
+    async def test_get_deployment_failure_is_not_cached(self, mock_env_setup):
+        """A failed get_deployment() must not be pinned in the 1-hour static tier."""
+        from dexalot_sdk.core.base import _STATIC_CACHE
+
+        _STATIC_CACHE.clear()
         with patch("dexalot_sdk.core.base.aiohttp.ClientSession"):
             with patch.dict(os.environ, {"PRIVATE_KEY": "0x" + "a" * 64}, clear=False):
                 with patch("dexalot_sdk.core.config.load_dotenv"):
                     client = DexalotClient()
-            client.deployments = {"TradePairs": {"address": "0x123"}}
 
-            # First call
-            result1 = await client.get_deployment()
+            attempts = {"n": 0}
 
-            # Second call - should be cached
-            start = time.time()
-            result2 = await client.get_deployment()
-            elapsed = time.time() - start
+            async def flaky(*_args, **_kwargs):
+                attempts["n"] += 1
+                if attempts["n"] == 1:
+                    raise RuntimeError("HTTP 500")
+                return [{"contract_name": "TradePairs", "address": "0x123"}]
 
-            assert result1 == result2
-            assert elapsed < 0.01  # Should be near-instant (cached)
+            client._api_call = flaky
+
+            first = await client.get_deployment()
+            assert not first.success
+
+            second = await client.get_deployment()
+            assert second.success
+            assert attempts["n"] == 2
+
+            third = await client.get_deployment()
+            assert third.success
+            assert attempts["n"] == 2
 
 
 class TestSemiStaticDataCaching:

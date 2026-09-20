@@ -767,7 +767,9 @@ class DexalotBaseClient:
                 return f"{code}: {description}"
         return error_str
 
-    def _sanitize_error(self, error: Exception, context: str = "") -> str:
+    def _sanitize_error(
+        self, error: Exception, context: str = "", *, level: int = logging.ERROR
+    ) -> str:
         """Sanitize an error to prevent leaking sensitive information.
 
         This method:
@@ -778,6 +780,11 @@ class DexalotBaseClient:
         Args:
             error: The exception to sanitize
             context: Optional context string describing the operation
+            level: Logging level for the internal log record.  Defaults to
+                ``logging.ERROR`` with the full traceback attached.  Callers
+                that tolerate the failure (e.g. per-token balance lookups that
+                degrade gracefully) pass ``logging.WARNING``; below ERROR the
+                traceback is omitted so transient RPC blips do not spam logs.
 
         Returns:
             A sanitized, user-safe error message
@@ -794,10 +801,11 @@ class DexalotBaseClient:
             # Full sanitization for non-contract errors
             sanitized = sanitize_error_message(error, context)
 
-        # Log full error details internally (with stack trace)
-        self.logger.error(
+        # Log full error details internally (stack trace only at ERROR and above)
+        self.logger.log(
+            level,
             f"Error in {context or 'operation'}",
-            exc_info=error,
+            exc_info=error if level >= logging.ERROR else None,
             extra={"error_type": type(error).__name__, "sanitized_message": sanitized},
         )
 

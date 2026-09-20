@@ -263,7 +263,53 @@ except Exception as e:
 **Resolution:** Replaced `f"Error: {e}"` / `f"Error: {str(e)}"` in `_get_l1_native_balance` and
 `_get_native_balance` with `self._sanitize_error(e, "<context>")`. Two unit tests added in
 `tests/unit/core/test_transfer.py` (`test_get_l1_native_balance_sanitizes_error`,
-`test_get_native_balance_sanitizes_error`).
+`test_get_native_balance_sanitizes_error`). Superseded in v0.6.2 by H-6, which removed the
+`"Error: ..."` string from `balance` altogether.
+
+---
+
+### H-6: Balance lookup failures returned as success with a string sentinel
+
+**Status:** ✅ Resolved — v0.6.2
+
+**Finding:**
+`_get_native_balance`, `_get_erc20_balance` and `_get_l1_native_balance` swallowed RPC
+exceptions and wrote `"Error: ..."` (or `"Not connected"`) into the entry's `balance` field.
+`_get_chain_wallet_balance_cached` then returned `Result.ok(entry)`, so callers saw
+`success=True` with a non-numeric balance; the ERC20 `"error" in balance` guard only caught
+pre-RPC token-lookup failures. `async_ttl_cached` stored the poisoned `Result` for the 10 s
+balance TTL (and any failed `Result` for up to 1 h in the static tier). Observed in
+TradeBots on 2026-09-19: an Avalanche RPC HTTP 500 on `eth_getBalance` produced
+`decimal.ConversionSyntax` in the sufficient-balance gate, plus a full ERROR traceback per
+transient blip.
+
+**Affected files:**
+- [src/dexalot_sdk/core/transfer.py](../src/dexalot_sdk/core/transfer.py) — `_get_l1_native_balance`, `_get_native_balance`, `_get_erc20_balance`, `_fetch_erc20_balances_list`, `_get_chain_wallet_balance_cached`, `_get_chain_wallet_balances_cached`, `_get_all_chain_wallet_balances_cached`
+- [src/dexalot_sdk/utils/cache.py](../src/dexalot_sdk/utils/cache.py) — `ttl_cached`, `async_ttl_cached`
+- [src/dexalot_sdk/core/base.py](../src/dexalot_sdk/core/base.py) — `_sanitize_error`
+
+**Implementation plan:**
+- Failed entries carry `balance=None` and an `error` key; no string sentinel in `balance`.
+- Single-token path returns `Result.fail(entry["error"])` for any error entry.
+- Plural paths drop failed entries from `chain_balances`, report them in an additive
+  `errors: list[str]`, and return `Result.fail` only when every lookup failed.
+- Cache decorators skip storing a `Result` whose `success` is `False`, in all tiers.
+- `_sanitize_error(level=...)`: balance helpers log at WARNING without traceback.
+
+**Acceptance criteria:**
+- `get_chain_wallet_balance` on an RPC exception returns `success=False`; the next call
+  (RPC healthy) succeeds without clearing the cache.
+- Plural results contain only numeric `balance` values; failures appear in `errors`.
+- `get_chain_token_balances` returns `Result.fail` if any requested token cannot be read.
+- No `"Error:"` / `"Not connected"` string appears in any `balance` field.
+
+**Resolution:** Implemented as planned (PR: mng/balance-result-semantics, v0.6.2). New helpers
+`_balance_error_entry`, `_balance_entry_result`, `_collect_balance_entries`, `_balances_result`
+in `transfer.py`; `_is_cacheable` in `utils/cache.py`. Tests added across
+`tests/unit/core/test_transfer.py`, `tests/unit/utils/test_cache.py`,
+`tests/unit/core/test_base.py`, `tests/unit/test_caching.py`
+(`test_get_deployment_failure_is_not_cached`). Same contract shipped in the TypeScript SDK
+v0.6.2.
 
 ---
 

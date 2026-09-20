@@ -95,6 +95,23 @@ result = await client.deposit(token="USDC", amount=99999.0, source_chain="Avalan
 # result.error == "insufficient balance"   (decoded revert reason)
 ```
 
+### 4. Wallet balance lookups
+
+A chain-wallet balance that cannot be read (RPC error, chain not connected, unknown token) is never reported as a success with an error string in the `balance` field. The single-token method fails the `Result`; the plural methods keep the entries that succeeded and list the failures separately.
+
+```python
+result = await client.get_chain_wallet_balance("Avalanche", "AVAX")
+# result.success == False
+# result.error == "Error fetching native balance: HTTP 500 ..."   (sanitized)
+
+result = await client.get_all_chain_wallet_balances()
+# result.success == True   (at least one lookup succeeded)
+# result.data["chain_balances"] -> only entries with a numeric "balance"
+# result.data["errors"]         -> ["Avalanche AVAX: Error fetching native balance: ..."]
+```
+
+Failed `Result`s are not cached, so the next call retries immediately. These tolerated failures are logged at `WARNING` without a traceback.
+
 ---
 
 ## Revert reasons

@@ -1,4 +1,5 @@
 import asyncio
+import logging
 import os
 from decimal import Decimal
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -321,7 +322,8 @@ class TestTransferClient:
             }
         }
         info = await client.get_chain_wallet_balance("Avalanche", "ERR")
-        assert not info.success or "Error" in str(info.data.get("balance", ""))
+        assert not info.success
+        assert "fetching ERC20 balance" in info.error
 
     async def test_get_chain_wallet_balance_no_chain_id(self, client):
         # Chain ID not configured
@@ -568,23 +570,38 @@ class TestTransferClient:
         )
         assert avax_entry["balance"] == "5.0"
 
-        # Test error handling - L1 balance error
+        assert info.data["errors"] == []
+
+        # Partial failure: L1 lookup fails but Avalanche still succeeds.
         from dexalot_sdk.core.base import _BALANCE_CACHE
 
         _BALANCE_CACHE.clear()
         client.w3_l1.eth.get_balance.side_effect = Exception("L1 Error")
         info = await client.get_all_chain_wallet_balances()
         assert info.success
-        l1_entry = next(b for b in info.data["chain_balances"] if b["chain"] == "Dexalot L1")
-        # The error should be in the balance field
-        assert "Error" in str(l1_entry["balance"])
+        assert not any(b["chain"] == "Dexalot L1" for b in info.data["chain_balances"])
+        assert all(b["balance"] is not None for b in info.data["chain_balances"])
+        assert len(info.data["errors"]) == 1
+        assert info.data["errors"][0].startswith("Dexalot L1 ALOT: ")
 
     async def test_get_all_chain_wallet_balances_not_connected(self, client):
+        """A missing L1 provider is reported in ``errors`` and never as a balance string."""
         client.w3_l1 = None
         info = await client.get_all_chain_wallet_balances()
         assert info.success
-        l1_entry = next(b for b in info.data["chain_balances"] if b["chain"] == "Dexalot L1")
-        assert l1_entry["balance"] == "Not connected"
+        assert not any(b["chain"] == "Dexalot L1" for b in info.data["chain_balances"])
+        assert info.data["errors"] == ["Dexalot L1 ALOT: Dexalot L1 not connected"]
+
+    async def test_get_all_chain_wallet_balances_all_failed_returns_fail(self, client):
+        """When every lookup fails the plural call returns Result.fail, not an empty success."""
+        client.w3_l1 = None
+        avax = client.connected_chain_providers["Avalanche"]
+        avax.eth.get_balance = AsyncMock(side_effect=Exception("RPC 500"))
+        avax.eth.contract.side_effect = Exception("no contract")
+        info = await client.get_all_chain_wallet_balances()
+        assert not info.success
+        assert "Dexalot L1 ALOT: Dexalot L1 not connected" in info.error
+        assert "Avalanche AVAX: " in info.error
 
     async def test_get_portfolio_balance(self, client):
         client.portfolio_sub_contract.functions.getBalance.return_value.call = AsyncMock(
@@ -1290,8 +1307,8 @@ class TestTransferClient:
         client.w3_l1.eth.get_balance.side_effect = Exception("Err")
         info = await client.get_all_chain_wallet_balances()
         assert info.success
-        l1_entry = next(b for b in info.data["chain_balances"] if b["chain"] == "Dexalot L1")
-        assert "Error" in l1_entry["balance"]
+        assert not any(b["chain"] == "Dexalot L1" for b in info.data["chain_balances"])
+        assert any(e.startswith("Dexalot L1 ALOT: ") for e in info.data["errors"])
 
         from dexalot_sdk.core.base import _BALANCE_CACHE
 
@@ -1306,8 +1323,12 @@ class TestTransferClient:
 
         info = await client.get_all_chain_wallet_balances()
         assert info.success
-        avax_entry = next(b for b in info.data["chain_balances"] if b["chain"] == "Avalanche")
-        assert "Error" in str(avax_entry["balance"])
+        # Avalanche native failed: no Native entry, ERC20 entries still numeric, one error.
+        assert not any(
+            b["chain"] == "Avalanche" and b["type"] == "Native" for b in info.data["chain_balances"]
+        )
+        assert all(b["balance"] is not None for b in info.data["chain_balances"])
+        assert any(e.startswith("Avalanche AVAX: ") for e in info.data["errors"])
 
         client.portfolio_sub_contract = MagicMock()
         client.portfolio_sub_contract.functions.getBalance.side_effect = Exception("Err")
@@ -1661,7 +1682,12 @@ class TestTransferClient:
             43114, "Avalanche", mock_provider, VALID_ADDRESS
         )
         assert isinstance(result, list)
-        assert len(result) == 0
+        # Failed tokens are reported as error entries so plural callers can surface them.
+        assert len(result) == 2
+        assert {e["symbol"] for e in result} == {"TOKEN1", "TOKEN2"}
+        assert all(e["balance"] is None for e in result)
+        assert all(e["error"] for e in result)
+        assert all(e["type"] == "ERC20" for e in result)
         assert mock_provider.eth.contract.called
 
     async def test_fetch_erc20_balances_list_concurrency_limit(self, client):
@@ -2210,10 +2236,11 @@ class TestTransferClient:
 
         entry = await client._get_l1_native_balance(VALID_ADDRESS)
 
-        assert secret_url not in entry["balance"], (
-            "Raw exception with secret URL must not appear in balance output"
+        assert entry["balance"] is None
+        assert secret_url not in entry["error"], (
+            "Raw exception with secret URL must not appear in error output"
         )
-        assert entry["balance"].startswith("Error:")
+        assert entry["error"]
 
     async def test_get_native_balance_sanitizes_error(self, client):
         """H-5: _get_native_balance must not leak raw exception text (e.g. URLs) to callers."""
@@ -2223,10 +2250,169 @@ class TestTransferClient:
 
         entry = await client._get_native_balance("Avalanche", w3, VALID_ADDRESS, "AVAX")
 
-        assert secret_url not in entry["balance"], (
-            "Raw exception with secret URL must not appear in balance output"
+        assert entry["balance"] is None
+        assert secret_url not in entry["error"], (
+            "Raw exception with secret URL must not appear in error output"
         )
-        assert entry["balance"].startswith("Error:")
+        assert entry["error"]
+
+    async def test_get_erc20_balance_rpc_failure_returns_error_entry(self, client):
+        """A failing balanceOf yields balance=None plus a sanitized error, keeping the address."""
+        w3 = self.create_w3()
+        mock_contract = MagicMock()
+        mock_contract.functions.balanceOf.return_value.call = AsyncMock(
+            side_effect=Exception("failed: https://rpc.example.com/secret-key")
+        )
+        w3.eth.contract.side_effect = None
+        w3.eth.contract.return_value = mock_contract
+
+        entry = await client._get_erc20_balance("Avalanche", 43114, w3, VALID_ADDRESS, "USDC")
+
+        assert entry["balance"] is None
+        assert entry["address"] == "0xUSDC"
+        assert entry["type"] == "ERC20"
+        assert "secret-key" not in entry["error"]
+        assert entry["error"]
+
+    async def test_balance_error_entry_logs_warning_without_traceback(self, client):
+        """Tolerated balance failures log at WARNING and omit exc_info."""
+        client.logger = MagicMock()
+        entry = client._balance_error_entry(
+            "Avalanche", "AVAX", "Native", Exception("boom"), "fetching native balance"
+        )
+        assert entry["balance"] is None
+        assert entry["error"]
+        client.logger.log.assert_called_once()
+        level = client.logger.log.call_args[0][0]
+        assert level == logging.WARNING
+        assert client.logger.log.call_args.kwargs["exc_info"] is None
+
+    async def test_balance_error_entry_with_plain_message_does_not_log(self, client):
+        """A non-exception reason (e.g. not connected) is used verbatim and is not logged."""
+        client.logger = MagicMock()
+        entry = client._balance_error_entry("Dexalot L1", "ALOT", "Native", "not connected", "")
+        assert entry == {
+            "chain": "Dexalot L1",
+            "symbol": "ALOT",
+            "balance": None,
+            "type": "Native",
+            "error": "not connected",
+        }
+        client.logger.log.assert_not_called()
+
+    def test_collect_balance_entries_error_without_chain_label(self, client):
+        """An error entry lacking chain/symbol is reported verbatim."""
+        info = {"chain_balances": [], "errors": []}
+        client._collect_balance_entries(
+            info, [{"error": "Token X not found"}, [{"chain": "A", "symbol": "B", "balance": "1"}]]
+        )
+        assert info["errors"] == ["Token X not found"]
+        assert info["chain_balances"] == [{"chain": "A", "symbol": "B", "balance": "1"}]
+
+    def test_balances_result_empty_without_errors_is_ok(self, client):
+        """No entries and no errors (nothing to look up) is still a success."""
+        info = {"chain_balances": [], "errors": []}
+        res = client._balances_result(info)
+        assert res.success
+        assert res.data is info
+
+    async def test_get_chain_wallet_balance_native_rpc_failure_fails(self, client):
+        """An RPC failure on the native lookup is a failed Result, never success with a string."""
+        avax = client.connected_chain_providers["Avalanche"]
+        avax.eth.get_balance = AsyncMock(side_effect=Exception("500 Internal Server Error"))
+
+        info = await client.get_chain_wallet_balance("Avalanche", "AVAX")
+
+        assert not info.success
+        assert info.data is None
+        assert "fetching native balance" in info.error
+
+    async def test_get_chain_wallet_balance_l1_rpc_failure_fails(self, client):
+        client.w3_l1.eth.get_balance = AsyncMock(side_effect=Exception("L1 down"))
+
+        info = await client.get_chain_wallet_balance("Dexalot L1", "ALOT")
+
+        assert not info.success
+        assert "fetching L1 native balance" in info.error
+
+    async def test_get_chain_wallet_balance_l1_not_connected_fails(self, client):
+        client.w3_l1 = None
+
+        info = await client.get_chain_wallet_balance("Dexalot L1", "ALOT")
+
+        assert not info.success
+        assert info.error == "Dexalot L1 not connected"
+
+    async def test_get_chain_wallet_balance_erc20_rpc_failure_fails(self, client):
+        avax = client.connected_chain_providers["Avalanche"]
+        mock_contract = MagicMock()
+        mock_contract.functions.balanceOf.return_value.call = AsyncMock(
+            side_effect=Exception("balanceOf reverted")
+        )
+        avax.eth.contract.side_effect = None
+        avax.eth.contract.return_value = mock_contract
+
+        info = await client.get_chain_wallet_balance("Avalanche", "USDC")
+
+        assert not info.success
+        assert "fetching ERC20 balance" in info.error
+
+    async def test_get_chain_wallet_balance_failure_is_not_cached(self, client):
+        """A failed lookup is not pinned in the balance cache; the next call retries."""
+        avax = client.connected_chain_providers["Avalanche"]
+        avax.eth.get_balance = AsyncMock(side_effect=Exception("500 Internal Server Error"))
+
+        first = await client.get_chain_wallet_balance("Avalanche", "AVAX")
+        assert not first.success
+
+        avax.eth.get_balance = AsyncMock(return_value=3 * 10**18)
+        second = await client.get_chain_wallet_balance("Avalanche", "AVAX")
+
+        assert second.success
+        assert second.data["balance"] == "3.0"
+
+    async def test_get_chain_wallet_balances_partial_failure_reports_errors(self, client):
+        """Native failure with successful ERC20s: ok Result, numeric balances, one error."""
+        avax = client.connected_chain_providers["Avalanche"]
+        avax.eth.get_balance = AsyncMock(side_effect=Exception("500 Internal Server Error"))
+
+        info = await client.get_chain_wallet_balances("Avalanche")
+
+        assert info.success
+        assert info.data["chain_balances"]
+        assert all(b["balance"] is not None for b in info.data["chain_balances"])
+        assert all(b["type"] == "ERC20" for b in info.data["chain_balances"])
+        assert len(info.data["errors"]) == 1
+        assert info.data["errors"][0].startswith("Avalanche AVAX: ")
+
+    async def test_get_chain_wallet_balances_all_failed_returns_fail(self, client):
+        avax = client.connected_chain_providers["Avalanche"]
+        avax.eth.get_balance = AsyncMock(side_effect=Exception("500 Internal Server Error"))
+        avax.eth.contract.side_effect = Exception("no contract")
+
+        info = await client.get_chain_wallet_balances("Avalanche")
+
+        assert not info.success
+        assert info.error.startswith("Avalanche AVAX: ")
+
+    async def test_get_chain_wallet_balances_l1_failure_returns_fail(self, client):
+        client.w3_l1.eth.get_balance = AsyncMock(side_effect=Exception("L1 down"))
+
+        info = await client.get_chain_wallet_balances("Dexalot L1")
+
+        assert not info.success
+        assert info.error.startswith("Dexalot L1 ALOT: ")
+
+    async def test_get_chain_token_balances_rpc_failure_fails(self, client):
+        """The flat symbol map never carries an error string; the Result fails instead."""
+        avax = client.connected_chain_providers["Avalanche"]
+        avax.eth.get_balance = AsyncMock(side_effect=Exception("500 Internal Server Error"))
+
+        result = await client.get_chain_token_balances("Avalanche", VALID_ADDRESS, ["AVAX"])
+
+        assert not result.success
+        assert result.error.startswith("AVAX: ")
+        assert "fetching native balance" in result.error
 
     async def test_get_all_portfolio_balances_rpc_exception(self, client):
         """When asyncio.gather returns a BaseException in its results, the method re-raises it immediately."""

@@ -6,6 +6,101 @@ import weakref
 import pytest
 
 from dexalot_sdk.utils.cache import MemoryCache, async_ttl_cached, ttl_cached
+from dexalot_sdk.utils.result import Result
+
+
+def test_ttl_cached_does_not_store_failed_result():
+    """A failed Result is returned but not stored; the next call re-invokes."""
+    cache = MemoryCache(ttl_seconds=60)
+    calls = 0
+
+    @ttl_cached(cache)
+    def lookup(x):
+        nonlocal calls
+        calls += 1
+        return Result.fail("boom") if calls == 1 else Result.ok(x)
+
+    first = lookup(1)
+    assert not first.success
+    second = lookup(1)
+    assert second.success
+    assert second.data == 1
+    assert calls == 2
+    # The successful Result is now cached.
+    assert lookup(1) is second
+    assert calls == 2
+
+
+@pytest.mark.asyncio
+async def test_async_ttl_cached_does_not_store_failed_result():
+    """A failed Result is handed back but never pinned for the TTL."""
+    cache = MemoryCache(ttl_seconds=60)
+    calls = 0
+
+    @async_ttl_cached(cache)
+    async def lookup(x):
+        nonlocal calls
+        calls += 1
+        return Result.fail("rpc 500") if calls == 1 else Result.ok(x * 2)
+
+    first = await lookup(4)
+    assert not first.success
+    assert first.error == "rpc 500"
+
+    second = await lookup(4)
+    assert second.success
+    assert second.data == 8
+    assert calls == 2
+
+    # Successful Result is cached from here on.
+    assert await lookup(4) is second
+    assert calls == 2
+
+
+@pytest.mark.asyncio
+async def test_async_ttl_cached_stores_successful_result_and_plain_values():
+    cache = MemoryCache(ttl_seconds=60)
+    calls = 0
+
+    @async_ttl_cached(cache)
+    async def ok_lookup(x):
+        nonlocal calls
+        calls += 1
+        return Result.ok(x)
+
+    @async_ttl_cached(cache)
+    async def plain_lookup(x):
+        nonlocal calls
+        calls += 1
+        return x
+
+    assert (await ok_lookup(1)).success
+    assert (await ok_lookup(1)).success
+    assert await plain_lookup(2) == 2
+    assert await plain_lookup(2) == 2
+    assert calls == 2
+
+
+@pytest.mark.asyncio
+async def test_async_ttl_cached_stampede_waiters_receive_failed_result():
+    """Coalesced waiters all get the same failed Result, and nothing is cached."""
+    cache = MemoryCache(ttl_seconds=60)
+    calls = 0
+
+    @async_ttl_cached(cache)
+    async def failing(x):
+        nonlocal calls
+        calls += 1
+        await asyncio.sleep(0.01)
+        return Result.fail("transient")
+
+    results = await asyncio.gather(*[failing(9) for _ in range(4)])
+
+    assert calls == 1
+    assert all(not r.success and r.error == "transient" for r in results)
+    # Next caller after the in-flight fetch retries instead of hitting a cached failure.
+    await failing(9)
+    assert calls == 2
 
 
 def test_memory_cache_set_get():

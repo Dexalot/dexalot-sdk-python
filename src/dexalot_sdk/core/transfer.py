@@ -1,4 +1,5 @@
 import asyncio
+import logging
 import math
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -302,7 +303,7 @@ class TransferClient(DexalotBaseClient):
                     f"Token {token} not available on Dexalot L1. Only ALOT (native) exists."
                 )
             balance = await self._get_l1_native_balance(query_address)
-            return Result.ok(balance)
+            return self._balance_entry_result(balance)
 
         # Check connected chain
         w3_provider = await self._get_provider_for_chain(chain)
@@ -319,16 +320,62 @@ class TransferClient(DexalotBaseClient):
             balance = await self._get_native_balance(
                 chain, w3_provider, query_address, native_symbol
             )
-            return Result.ok(balance)
+            return self._balance_entry_result(balance)
 
         # ERC20 token check
         if not chain_id:
             return Result.fail(f"Chain ID not configured for {chain}")
 
         balance = await self._get_erc20_balance(chain, chain_id, w3_provider, query_address, token)
-        if isinstance(balance, dict) and "error" in balance:
-            return Result.fail(balance["error"])
-        return Result.ok(balance)
+        return self._balance_entry_result(balance)
+
+    @staticmethod
+    def _balance_entry_result(entry: dict) -> Result[dict]:
+        """Turn a single balance entry into a ``Result``.
+
+        An entry carrying an ``error`` key (RPC failure, chain not connected,
+        unknown token) becomes ``Result.fail`` so callers never see
+        ``success=True`` with a non-numeric ``balance``.
+        """
+        if entry.get("error"):
+            return Result.fail(str(entry["error"]))
+        return Result.ok(entry)
+
+    @staticmethod
+    def _collect_balance_entries(info: dict[str, Any], entries: list[Any]) -> None:
+        """Split balance entries into ``info["chain_balances"]`` and ``info["errors"]``.
+
+        ``entries`` may contain single entry dicts or lists of entry dicts (as
+        returned by ``_fetch_erc20_balances_list``).  Entries with an ``error``
+        key are reported as ``"<chain> <symbol>: <error>"`` strings and are
+        never appended to ``chain_balances``, so every ``balance`` in the
+        result is numeric.
+        """
+        flat: list[dict] = []
+        for res in entries:
+            if isinstance(res, list):
+                flat.extend(res)
+            else:
+                flat.append(res)
+        for entry in flat:
+            if entry.get("error"):
+                label = " ".join(str(v) for v in (entry.get("chain"), entry.get("symbol")) if v)
+                info["errors"].append(
+                    f"{label}: {entry['error']}" if label else str(entry["error"])
+                )
+            else:
+                info["chain_balances"].append(entry)
+
+    @staticmethod
+    def _balances_result(info: dict[str, Any]) -> Result[dict]:
+        """``Result.fail`` only when every lookup failed; otherwise ``Result.ok``.
+
+        Partial failures are surfaced through ``info["errors"]`` while the
+        successful entries remain available in ``info["chain_balances"]``.
+        """
+        if not info["chain_balances"] and info["errors"]:
+            return Result.fail("; ".join(info["errors"]))
+        return Result.ok(info)
 
     @track_method("transfer")
     async def get_chain_wallet_balances(
@@ -381,14 +428,14 @@ class TransferClient(DexalotBaseClient):
             "address": query_address,
             "chain": chain,
             "chain_balances": [],
+            "errors": [],
         }
 
         # Check Dexalot L1
         if chain == "Dexalot L1":
             l1_entry = await self._get_l1_native_balance(query_address)
-            if "error" not in l1_entry:
-                info["chain_balances"].append(l1_entry)
-            return Result.ok(info)
+            self._collect_balance_entries(info, [l1_entry])
+            return self._balances_result(info)
 
         # Check connected chain
         w3_provider = await self._get_provider_for_chain(chain)
@@ -407,13 +454,8 @@ class TransferClient(DexalotBaseClient):
             )
 
         results = await asyncio.gather(*tasks)
-        for res in results:
-            if isinstance(res, list):
-                info["chain_balances"].extend(res)
-            elif isinstance(res, dict) and "error" not in res:
-                info["chain_balances"].append(res)
-
-        return Result.ok(info)
+        self._collect_balance_entries(info, list(results))
+        return self._balances_result(info)
 
     @track_method("transfer")
     async def get_chain_token_balances(
@@ -566,6 +608,7 @@ class TransferClient(DexalotBaseClient):
         info: dict[str, Any] = {
             "address": query_address,
             "chain_balances": [],
+            "errors": [],
         }
 
         tasks = [self._get_l1_native_balance(query_address)]
@@ -590,50 +633,75 @@ class TransferClient(DexalotBaseClient):
                 )
 
         results = await asyncio.gather(*tasks)
+        self._collect_balance_entries(info, list(results))
+        return self._balances_result(info)
 
-        for res in results:
-            if isinstance(res, list):
-                info["chain_balances"].extend(res)
-            elif isinstance(res, dict) and "error" not in res:
-                info["chain_balances"].append(res)
+    def _balance_error_entry(
+        self,
+        chain: str,
+        symbol: str,
+        kind: str,
+        failure: Exception | str,
+        context: str,
+        **extra: Any,
+    ) -> dict[str, Any]:
+        """Build a balance entry describing a failed lookup.
 
-        return Result.ok(info)
+        ``balance`` is always ``None`` on failure; the reason lives in
+        ``error``.  Exceptions are sanitized and logged at WARNING without a
+        traceback (a per-token RPC blip is tolerated, not fatal).  A plain
+        string is used verbatim for non-exception conditions such as
+        "not connected".
+        """
+        if isinstance(failure, Exception):
+            message = self._sanitize_error(failure, context, level=logging.WARNING)
+        else:
+            message = failure
+        return {
+            "chain": chain,
+            "symbol": symbol,
+            "balance": None,
+            **extra,
+            "type": kind,
+            "error": message,
+        }
 
-    async def _get_l1_native_balance(self, address: str):
+    async def _get_l1_native_balance(self, address: str) -> dict[str, Any]:
         """Get ALOT balance on Dexalot L1."""
-        entry = {
+        if not self.w3_l1:
+            return self._balance_error_entry(
+                "Dexalot L1", "ALOT", "Native", "Dexalot L1 not connected", ""
+            )
+        try:
+            l1_balance = await self.w3_l1.eth.get_balance(cast(Any, address))
+        except Exception as e:
+            return self._balance_error_entry(
+                "Dexalot L1", "ALOT", "Native", e, "fetching L1 native balance"
+            )
+        return {
             "chain": "Dexalot L1",
             "symbol": "ALOT",
-            "balance": "0",
+            "balance": str(self.w3_l1.from_wei(l1_balance, "ether")),
             "type": "Native",
         }
-        if self.w3_l1:
-            try:
-                l1_balance = await self.w3_l1.eth.get_balance(cast(Any, address))
-                entry["balance"] = str(self.w3_l1.from_wei(l1_balance, "ether"))
-            except Exception as e:
-                entry["balance"] = f"Error: {self._sanitize_error(e, 'fetching L1 native balance')}"
-        else:
-            entry["balance"] = "Not connected"
-        return entry
 
     async def _get_native_balance(
         self, chain_name: str, w3_provider, address: str, native_symbol: str
-    ):
+    ) -> dict[str, Any]:
         """Get native token balance on a connected chain."""
-        entry = {
-            "chain": chain_name,
-            "symbol": native_symbol,
-            "balance": "Error",
-            "type": "Native",
-        }
         try:
             balance_wei = await w3_provider.eth.get_balance(address)
             balance_eth = w3_provider.from_wei(balance_wei, "ether")
-            entry["balance"] = str(balance_eth)
         except Exception as e:
-            entry["balance"] = f"Error: {self._sanitize_error(e, 'fetching native balance')}"
-        return entry
+            return self._balance_error_entry(
+                chain_name, native_symbol, "Native", e, "fetching native balance"
+            )
+        return {
+            "chain": chain_name,
+            "symbol": native_symbol,
+            "balance": str(balance_eth),
+            "type": "Native",
+        }
 
     async def _get_erc20_balance(
         self, chain_name: str, chain_id: int, w3_provider, address: str, token: str
@@ -669,24 +737,23 @@ class TransferClient(DexalotBaseClient):
         if token_address == "0x0000000000000000000000000000000000000000":
             return {"error": f"Token {token} has zero address on chain {chain_name}."}
 
-        entry = {
-            "chain": chain_name,
-            "symbol": token,
-            "balance": "Error",
-            "address": token_address,
-            "type": "ERC20",
-        }
-
         try:
             contract = w3_provider.eth.contract(address=token_address, abi=erc20_abi)
             balance_wei = await contract.functions.balanceOf(address).call()
             decimals = token_info.get("evmdecimals", 18)
             balance_fmt = Utils.unit_conversion(balance_wei, decimals, to_base=False)
-            entry["balance"] = str(balance_fmt)
         except Exception as e:
-            entry["balance"] = f"Error: {self._sanitize_error(e, 'fetching ERC20 balance')}"
+            return self._balance_error_entry(
+                chain_name, token, "ERC20", e, "fetching ERC20 balance", address=token_address
+            )
 
-        return entry
+        return {
+            "chain": chain_name,
+            "symbol": token,
+            "balance": str(balance_fmt),
+            "address": token_address,
+            "type": "ERC20",
+        }
 
     async def _fetch_erc20_balances_list(self, chain_id, chain_name, w3_provider, address: str):
         erc20_abi = [
@@ -738,6 +805,16 @@ class TransferClient(DexalotBaseClient):
             token_symbols, results, strict=False
         ):
             if isinstance(balance_wei, Exception):
+                balances.append(
+                    self._balance_error_entry(
+                        chain_name,
+                        symbol,
+                        "ERC20",
+                        balance_wei,
+                        "fetching ERC20 balance",
+                        address=token_address,
+                    )
+                )
                 continue
 
             balance_fmt = Utils.unit_conversion(balance_wei, decimals, to_base=False)

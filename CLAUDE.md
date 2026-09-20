@@ -69,7 +69,7 @@ Unit tests in `tests/unit/` have no external dependencies. Integration tests in 
 - **Async test** (`@pytest.mark.asyncio`): use `AsyncMock` for async dependencies; await the coroutine under test.
 - Pattern used in this repo: `patch.object(manager, "connect")` to block sync entrypoints that internally schedule `_run()`. Alternatively, patch `loop.create_task` with a side effect that calls `coro.close()` before returning a `MagicMock`.
 
-- `VERSION` file at repo root holds the current version (currently 0.4.0)
+- `VERSION` file at repo root holds the current version (currently 0.6.2)
 - `.env` files: never commit; use `env.example` as template
 - **`env.example` must be updated** whenever a new `DexalotConfig` field or env var is added — it is the canonical reference for operators
 - The error sanitizer strips file paths, URLs, and stack traces from user-facing errors. Use `log_level="DEBUG"` locally to get full context for debugging.
@@ -108,6 +108,9 @@ Unit tests in `tests/unit/` have no external dependencies. Integration tests in 
 - **RFQ swaps execute on `tx.to` / `order.maker`, never on the deployments `MainnetRFQ` address**: mainnet firm quotes are signed by one of several maker contracts (legacy MainnetRFQ 1.2.8 plus DexalotRFQ 2.x instances, each with its own `swapSigner` and EIP-712 domain) sitting behind `DexalotRouter` (`MainnetRFQ.trustedForwarder()`), whose fallback forwards `simpleSwap` calldata to `order.maker` with the sender appended. The deployments endpoint only lists the legacy address, so sending a quote there fails `RF-IS-01` whenever another maker won the quote. `execute_rfq_swap` resolves the target via `_resolve_rfq_execution_target`: `order.maker` must be in `router.getAllowedRFQs()` (discovered by `_get_rfq_targets`: router from the deployments endpoint's `DexalotRouter` entry, loaded best-effort by `_fetch_optional_contract_deployment`, else `MainnetRFQ.trustedForwarder()` on-chain; makers always on-chain since the API does not list them; cached in the static tier, lookup failures degrade to deployment-only and are not cached), `tx.to` must be the router or the maker, and `tx.data`/`tx.value` (when present) must equal the SDK's own encoding. The SDK always encodes `simpleSwap` itself from the embedded `_SIMPLE_SWAP_ABI`. `MainnetRFQ`/`DexalotRouter` deployments are keyed by the connected chain's `chain_config` name (`"Avalanche"` on mainnet, `"Fuji"` on testnet, via `_connected_chain_key`), which is what `_get_rfq_contract` looks up; before this, Fuji RFQ lookups always missed.
 - **ERC20 RFQ sells need an allowance on `order.maker`**: the maker contract does `transferFrom(taker)` itself, so approving the router or the legacy address does nothing. `execute_rfq_swap` pre-checks `allowance(taker, maker)` and fails with an actionable message; `approve_rfq_maker(quote)` grants exactly `takerAmount` (or `amount_wei`) after validating the maker against the allow-list. Native sells carry the amount as `msg.value` and skip both.
 - **`replace_order` cannot change order type/TIF/stp**: `cancelReplaceOrder` carries only a new price and quantity, so the replacement inherits the original `type1`/`type2`/`stp`. To change those, cancel and re-place (e.g. `cancel_add_list`). The method intentionally exposes no `time_in_force`/`stp` params.
+- **Wallet-balance entries never carry a string sentinel in `balance`**: `balance` is a numeric string on success or `None` on failure, and a failed entry carries an `error` key (built by `TransferClient._balance_error_entry`). `get_chain_wallet_balance` turns any error entry into `Result.fail` via `_balance_entry_result`. The plural methods (`get_chain_wallet_balances`, `get_all_chain_wallet_balances`) route entries through `_collect_balance_entries`, which drops failed entries from `chain_balances` and appends `"<chain> <symbol>: <msg>"` to an additive `errors` list; `_balances_result` returns `Result.fail` only when every lookup failed. `_fetch_erc20_balances_list` emits error entries for failed tokens instead of silently dropping them. Before v0.6.2 an RPC 500 produced `Result.ok({"balance": "Error: ..."})`, which was cached for 10 s and made consumers' `Decimal(balance)` raise `ConversionSyntax`.
+- **Failed `Result`s are never cached**: `ttl_cached` / `async_ttl_cached` skip `cache.set` when the return value is a `Result` with `success=False` (`_is_cacheable` in `utils/cache.py`), in all four tiers. Stampede waiters still receive the failed Result; the next caller retries. Tests that previously relied on a cached failure being "instant" (e.g. `test_get_deployment_uses_cache`) had to be rewritten to exercise a real success. Clear the relevant tier at the start of a test that asserts on a first-call failure, since a prior test may have cached a success for the same key.
+- **`_sanitize_error` takes a `level` keyword**: default `logging.ERROR` with `exc_info` attached (unchanged for all existing call sites). Tolerated failures (per-token balance lookups) pass `level=logging.WARNING`, and below ERROR the traceback is omitted so a transient RPC blip is one WARNING line, not a stack trace.
 
 ---
 
@@ -140,7 +143,8 @@ publishing (OIDC, `id-token: write`). The workflow also supports
   of-`origin/main` and `ref_type == tag` checks, plus `--provenance`).
   Consider porting those for defense-in-depth on the Python side.
 - Released versions so far: `v0.5.12` (first public release,
-  2026-04-06).
+  2026-04-06) through `v0.6.1`; `v0.6.2` (2026-09, balance-lookup
+  Result semantics + no caching of failed Results).
 
 ---
 

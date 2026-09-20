@@ -19,6 +19,13 @@ class TestSanitizeErrorMessage:
         assert "test context" in result
         assert "Invalid input parameter" in result
 
+    def test_sanitize_attribute_error(self):
+        """AttributeError maps to the generic 'Invalid operation' message."""
+        error = AttributeError("'NoneType' object has no attribute 'get'")
+        result = sanitize_error_message(error, "test context")
+        assert "Invalid operation" in result
+        assert "NoneType" not in result
+
     def test_remove_file_paths(self):
         """Test that file paths are removed."""
         # The regex pattern matches paths starting with /Users, /home, etc.
