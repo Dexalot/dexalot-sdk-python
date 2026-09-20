@@ -74,6 +74,12 @@ const client = new DexalotClient(createConfig({
 
 **Important:** Balance data is cached **per user address** to ensure data privacy and accuracy.
 
+**Failed lookups are never cached.** In every tier, a `Result` with `success=False`
+(RPC 500, API timeout, chain not connected) is returned to the caller but not stored,
+so the next call retries immediately rather than serving the failure for the rest of
+the TTL. Concurrent callers coalesced by stampede protection all receive the same
+failed `Result`.
+
 **When to customize:**
 - Set higher TTL (e.g., 30-60 seconds) for read-heavy applications
 - Set lower TTL (e.g., 1-5 seconds) for applications requiring near-real-time balances

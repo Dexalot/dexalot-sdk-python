@@ -401,11 +401,26 @@ result = await client.get_portfolio_balance(token="USDC")
 
 ```python
 result = await client.get_all_chain_wallet_balances()
+if result.success:
+    for entry in result.data["chain_balances"]:
+        # entry["balance"] is always a numeric string here
+        print(entry["chain"], entry["symbol"], entry["balance"])
+    for problem in result.data["errors"]:
+        # Lookups that failed (RPC error, chain not connected) are listed
+        # here instead of appearing in chain_balances.
+        print("skipped:", problem)
 ```
+
+`get_chain_wallet_balances(chain)` has the same shape. Both return
+`Result.fail` only when *every* lookup failed. The single-token
+`get_chain_wallet_balance(chain, token)` returns `Result.fail` on any
+failure, so `result.data["balance"]` is safe to convert with `Decimal`
+whenever `result.success` is true.
 
 For a known subset of tokens, `get_chain_token_balances` returns a flat
 `{symbol: balance}` map and errors if any of the requested tokens isn't
-available on the chain (rather than silently skipping it):
+available on the chain or could not be read (rather than silently skipping
+it):
 
 ```python
 result = await client.get_chain_token_balances(

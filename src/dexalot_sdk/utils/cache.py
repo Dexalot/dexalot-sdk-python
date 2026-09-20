@@ -1,9 +1,24 @@
+"""TTL caches and caching decorators.
+
+Both ``ttl_cached`` and ``async_ttl_cached`` skip storing a returned
+``Result`` whose ``success`` is ``False``: a transient failure (RPC 500,
+API timeout) must not be pinned for the tier's TTL.  Non-``Result`` values
+and successful ``Result`` values are cached as before.
+"""
+
 import asyncio
 import inspect
 import time
 from collections.abc import Callable, Hashable
 from functools import wraps
 from typing import Any
+
+from .result import Result
+
+
+def _is_cacheable(value: Any) -> bool:
+    """Return ``False`` for a failed ``Result``; ``True`` for everything else."""
+    return not (isinstance(value, Result) and not value.success)
 
 
 class MemoryCache:
@@ -95,7 +110,8 @@ def ttl_cached(cache: MemoryCache):
             if cached is not None:
                 return cached
             result = func(*args, **kwargs)
-            cache.set(key, result)
+            if _is_cacheable(result):
+                cache.set(key, result)
             return result
 
         return wrapper
@@ -112,6 +128,9 @@ def async_ttl_cached(cache: MemoryCache):
     Stampede protection: concurrent callers for the same uncached key are
     coalesced — the underlying function is called exactly once and all
     waiters receive the same result.
+
+    Failed ``Result`` values are handed to every waiter but are *not*
+    stored, so the next caller after the in-flight fetch retries.
     """
 
     def decorator(func: Callable):
@@ -162,7 +181,8 @@ def async_ttl_cached(cache: MemoryCache):
 
             try:
                 result = await func(*args, **kwargs)
-                cache.set(key, result)
+                if _is_cacheable(result):
+                    cache.set(key, result)
                 fut.set_result(result)
                 return result
             except Exception as e:

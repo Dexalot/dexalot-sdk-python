@@ -341,6 +341,8 @@ client.invalidate_cache(level="balance")  # Options: static, semi_static, balanc
 
 **Note:** Write operations (e.g., `add_order()`, `cancel_order()`, `deposit()`, `withdraw()`) are **never cached** to ensure data integrity.
 
+**Note:** A failed `Result` (`success=False`) is **never cached**, in any tier. A transient RPC or API failure is returned to the caller but the next call retries immediately instead of serving the failure for the rest of the TTL.
+
 ### Per-User Caching
 
 Balance data is cached per user address. When `address=None`, the SDK uses the connected wallet's address:
@@ -350,6 +352,33 @@ Balance data is cached per user address. When `address=None`, the SDK uses the c
 balance1 = await client.get_portfolio_balance("USDC")  # Uses connected wallet
 balance2 = await client.get_portfolio_balance("USDC", address="0xOtherUser")  # Different cache entry
 ```
+
+### Wallet Balance Results
+
+Chain-wallet balance methods return entries of the shape
+`{"chain", "symbol", "balance", "type"}` (ERC20 entries also carry `"address"`).
+`balance` is always a numeric string on success. A lookup that fails (RPC error,
+chain not connected, unknown token) never puts an error string in `balance`:
+
+- `get_chain_wallet_balance(chain, token)` returns `Result.fail(<sanitized message>)`.
+- `get_chain_wallet_balances(chain)` and `get_all_chain_wallet_balances()` drop the
+  failed entry from `chain_balances` and append `"<chain> <symbol>: <message>"` to
+  an additional `errors` list. The `Result` is still `ok` when at least one lookup
+  succeeded, and `fail` only when every lookup failed.
+- `get_chain_token_balances(chain, address, tokens)` fails the whole `Result` if any
+  requested token could not be read, so the returned map only ever holds numbers.
+
+```python
+result = await client.get_all_chain_wallet_balances()
+if result.success:
+    for entry in result.data["chain_balances"]:
+        print(entry["chain"], entry["symbol"], Decimal(entry["balance"]))
+    for problem in result.data["errors"]:
+        print("skipped:", problem)   # e.g. "Avalanche AVAX: Error fetching native balance: ..."
+```
+
+Tolerated per-entry failures are logged at `WARNING` without a traceback; use
+`log_level="DEBUG"` if you need the full exception locally.
 
 ### Performance Impact
 
